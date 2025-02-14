@@ -48,10 +48,12 @@ llama_prefill.cpp  prefill阶段实现
 四、加速效果
 
 已经实现的效果：
+
 √可交互的 UI 或网络服务 API（web_ui）；
 
-
 √适配一种加速软件栈后端，Nvidia、AMD、国产芯片或 OpenCL、九源后端均可（目前适配英特尔芯片加速指令）；
+
+
 
 ![第一轮对话(AVX)](e2.png) 
 
