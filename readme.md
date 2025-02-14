@@ -61,7 +61,7 @@ llama_prefill.cpp  prefill阶段实现
 
 ![第一轮对话(普通CPP)](e1.png) 
 
-这是AVX加速矩阵乘法的效果。
+这是没有加速的效果。可以看见，输出被截断的时候，速度明显慢于加速时。
 
 随着KV缓存增加，二者速度差值变小。在输出第一个token的时候，AVX的速度超过了10 token/s，而未加速版本是8 token/s的级别。avx_operators.hpp为具体实现。
 
