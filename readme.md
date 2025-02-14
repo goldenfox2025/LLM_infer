@@ -35,18 +35,19 @@ llama_prefill.cpp  prefill阶段实现
 
 已经实现的效果：
 √可交互的 UI 或网络服务 API（web_ui）；
+
+
 √适配一种加速软件栈后端，Nvidia、AMD、国产芯片或 OpenCL、九源后端均可（目前适配英特尔芯片加速指令）；
 
 ![第一轮对话(AVX)](e2.png) 
 这是AVX加速矩阵乘法的效果。
 
 ![第一轮对话(普通CPP)](e1.png) 
-这是AVX加速矩阵乘法的效果。
 
+这是AVX加速矩阵乘法的效果。
 随着KV缓存增加，二者速度差值变小。在输出第一个token的时候，AVX的速度超过了10 token/s，而未加速版本是8 token/s的级别。avx_operators.hpp为具体实现。
 
 ![多轮对话](e3.png) 
-
 本项目支持多轮对话。
 
 
