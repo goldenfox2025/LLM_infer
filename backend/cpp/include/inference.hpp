@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "tensor.hpp"
-
+#include "thread_pool.hpp"
 // 前向声明 LlamaModel
 class LlamaModel;
 
@@ -25,6 +25,8 @@ class KVCache {
   // 当前缓存 token 数
   size_t size() const { return current_len_; }
 
+
+  
   // 访问第 layer 层、位置 pos 的 K 缓存（返回引用）
   Tensor<float>& k_cache(size_t layer, size_t pos);
   // 访问第 layer 层、位置 pos 的 V 缓存（返回引用）
@@ -42,10 +44,11 @@ class KVCache {
 class InferenceEngine {
  public:
   // 构造时传入共享的 LlamaModel 实例
+
   InferenceEngine(std::shared_ptr<LlamaModel> model);
 
   // 生成单个 token
-  uint32_t generate_next_token(const std::vector<uint32_t>& input_ids,
+  uint32_t generate_next_token(ThreadPool& thread_pool ,const std::vector<uint32_t>& input_ids,
                                float temperature = 1.0f, float top_p = 0.9f,
                                size_t top_k = 50);
 
@@ -59,6 +62,8 @@ class InferenceEngine {
   void reset();
 
  private:
+
+  ThreadPool thread_pool_;
   std::shared_ptr<LlamaModel> model_;
   KVCache kv_cache_;
 };

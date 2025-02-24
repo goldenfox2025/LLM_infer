@@ -11,6 +11,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/LLM_infer/backend/cpp/src/inference.cpp" "CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.o" "gcc" "CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.o.d"
   "/home/LLM_infer/backend/cpp/src/llama_decode.cpp" "CMakeFiles/model_bridge.dir/backend/cpp/src/llama_decode.cpp.o" "gcc" "CMakeFiles/model_bridge.dir/backend/cpp/src/llama_decode.cpp.o.d"
   "/home/LLM_infer/backend/cpp/src/llama_prefill.cpp" "CMakeFiles/model_bridge.dir/backend/cpp/src/llama_prefill.cpp.o" "gcc" "CMakeFiles/model_bridge.dir/backend/cpp/src/llama_prefill.cpp.o.d"
+  "/home/LLM_infer/backend/cpp/src/thread_pool.cpp" "CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o" "gcc" "CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o.d"
   "/home/LLM_infer/interface/model_bridge.cpp" "CMakeFiles/model_bridge.dir/interface/model_bridge.cpp.o" "gcc" "CMakeFiles/model_bridge.dir/interface/model_bridge.cpp.o.d"
   )
 

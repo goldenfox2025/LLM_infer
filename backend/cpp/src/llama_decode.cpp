@@ -2,7 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-
+#include <future>
 #include "avx_operators.hpp"
 #include "inference.hpp"
 #include "llama.hpp"
@@ -128,7 +128,7 @@ void LlamaModel::print_model_info() const {
 //   std::cout << "]" << std::endl;
 // }
 
-Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
+Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,ThreadPool& thread_pool,
                                   KVCache* kv_cache) {
   //   std::cout << "=== Forward Pass Start ===" << std::endl;
   //   std::cout << "Input token IDs: ";
@@ -168,28 +168,44 @@ Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
     // hidden_states);
 
     // 计算查询向量
-    Tensor<float> wq = params_.at("wq" + std::to_string(layer));
-    // print_tensor_shape("wq - layer " + std::to_string(layer), wq);
-    Tensor<float> q_buf = avx_OP::matmul(hidden_states, wq);
-    // print_tensor_shape("q_buf - layer " + std::to_string(layer), q_buf);
-    Tensor<float> q_buf_view = q_buf.view({seq_len, n_q_h_, dqkv_});
-    // print_tensor_shape("q_buf_view - layer " + std::to_string(layer),
-    //  q_buf_view);
 
-    // 计算键和值
+
+
+    Tensor<float> wq = params_.at("wq" + std::to_string(layer));
     Tensor<float> wk = params_.at("wk" + std::to_string(layer));
     Tensor<float> wv = params_.at("wv" + std::to_string(layer));
-    // print_tensor_shape("wk - layer " +
-    // std::to_string(layer), wk);
 
-    Tensor<float> k_buf = avx_OP::matmul(hidden_states, wk);
-    Tensor<float> v_buf = avx_OP::matmul(hidden_states, wv);
+    // 使用线程池并行计算 q_buf, k_buf, v_buf
+    Tensor<float> q_buf, k_buf, v_buf;
 
-    // print_tensor_shape("k_buf - layer " +
-    // std::to_string(layer), k_buf);
-    // print_tensor_shape("v_buf - layer " +
-    // std::to_string(layer), v_buf);
+    auto compute_qkv = [&](std::function<Tensor<float>()> matmul_func, Tensor<float>& result) {
+        result = matmul_func();
+    };
 
+    // 向线程池提交并行任务
+    std::vector<std::future<void>> futures;
+    futures.push_back(std::async(std::launch::async, [&]() {
+        compute_qkv([&]() { return avx_OP::matmul(hidden_states, wq); }, q_buf);
+    }));
+
+    futures.push_back(std::async(std::launch::async, [&]() {
+        compute_qkv([&]() { return avx_OP::matmul(hidden_states, wk); }, k_buf);
+    }));
+
+    futures.push_back(std::async(std::launch::async, [&]() {
+        compute_qkv([&]() { return avx_OP::matmul(hidden_states, wv); }, v_buf);
+    }));
+
+    // 等待所有任务完成
+    for (auto& future : futures) {
+        future.get(); // 等待每个任务完成
+    }
+
+    // print_tensor_shape("q_buf - layer " + std::to_string(layer), q_buf);
+
+
+
+    Tensor<float> q_buf_view = q_buf.view({seq_len, n_q_h_, dqkv_});
     Tensor<float> k_buf_view = k_buf.view({seq_len, n_kv_h_, dqkv_});
     Tensor<float> v_buf_view = v_buf.view({seq_len, n_kv_h_, dqkv_});
     OP::rope(&q_buf_view, current_pos, rope_theta_);

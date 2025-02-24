@@ -201,6 +201,30 @@ backend/cpp/src/llama_prefill.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/llama_prefill.cpp.s
 .PHONY : backend/cpp/src/llama_prefill.cpp.s
 
+backend/cpp/src/thread_pool.o: backend/cpp/src/thread_pool.cpp.o
+.PHONY : backend/cpp/src/thread_pool.o
+
+# target to build an object file
+backend/cpp/src/thread_pool.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o
+.PHONY : backend/cpp/src/thread_pool.cpp.o
+
+backend/cpp/src/thread_pool.i: backend/cpp/src/thread_pool.cpp.i
+.PHONY : backend/cpp/src/thread_pool.i
+
+# target to preprocess a source file
+backend/cpp/src/thread_pool.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.i
+.PHONY : backend/cpp/src/thread_pool.cpp.i
+
+backend/cpp/src/thread_pool.s: backend/cpp/src/thread_pool.cpp.s
+.PHONY : backend/cpp/src/thread_pool.s
+
+# target to generate assembly for a file
+backend/cpp/src/thread_pool.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.s
+.PHONY : backend/cpp/src/thread_pool.cpp.s
+
 interface/model_bridge.o: interface/model_bridge.cpp.o
 .PHONY : interface/model_bridge.o
 
@@ -243,6 +267,9 @@ help:
 	@echo "... backend/cpp/src/llama_prefill.o"
 	@echo "... backend/cpp/src/llama_prefill.i"
 	@echo "... backend/cpp/src/llama_prefill.s"
+	@echo "... backend/cpp/src/thread_pool.o"
+	@echo "... backend/cpp/src/thread_pool.i"
+	@echo "... backend/cpp/src/thread_pool.s"
 	@echo "... interface/model_bridge.o"
 	@echo "... interface/model_bridge.i"
 	@echo "... interface/model_bridge.s"

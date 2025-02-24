@@ -83,9 +83,10 @@ InferenceEngine::InferenceEngine(std::shared_ptr<LlamaModel> model)
     : model_(model),
       // 使用模型参数初始化 KVCache
       kv_cache_(model_->get_n_layers(), model_->get_max_seq_len(),
-                model_->get_head_dim() * model_->get_n_kv_heads()) {}
+                model_->get_head_dim() * model_->get_n_kv_heads()),
+      thread_pool_(4){}
 
-uint32_t InferenceEngine::generate_next_token(
+uint32_t InferenceEngine::generate_next_token(ThreadPool& thread_pool,
     const std::vector<uint32_t>& input_ids, float temperature, float top_p,
     size_t top_k) {
   // 构造输入张量，取 input_ids 中最后一个 token
@@ -100,7 +101,7 @@ uint32_t InferenceEngine::generate_next_token(
   }
 
   // 前向计算，传入 KVCache 的地址
-  Tensor<float> logits = model_->forward(&input, &kv_cache_);
+  Tensor<float> logits = model_->forward(&input,thread_pool, &kv_cache_);
 
   // 根据 logits 采样下一个 token
   uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
@@ -134,7 +135,7 @@ void InferenceEngine::generate_with_callback(
                                 {input_ids.size()});
 
   // 调用 prefill，一次性处理全部 input_ids
-  Tensor<float> prefill_logits = model_->prefill(&input_tensor, &kv_cache_);
+  Tensor<float> prefill_logits = model_->prefill(&input_tensor, &kv_cache_,thread_pool_);
   // prefill_logits.shape = [seq_len, vocab_size]
   size_t seq_len = input_ids.size();
   if (seq_len == 0) {
@@ -165,7 +166,7 @@ void InferenceEngine::generate_with_callback(
     //   callback(-1);  // 传递 -1 表示超出
     //   break;
     // }
-    next_token = generate_next_token(output, temperature, top_p, top_k);
+    next_token = generate_next_token(thread_pool_,output, temperature, top_p, top_k);
     output.push_back(next_token);
     callback(next_token);
     if (next_token == model_->get_eos_token_id()) {
