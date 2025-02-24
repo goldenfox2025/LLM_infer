@@ -5,7 +5,7 @@
 
 #include "inference.hpp"
 #include "tensor.hpp"
-
+#include "thread_pool.hpp"
 class LlamaModel {
  public:
   LlamaModel(const std::unordered_map<std::string, Tensor<float>>& params,
@@ -15,9 +15,8 @@ class LlamaModel {
 
   // 前向计算
   Tensor<float> forward(const Tensor<uint32_t>* input,
-                        KVCache* kv_cache = nullptr);
-  Tensor<float> prefill(const Tensor<uint32_t>* input,
-                        KVCache* kv_cache = nullptr);
+                        ThreadPool& thread_pool,KVCache* kv_cache = nullptr);
+  Tensor<float> prefill(const Tensor<uint32_t>* input, KVCache* kv_cache,ThreadPool& thread_pool);
 
   std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
                                  size_t max_length, float temperature = 1.0f,

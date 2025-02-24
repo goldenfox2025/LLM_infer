@@ -125,12 +125,27 @@ CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/LLM_infer/backend/cpp/src/inference.cpp -o CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.s
 
+CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o: CMakeFiles/model_bridge.dir/flags.make
+CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o: /home/LLM_infer/backend/cpp/src/thread_pool.cpp
+CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o: CMakeFiles/model_bridge.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/LLM_infer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o -MF CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o.d -o CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o -c /home/LLM_infer/backend/cpp/src/thread_pool.cpp
+
+CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/LLM_infer/backend/cpp/src/thread_pool.cpp > CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.i
+
+CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/LLM_infer/backend/cpp/src/thread_pool.cpp -o CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.s
+
 # Object files for target model_bridge
 model_bridge_OBJECTS = \
 "CMakeFiles/model_bridge.dir/interface/model_bridge.cpp.o" \
 "CMakeFiles/model_bridge.dir/backend/cpp/src/llama_decode.cpp.o" \
 "CMakeFiles/model_bridge.dir/backend/cpp/src/llama_prefill.cpp.o" \
-"CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.o"
+"CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.o" \
+"CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o"
 
 # External object files for target model_bridge
 model_bridge_EXTERNAL_OBJECTS =
@@ -139,6 +154,7 @@ model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/interf
 model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/backend/cpp/src/llama_decode.cpp.o
 model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/backend/cpp/src/llama_prefill.cpp.o
 model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/backend/cpp/src/inference.cpp.o
+model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/backend/cpp/src/thread_pool.cpp.o
 model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/build.make
 model_bridge.cpython-312-x86_64-linux-gnu.so: /home/libtorch/libtorch/lib/libtorch.so
 model_bridge.cpython-312-x86_64-linux-gnu.so: /home/libtorch/libtorch/lib/libc10.so
@@ -150,7 +166,7 @@ model_bridge.cpython-312-x86_64-linux-gnu.so: /home/libtorch/libtorch/lib/libc10
 model_bridge.cpython-312-x86_64-linux-gnu.so: /usr/lib/x86_64-linux-gnu/libcudart.so
 model_bridge.cpython-312-x86_64-linux-gnu.so: /usr/lib/x86_64-linux-gnu/libnvToolsExt.so
 model_bridge.cpython-312-x86_64-linux-gnu.so: CMakeFiles/model_bridge.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/LLM_infer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Linking CXX shared module model_bridge.cpython-312-x86_64-linux-gnu.so"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/LLM_infer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX shared module model_bridge.cpython-312-x86_64-linux-gnu.so"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/model_bridge.dir/link.txt --verbose=$(VERBOSE)
 	/usr/bin/strip /home/LLM_infer/build/model_bridge.cpython-312-x86_64-linux-gnu.so
 

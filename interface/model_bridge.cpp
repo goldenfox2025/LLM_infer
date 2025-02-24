@@ -11,7 +11,6 @@
 
 enum class ModelType {
   LLAMA,
-  // 未来可以添加其他模型类型
 };
 
 class ModelFactory {

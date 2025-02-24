@@ -94,18 +94,11 @@ def create_callback(tokenizer, q: queue.Queue):
     accumulated_tokens = []
     last_output = ""  # 记录上一次完整解码后的文本
     last_token_time = None  # 用于计算 token 生成速度
+    start_time = time.time()  # 记录开始时间
+    total_tokens = 0  # 记录生成的总 token 数
 
     def token_callback(token):
-        nonlocal last_output, last_token_time
-
-        # 如果 token 为 -1，则说明生成过程中出现错误或需要中断
-        # if token == -1:
-        #     q.put(json.dumps({
-        #         "disable_input": True,
-        #         "restart": True,
-        #         "diff": "<br><b>Generation stopped. Please restart the conversation.</b>"
-        #     }))
-        #     return
+        nonlocal last_output, last_token_time, total_tokens, start_time
 
         current_time = time.time()
         speed = None
@@ -116,14 +109,24 @@ def create_callback(tokenizer, q: queue.Queue):
         last_token_time = current_time
 
         accumulated_tokens.append(token)
+        total_tokens += 1
         new_text = tokenizer.decode(accumulated_tokens)
         diff = new_text[len(last_output):]
         last_output = new_text
         if diff:
             # 替换换行符为 <br> 用于 HTML 显示
             diff = diff.replace("\n", "<br>")
-            # 将文本差量和生成速度一起放入队列（用 JSON 封装）
-            q.put(json.dumps({"diff": diff, "speed": speed if speed is not None else 0.0}))
+            # 计算总耗时和平均速度
+            total_time = current_time - start_time
+            avg_speed = total_tokens / total_time if total_time > 0 else 0.0
+            # 将文本差量、生成速度、总耗时、token 数等信息放入队列（用 JSON 封装）
+            q.put(json.dumps({
+                "diff": diff,
+                "speed": speed if speed is not None else 0.0,
+                "total_time": total_time,
+                "total_tokens": total_tokens,
+                "avg_speed": avg_speed
+            }))
     return token_callback
 
 # -------------------------------
@@ -132,7 +135,6 @@ def create_callback(tokenizer, q: queue.Queue):
 
 @app.route("/")
 def index():
-
     return """
     <!DOCTYPE html>
     <html>
@@ -227,7 +229,9 @@ def index():
         <div class="header">Chat with the Assistant</div>
         <div id="chat" class="chat-area"></div>
         <div id="token_speed" style="padding: 10px 20px; font-size: 0.9em; color: #666;">Token Speed: N/A</div>
-        <!-- Restart Chat 按钮，默认隐藏 -->
+        <div id="total_time" style="padding: 10px 20px; font-size: 0.9em; color: #666;">Total Time: N/A</div>
+        <div id="total_tokens" style="padding: 10px 20px; font-size: 0.9em; color: #666;">Total Tokens: N/A</div>
+        <div id="avg_speed" style="padding: 10px 20px; font-size: 0.9em; color: #666;">Average Speed: N/A</div>
         <div style="padding: 0 20px;">
           <button id="restart_button" style="display:none; margin: 10px 0;" onclick="restartChat()">Restart Chat</button>
         </div>
@@ -262,15 +266,12 @@ def index():
           addMessage("user", message);
           input.value = '';
           
-          // 新建一个容器用于助手回复
           const replyContainer = addMessage("assistant", "");
           
-          // 获取用户设置的参数
           const temperature = document.getElementById('temperature').value;
           const topk = document.getElementById('topk').value;
           const topp = document.getElementById('topp').value;
           
-          // 使用 EventSource 连接流式接口，并将参数传递过去
           const evtSource = new EventSource("/chat_stream?message=" + encodeURIComponent(message) +
                                              "&temperature=" + encodeURIComponent(temperature) +
                                              "&topk=" + encodeURIComponent(topk) +
@@ -278,7 +279,6 @@ def index():
           evtSource.onmessage = function(event) {
             try {
               const data = JSON.parse(event.data);
-              // 如果收到禁用输入的标记，则禁用所有输入，并显示重启按钮
               if (data.disable_input) {
                 document.getElementById('user_input').disabled = true;
                 document.getElementById('temperature').disabled = true;
@@ -293,6 +293,11 @@ def index():
               if (data.speed !== undefined && data.speed !== null) {
                 document.getElementById('token_speed').innerText = "Token Speed: " + data.speed.toFixed(2) + " tokens/sec";
               }
+              if (data.total_time !== undefined && data.total_tokens !== undefined) {
+                document.getElementById('total_time').innerText = "Total Time: " + data.total_time.toFixed(2) + " seconds";
+                document.getElementById('total_tokens').innerText = "Total Tokens: " + data.total_tokens;
+                document.getElementById('avg_speed').innerText = "Average Speed: " + data.avg_speed.toFixed(2) + " tokens/sec";
+              }
             } catch (e) {
               console.error("Failed to parse event data:", event.data);
             }
@@ -302,8 +307,7 @@ def index():
             evtSource.close();
           };
         }
-        
-        // 重启对话的函数：调用后端 /restart 接口，清空对话记录并重新启用输入
+
         function restartChat() {
           const restartBtn = document.getElementById('restart_button');
           restartBtn.disabled = true;
@@ -311,16 +315,16 @@ def index():
             .then(response => response.json())
             .then(data => {
                if (data.status === "ok") {
-                   // 清空对话区域
                    document.getElementById('chat').innerHTML = "";
                    document.getElementById('token_speed').innerText = "Token Speed: N/A";
-                   // 重新启用输入控件
+                   document.getElementById('total_time').innerText = "Total Time: N/A";
+                   document.getElementById('total_tokens').innerText = "Total Tokens: N/A";
+                   document.getElementById('avg_speed').innerText = "Average Speed: N/A";
                    document.getElementById('user_input').disabled = false;
                    document.getElementById('temperature').disabled = false;
                    document.getElementById('topk').disabled = false;
                    document.getElementById('topp').disabled = false;
                    document.querySelector('.input-area button').disabled = false;
-                   // 隐藏重启按钮
                    restartBtn.style.display = "none";
                } else {
                    alert("Restart failed: " + data.message);
@@ -393,7 +397,6 @@ def chat_stream():
             msg = q.get()
             if msg is None:
                 break
-            # SSE 格式要求每条消息以 "data: " 开头，并以 "\n\n" 结束
             yield f"data: {msg}\n\n"
     
     return Response(event_stream(), mimetype="text/event-stream")

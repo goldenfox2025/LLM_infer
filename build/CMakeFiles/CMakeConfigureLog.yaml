@@ -1809,3 +1809,90 @@ events:
         8.9 
       exitCode: 0
 ...
+
+---
+events:
+  -
+    kind: "try_run-v1"
+    backtrace:
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/public/cuda.cmake:99 (try_run)"
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/Caffe2Config.cmake:86 (include)"
+      - "/home/libtorch/libtorch/share/cmake/Torch/TorchConfig.cmake:68 (find_package)"
+      - "CMakeLists.txt:15 (find_package)"
+    directories:
+      source: "/home/LLM_infer/build/CMakeFiles/CMakeTmp"
+      binary: "/home/LLM_infer/build/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/libtorch/libtorch/share/cmake/Caffe2;/home/libtorch/libtorch/share/cmake/Caffe2/public/../Modules_CUDA_fix"
+    buildResult:
+      variable: "compile_result"
+      cached: true
+      stdout: |
+        Change Dir: '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_44e59/fast
+        gmake[1]: Entering directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        /usr/bin/gmake  -f CMakeFiles/cmTC_44e59.dir/build.make CMakeFiles/cmTC_44e59.dir/build
+        gmake[2]: Entering directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        Building CXX object CMakeFiles/cmTC_44e59.dir/detect_cuda_version.cc.o
+        /usr/bin/c++   -std=gnu++17 -o CMakeFiles/cmTC_44e59.dir/detect_cuda_version.cc.o -c /home/LLM_infer/build/detect_cuda_version.cc
+        Linking CXX executable cmTC_44e59
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_44e59.dir/link.txt --verbose=1
+        /usr/bin/c++ CMakeFiles/cmTC_44e59.dir/detect_cuda_version.cc.o -o cmTC_44e59  /usr/lib/x86_64-linux-gnu/libcudart.so 
+        gmake[2]: Leaving directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        gmake[1]: Leaving directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        
+      exitCode: 0
+    runResult:
+      variable: "run_result"
+      cached: true
+      stdout: |
+        12.0
+      exitCode: 0
+  -
+    kind: "try_run-v1"
+    backtrace:
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/Modules_CUDA_fix/upstream/FindCUDA/select_compute_arch.cmake:113 (try_run)"
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/Modules_CUDA_fix/upstream/FindCUDA/select_compute_arch.cmake:173 (CUDA_DETECT_INSTALLED_GPUS)"
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/public/utils.cmake:333 (cuda_select_nvcc_arch_flags)"
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/public/cuda.cmake:327 (torch_cuda_get_nvcc_gencode_flag)"
+      - "/home/libtorch/libtorch/share/cmake/Caffe2/Caffe2Config.cmake:86 (include)"
+      - "/home/libtorch/libtorch/share/cmake/Torch/TorchConfig.cmake:68 (find_package)"
+      - "CMakeLists.txt:15 (find_package)"
+    directories:
+      source: "/home/LLM_infer/build/CMakeFiles/CMakeTmp"
+      binary: "/home/LLM_infer/build/CMakeFiles/CMakeTmp"
+    cmakeVariables:
+      CMAKE_CUDA_FLAGS: ""
+      CMAKE_CUDA_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/home/libtorch/libtorch/share/cmake/Caffe2;/home/libtorch/libtorch/share/cmake/Caffe2/public/../Modules_CUDA_fix"
+    buildResult:
+      variable: "compile_result"
+      cached: true
+      stdout: |
+        Change Dir: '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_02df6/fast
+        gmake[1]: Entering directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        /usr/bin/gmake  -f CMakeFiles/cmTC_02df6.dir/build.make CMakeFiles/cmTC_02df6.dir/build
+        gmake[2]: Entering directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        Building CUDA object CMakeFiles/cmTC_02df6.dir/detect_cuda_compute_capabilities.cu.o
+        /usr/bin/nvcc -forward-unknown-to-host-compiler   -std=c++17 -MD -MT CMakeFiles/cmTC_02df6.dir/detect_cuda_compute_capabilities.cu.o -MF CMakeFiles/cmTC_02df6.dir/detect_cuda_compute_capabilities.cu.o.d -x cu -c /home/LLM_infer/build/detect_cuda_compute_capabilities.cu -o CMakeFiles/cmTC_02df6.dir/detect_cuda_compute_capabilities.cu.o
+        Linking CUDA executable cmTC_02df6
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_02df6.dir/link.txt --verbose=1
+        /usr/lib/nvidia-cuda-toolkit/bin/g++ @CMakeFiles/cmTC_02df6.dir/objects1.rsp -o cmTC_02df6 @CMakeFiles/cmTC_02df6.dir/linkLibs.rsp -L"/usr/lib/x86_64-linux-gnu/stubs" -L"/usr/lib/x86_64-linux-gnu"
+        gmake[2]: Leaving directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        gmake[1]: Leaving directory '/home/LLM_infer/build/CMakeFiles/CMakeTmp'
+        
+      exitCode: 0
+    runResult:
+      variable: "run_result"
+      cached: true
+      stdout: |
+        8.9 
+      exitCode: 0
+...
