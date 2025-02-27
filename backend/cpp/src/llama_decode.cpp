@@ -1,8 +1,9 @@
 #include <cmath>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <string>
-#include <future>
+
 #include "avx_operators.hpp"
 #include "inference.hpp"
 #include "llama.hpp"
@@ -128,8 +129,8 @@ void LlamaModel::print_model_info() const {
 //   std::cout << "]" << std::endl;
 // }
 
-Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,ThreadPool& thread_pool,
-                                  KVCache* kv_cache) {
+Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
+                                  ThreadPool& thread_pool, KVCache* kv_cache) {
   //   std::cout << "=== Forward Pass Start ===" << std::endl;
   //   std::cout << "Input token IDs: ";
   // for (size_t i = 0; i < input->numel(); i++) {
@@ -169,8 +170,6 @@ Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,ThreadPool& thre
 
     // 计算查询向量
 
-
-
     Tensor<float> wq = params_.at("wq" + std::to_string(layer));
     Tensor<float> wk = params_.at("wk" + std::to_string(layer));
     Tensor<float> wv = params_.at("wv" + std::to_string(layer));
@@ -178,32 +177,25 @@ Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,ThreadPool& thre
     // 使用线程池并行计算 q_buf, k_buf, v_buf
     Tensor<float> q_buf, k_buf, v_buf;
 
-    auto compute_qkv = [&](std::function<Tensor<float>()> matmul_func, Tensor<float>& result) {
+    auto compute_qkv = [&](std::function<Tensor<float>()> matmul_func,
+                           Tensor<float>& result) {
+      return [&, matmul_func]() {  // 返回一个 lambda 作为 Task
+                                   // 的执行体，捕获 result 的引用
         result = matmul_func();
+      };
     };
 
-    // 向线程池提交并行任务
-    std::vector<std::future<void>> futures;
-    futures.push_back(std::async(std::launch::async, [&]() {
-        compute_qkv([&]() { return avx_OP::matmul(hidden_states, wq); }, q_buf);
-    }));
+    // 提交任务到线程池
+    thread_pool.enqueueTask(std::make_shared<OpTask>(compute_qkv(
+        [&]() { return avx_OP::matmul(hidden_states, wq); }, q_buf)));
+    thread_pool.enqueueTask(std::make_shared<OpTask>(compute_qkv(
+        [&]() { return avx_OP::matmul(hidden_states, wk); }, k_buf)));
+    thread_pool.enqueueTask(std::make_shared<OpTask>(compute_qkv(
+        [&]() { return avx_OP::matmul(hidden_states, wv); }, v_buf)));
 
-    futures.push_back(std::async(std::launch::async, [&]() {
-        compute_qkv([&]() { return avx_OP::matmul(hidden_states, wk); }, k_buf);
-    }));
-
-    futures.push_back(std::async(std::launch::async, [&]() {
-        compute_qkv([&]() { return avx_OP::matmul(hidden_states, wv); }, v_buf);
-    }));
-
-    // 等待所有任务完成
-    for (auto& future : futures) {
-        future.get(); // 等待每个任务完成
-    }
+    thread_pool.waitForAllTasks();  // 等待所有任务完成
 
     // print_tensor_shape("q_buf - layer " + std::to_string(layer), q_buf);
-
-
 
     Tensor<float> q_buf_view = q_buf.view({seq_len, n_q_h_, dqkv_});
     Tensor<float> k_buf_view = k_buf.view({seq_len, n_kv_h_, dqkv_});
