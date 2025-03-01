@@ -177,21 +177,14 @@ Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
     // 使用线程池并行计算 q_buf, k_buf, v_buf
     Tensor<float> q_buf, k_buf, v_buf;
 
-    auto compute_qkv = [&](std::function<Tensor<float>()> matmul_func,
-                           Tensor<float>& result) {
-      return [&, matmul_func]() {  // 返回一个 lambda 作为 Task
-                                   // 的执行体，捕获 result 的引用
-        result = matmul_func();
-      };
-    };
+    thread_pool.enqueueTask(std::make_shared<OpTask>(
+        [&]() { q_buf = avx_OP::matmul(hidden_states, wq); }));
 
-    // 提交任务到线程池
-    thread_pool.enqueueTask(std::make_shared<OpTask>(compute_qkv(
-        [&]() { return avx_OP::matmul(hidden_states, wq); }, q_buf)));
-    thread_pool.enqueueTask(std::make_shared<OpTask>(compute_qkv(
-        [&]() { return avx_OP::matmul(hidden_states, wk); }, k_buf)));
-    thread_pool.enqueueTask(std::make_shared<OpTask>(compute_qkv(
-        [&]() { return avx_OP::matmul(hidden_states, wv); }, v_buf)));
+    thread_pool.enqueueTask(std::make_shared<OpTask>(
+        [&]() { k_buf = avx_OP::matmul(hidden_states, wk); }));
+
+    thread_pool.enqueueTask(std::make_shared<OpTask>(
+        [&]() { v_buf = avx_OP::matmul(hidden_states, wv); }));
 
     thread_pool.waitForAllTasks();  // 等待所有任务完成
 
