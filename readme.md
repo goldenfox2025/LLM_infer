@@ -39,11 +39,17 @@ llama.hpp	LLAMA模型结构定义/权重加载
 
 tensor.hpp	张量数据结构实现
 
+thread_pool.hpp 线程池
+
+---
+
 inference.cpp  推理引擎等具体实现
 
 llama_decode.cpp  decode阶段实现
 
 llama_prefill.cpp  prefill阶段实现
+
+thread_pool.cpp 线程池实现
 
 四、加速效果
 
