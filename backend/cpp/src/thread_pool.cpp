@@ -2,7 +2,6 @@
 
 OpTask::OpTask(std::function<void()> op) : op(std::move(op)) {}
 void OpTask::execute() { op(); }
-
 ThreadPool::ThreadPool(size_t numThreads)
     : stop(false), taskCount(0) {  // 初始化 taskCount 为 0
   for (size_t i = 0; i < numThreads; i++) {
