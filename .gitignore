@@ -1,6 +1,5 @@
 /target
-Cargo.lock
 .vscode
 /models
 /docs
-.Ds_Store
+/build
