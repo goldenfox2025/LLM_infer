@@ -11,9 +11,6 @@
 #include <thread>
 #include <vector>
 
-// 假设 Tensor 是一个模板类，在其他地方有定义
-template <typename T>
-class Tensor;
 
 // 通用任务类，可以接受任意算子函数
 class Task {
