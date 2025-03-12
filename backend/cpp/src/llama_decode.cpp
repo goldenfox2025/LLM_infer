@@ -201,8 +201,8 @@ Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
       //             << "] Writing current token K/V into
       //             KVCache at pos "
       // << current_pos << std::endl;
-      kv_cache->k_cache(layer, current_pos) = k_buf_view.clone();
-      kv_cache->v_cache(layer, current_pos) = v_buf_view.clone();
+      kv_cache->k_cache(layer, current_pos) = k_buf_view;
+      kv_cache->v_cache(layer, current_pos) = v_buf_view;
     }
     // print_tensor_shape("k_buf_view - layer " +
     // std::to_string(layer),

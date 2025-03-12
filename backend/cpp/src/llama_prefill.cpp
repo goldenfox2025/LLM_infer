@@ -59,8 +59,8 @@ Tensor<float> LlamaModel::prefill(const Tensor<uint32_t>* input,
     OP::rope(&k_buf_view, offset, rope_theta_);
 
     if (kv_cache) {
-      Tensor<float> k_buf_contiguous = k_buf.clone();
-      Tensor<float> v_buf_contiguous = v_buf.clone();
+      Tensor<float> k_buf_contiguous = k_buf;
+      Tensor<float> v_buf_contiguous = v_buf;
       size_t row_size = n_kv_h_ * dqkv_;
       for (size_t i = 0; i < seq_len; i++) {
         const float* k_ptr = k_buf_contiguous.data_ptr() + i * row_size;

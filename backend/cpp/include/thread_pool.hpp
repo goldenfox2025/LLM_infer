@@ -23,7 +23,6 @@ class OpTask : public Task {
  public:
   explicit OpTask(std::function<void()> op);
   void execute() override;
-
  private:
   std::function<void()> op;
 };
