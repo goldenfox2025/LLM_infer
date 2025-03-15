@@ -129,6 +129,30 @@ model_bridge/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/build
 .PHONY : model_bridge/fast
 
+backend/cpp/src/cudaOP.o: backend/cpp/src/cudaOP.cu.o
+.PHONY : backend/cpp/src/cudaOP.o
+
+# target to build an object file
+backend/cpp/src/cudaOP.cu.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/cudaOP.cu.o
+.PHONY : backend/cpp/src/cudaOP.cu.o
+
+backend/cpp/src/cudaOP.i: backend/cpp/src/cudaOP.cu.i
+.PHONY : backend/cpp/src/cudaOP.i
+
+# target to preprocess a source file
+backend/cpp/src/cudaOP.cu.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/cudaOP.cu.i
+.PHONY : backend/cpp/src/cudaOP.cu.i
+
+backend/cpp/src/cudaOP.s: backend/cpp/src/cudaOP.cu.s
+.PHONY : backend/cpp/src/cudaOP.s
+
+# target to generate assembly for a file
+backend/cpp/src/cudaOP.cu.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/backend/cpp/src/cudaOP.cu.s
+.PHONY : backend/cpp/src/cudaOP.cu.s
+
 backend/cpp/src/inference.o: backend/cpp/src/inference.cpp.o
 .PHONY : backend/cpp/src/inference.o
 
@@ -258,6 +282,9 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... model_bridge"
+	@echo "... backend/cpp/src/cudaOP.o"
+	@echo "... backend/cpp/src/cudaOP.i"
+	@echo "... backend/cpp/src/cudaOP.s"
 	@echo "... backend/cpp/src/inference.o"
 	@echo "... backend/cpp/src/inference.i"
 	@echo "... backend/cpp/src/inference.s"

@@ -81,12 +81,12 @@ clean: CMakeFiles/model_bridge.dir/clean
 CMakeFiles/model_bridge.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/model_bridge.dir/build.make CMakeFiles/model_bridge.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/LLM_infer/build/CMakeFiles --progress-num=1,2,3,4,5,6 "Built target model_bridge"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/LLM_infer/build/CMakeFiles --progress-num=1,2,3,4,5,6,7,8 "Built target model_bridge"
 .PHONY : CMakeFiles/model_bridge.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/model_bridge.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/LLM_infer/build/CMakeFiles 6
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/LLM_infer/build/CMakeFiles 8
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/model_bridge.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/LLM_infer/build/CMakeFiles 0
 .PHONY : CMakeFiles/model_bridge.dir/rule

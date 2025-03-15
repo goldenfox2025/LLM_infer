@@ -411,6 +411,14 @@ CMakeFiles/model_bridge.dir/interface/model_bridge.cpp.o: \
  /usr/include/c++/13/iostream \
  /home/LLM_infer/backend/cpp/include/inference.hpp \
  /home/LLM_infer/backend/cpp/include/tensor.hpp \
+ /usr/include/cuda_runtime.h /usr/include/crt/host_config.h \
+ /usr/include/builtin_types.h /usr/include/device_types.h \
+ /usr/include/crt/host_defines.h /usr/include/driver_types.h \
+ /usr/include/vector_types.h /usr/include/surface_types.h \
+ /usr/include/texture_types.h /usr/include/library_types.h \
+ /usr/include/channel_descriptor.h /usr/include/cuda_runtime_api.h \
+ /usr/include/cuda_device_runtime_api.h /usr/include/driver_functions.h \
+ /usr/include/vector_functions.h /usr/include/vector_functions.hpp \
  /home/LLM_infer/backend/cpp/include/thread_pool.hpp \
  /usr/include/c++/13/atomic /usr/include/c++/13/condition_variable \
  /usr/include/c++/13/queue /usr/include/c++/13/bits/stl_queue.h \
