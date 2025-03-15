@@ -89,4 +89,4 @@ inline Tensor<float> matmul(const Tensor<float>& a, const Tensor<float>& b) {
   return result;
 }
 
-}  
+}  // namespace avx_OP

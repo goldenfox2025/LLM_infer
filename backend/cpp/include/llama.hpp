@@ -14,9 +14,16 @@ class LlamaModel {
   void print_model_info() const;
 
   // 前向计算
-  Tensor<float> forward(const Tensor<uint32_t>* input,
-                        ThreadPool& thread_pool,KVCache* kv_cache = nullptr);
-  Tensor<float> prefill(const Tensor<uint32_t>* input, KVCache* kv_cache,ThreadPool& thread_pool);
+  Tensor<float> forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+                        KVCache* kv_cache);
+  Tensor<float> prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+                        KVCache* kv_cache);
+  Tensor<float> prefill_cpu(const Tensor<uint32_t>* input, KVCache* kv_cache,
+                            ThreadPool& thread_pool);
+  Tensor<float> prefill_cuda(const Tensor<uint32_t>* input, KVCache* kv_cache);
+  Tensor<float> forward_cpu(const Tensor<uint32_t>* input,
+                            ThreadPool& thread_pool, KVCache* kv_cache);
+  Tensor<float> forward_cuda(const Tensor<uint32_t>* input, KVCache* kv_cachel);
 
   std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
                                  size_t max_length, float temperature = 1.0f,
@@ -28,6 +35,11 @@ class LlamaModel {
   size_t get_head_dim() const { return dqkv_; }
   size_t get_n_kv_heads() const { return n_kv_h_; }
   uint32_t get_eos_token_id() const { return eos_token_id_; }
+
+  // CUDA support methods
+  LlamaModel& cuda();
+  LlamaModel& cpu();
+  Device device() const { return device_; }
 
  private:
   // 基础参数
@@ -46,4 +58,5 @@ class LlamaModel {
 
   // 模型参数
   std::unordered_map<std::string, Tensor<float>> params_;
+  Device device_;
 };

@@ -362,10 +362,13 @@ def chat_stream():
         topp = 1.0
     
     # 初始化对话历史：包含系统提示和用户输入
+    
+    # conversation = "<|system|>\nYou are a friendly chatbot who always responds in the style of a pirate.</s>"
+    # conversation += f"<|user|>user\n{user_message}\n"
+    # conversation += "<|assistant|>\n"
     conversation = "<|im_start|>system\nYou're a helpful assistant.\n<|im_end|>\n"
     conversation += f"<|im_start|>user\n{user_message}\n<|im_end|>\n"
     conversation += "<|im_start|>assistant\n"
-    
     # 编码对话
     encoded = tokenizer.encode(conversation)
     input_ids = encoded.ids
@@ -380,7 +383,7 @@ def chat_stream():
         generate_text_stream(
             input_ids,
             token_callback,
-            max_length=100,
+            max_length=200,
             temperature=temperature,
             top_p=topp,
             top_k=topk
@@ -419,4 +422,4 @@ def restart():
 
 if __name__ == "__main__":
     # 启动 Flask 服务
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True, use_reloader=False)
