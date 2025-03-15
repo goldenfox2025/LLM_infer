@@ -82,23 +82,36 @@ void silu(Tensor<T>* out, const Tensor<T>* x) {
 // - top_k: 仅保留概率最高的 top_k 个候选（若为 0 则不进行 top-k 过滤）。
 inline uint32_t sample(const Tensor<float>* logits, float temperature,
                        float top_p, size_t top_k) {
+  if (logits->device() == Device::CUDA) {
+    throw std::runtime_error("sample: logits must be on CPU");
+  }
+
   // 检查 logits 形状，要求为 [1, vocab_size]
   const auto& shape = logits->sizes();
+
   if (shape.size() != 2 || shape[0] != 1) {
     throw std::runtime_error(
         "sample: logits must be a 2D tensor with shape [1, vocab_size]");
   }
   size_t vocab_size = shape[1];
-  const float* logits_ptr = logits->data_ptr();
 
-  // 温度缩放，并计算 softmax 概率（数值稳定：先减去最大值）
+  const float* logits_ptr = logits->data_ptr();
+  if (logits_ptr == nullptr) {
+    std::cerr << "[OP::sample] 错误: logits_ptr 为空!" << std::endl;
+    throw std::runtime_error("logits_ptr is null");
+  }
+
   std::vector<float> scaled_logits(vocab_size);
-  for (size_t i = 0; i < vocab_size; i++) {
+
+  for (size_t i = 1; i < vocab_size; i++) {
     scaled_logits[i] = logits_ptr[i] / temperature;
   }
+
   float max_logit =
       *std::max_element(scaled_logits.begin(), scaled_logits.end());
-  std::vector<float> exp_logits(vocab_size);
+
+  std::vector<float> exp_logits(vocab_size);  // 直接构造指定大小的vector
+
   float sum_exp = 0.0f;
   for (size_t i = 0; i < vocab_size; i++) {
     exp_logits[i] = std::exp(scaled_logits[i] - max_logit);
@@ -111,20 +124,22 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
 
   // 调试打印：初始 softmax 后前 5 的 token
   // {
-  // std::vector<uint32_t> all_indices(vocab_size);
-  // std::iota(all_indices.begin(), all_indices.end(), 0);
-  // std::sort(
-  //     all_indices.begin(), all_indices.end(),
-  //     [&](uint32_t a, uint32_t b) { return logits_ptr[a] > logits_ptr[b]; });
-  // std::cout << "【调试】初始 softmax 前 5:" << std::endl;
-  // for (size_t i = 0; i < 5 && i < all_indices.size(); i++) {
-  //   uint32_t idx = all_indices[i];
-  //   std::cout << "  idx = " << idx << ", prob = " << logits_ptr[idx]
-  //             << std::endl;
-  // }
+  //   std::vector<uint32_t> all_indices(vocab_size);
+  //   std::iota(all_indices.begin(), all_indices.end(), 0);
+  //   std::sort(
+  //       all_indices.begin(), all_indices.end(),
+  //       [&](uint32_t a, uint32_t b) { return logits_ptr[a] > logits_ptr[b];
+  //       });
+  //   std::cout << "[OP::sample] 初始 softmax 前 5:" << std::endl;
+  //   for (size_t i = 0; i < 5 && i < all_indices.size(); i++) {
+  //     uint32_t idx = all_indices[i];
+  //     std::cout << "  idx = " << idx << ", prob = " << logits_ptr[idx]
+  //               << std::endl;
+  //   }
   // }
 
   // 构造候选 token 下标的数组（初始时全部候选）
+  // std::cout << "[OP::sample] 初始化候选索引..." << std::endl;
   std::vector<uint32_t> indices(vocab_size);
   for (size_t i = 0; i < vocab_size; i++) {
     indices[i] = static_cast<uint32_t>(i);
@@ -132,19 +147,24 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
 
   // 先应用 top-k 过滤：保留概率最高的 top_k 个候选
   if (top_k > 0 && top_k < vocab_size) {
+    // std::cout << "[OP::sample] 应用 top-k 过滤 (k=" << top_k << ")..."
+    //           << std::endl;
     std::sort(indices.begin(), indices.end(),
               [&](uint32_t a, uint32_t b) { return probs[a] > probs[b]; });
     indices.resize(top_k);
     // 经过 top-k 过滤后的前 5
-    // std::cout << "【调试】top-k 过滤后:" << std::endl;
+    // std::cout << "[OP::sample] top-k 过滤后前 5:" << std::endl;
     // for (size_t i = 0; i < 5 && i < indices.size(); i++) {
     //   uint32_t idx = indices[i];
     //   std::cout << "  idx = " << idx << ", prob = " << probs[idx] <<
     //   std::endl;
     // }
   }
-  // 再应用 top-p (nucleus) 过滤：按概率降序累计，保留累计概率达到 top_p 的候选
+
+  // 再应用 top-p (nucleus) 过滤
   if (top_p < 1.0f) {
+    // std::cout << "[OP::sample] 应用 top-p 过滤 (p=" << top_p << ")..."
+    //           << std::endl;
     std::sort(indices.begin(), indices.end(),
               [&](uint32_t a, uint32_t b) { return probs[a] > probs[b]; });
     float cumulative = 0.0f;
@@ -157,8 +177,7 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
       }
     }
     indices = top_p_indices;
-    // 经过 top-p 过滤后的前 5
-    // std::cout << "【调试】top-p 过滤后:" << std::endl;
+    // std::cout << "[OP::sample] top-p 过滤后前 5:" << std::endl;
     // for (size_t i = 0; i < 5 && i < indices.size(); i++) {
     //   uint32_t idx = indices[i];
     //   std::cout << "  idx = " << idx << ", prob = " << probs[idx] <<
@@ -167,6 +186,7 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
   }
 
   // 重新归一化候选 token 的概率
+  // std::cout << "[OP::sample] 重新归一化概率..." << std::endl;
   float prob_sum = 0.0f;
   for (uint32_t idx : indices) {
     prob_sum += probs[idx];
@@ -177,20 +197,23 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
   }
 
   // 调试打印：归一化后的候选 token（前 5）
-  // std::cout << "【调试】归一化候选分布:" << std::endl;
+  // std::cout << "[OP::sample] 归一化后的候选分布:" << std::endl;
   // for (size_t i = 0; i < 5 && i < indices.size(); i++) {
   //   uint32_t idx = indices[i];
   //   std::cout << "  idx = " << idx << ", norm_prob = " << renorm_probs[i]
   //             << std::endl;
   // }
+
   // 使用随机数生成器和离散分布进行采样
+  // std::cout << "[OP::sample] 开始随机采样..." << std::endl;
   std::random_device rd;
   std::mt19937 gen(rd());
   std::discrete_distribution<> dist(renorm_probs.begin(), renorm_probs.end());
   uint32_t chosen = indices[dist(gen)];
+  // std::cout << "[OP::sample] 采样结果: " << chosen << std::endl;
+  // std::cout << "[OP::sample] ====== 采样完成 ======\n" << std::endl;
   return chosen;
 }
-
 // 逐元素乘法
 template <typename T>
 void multiply(Tensor<T>* out, const Tensor<T>* a, const Tensor<T>* b) {

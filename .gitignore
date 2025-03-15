@@ -2,4 +2,4 @@
 .vscode
 /models
 /docs
-/build
+build
