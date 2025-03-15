@@ -74,32 +74,6 @@ CMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG
 //Flags used by the CXX compiler during RELWITHDEBINFO builds.
 CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG
 
-//C compiler
-CMAKE_C_COMPILER:FILEPATH=/usr/bin/cc
-
-//A wrapper around 'ar' adding the appropriate '--plugin' option
-// for the GCC compiler
-CMAKE_C_COMPILER_AR:FILEPATH=/usr/bin/gcc-ar-13
-
-//A wrapper around 'ranlib' adding the appropriate '--plugin' option
-// for the GCC compiler
-CMAKE_C_COMPILER_RANLIB:FILEPATH=/usr/bin/gcc-ranlib-13
-
-//Flags used by the C compiler during all build types.
-CMAKE_C_FLAGS:STRING=
-
-//Flags used by the C compiler during DEBUG builds.
-CMAKE_C_FLAGS_DEBUG:STRING=-g
-
-//Flags used by the C compiler during MINSIZEREL builds.
-CMAKE_C_FLAGS_MINSIZEREL:STRING=-Os -DNDEBUG
-
-//Flags used by the C compiler during RELEASE builds.
-CMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG
-
-//Flags used by the C compiler during RELWITHDEBINFO builds.
-CMAKE_C_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG
-
 //Path to a program.
 CMAKE_DLLTOOL:FILEPATH=CMAKE_DLLTOOL-NOTFOUND
 
@@ -275,7 +249,7 @@ CUDA_GENERATED_OUTPUT_DIR:PATH=
 CUDA_HOST_COMPILATION_CPP:BOOL=ON
 
 //Host side compiler used by NVCC
-CUDA_HOST_COMPILER:FILEPATH=/usr/bin/cc
+CUDA_HOST_COMPILER:FILEPATH=
 
 //Path to a program.
 CUDA_NVCC_EXECUTABLE:FILEPATH=/usr/bin/nvcc
@@ -531,9 +505,6 @@ PYTHON_LIBRARY:FILEPATH=/root/miniconda3/lib/libpython3.12.so
 //Path to a library.
 TORCH_LIBRARY:FILEPATH=/home/libtorch/libtorch/lib/libtorch.so
 
-//The directory containing a CMake configuration file for Torch.
-Torch_DIR:PATH=/home/libtorch/libtorch/share/cmake/Torch
-
 //Path to a library.
 c10_LIBRARY:FILEPATH=/home/libtorch/libtorch/lib/libc10.so
 
@@ -551,9 +522,6 @@ llm_infer_SOURCE_DIR:STATIC=/home/LLM_infer
 
 //Path to a file.
 nvtx3_dir:PATH=nvtx3_dir-NOTFOUND
-
-//The directory containing a CMake configuration file for pybind11.
-pybind11_DIR:PATH=pybind11_DIR-NOTFOUND
 
 
 ########################
@@ -608,22 +576,6 @@ CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED:INTERNAL=1
 CMAKE_CXX_FLAGS_RELEASE-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_CXX_FLAGS_RELWITHDEBINFO
 CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_COMPILER
-CMAKE_C_COMPILER-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_COMPILER_AR
-CMAKE_C_COMPILER_AR-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_COMPILER_RANLIB
-CMAKE_C_COMPILER_RANLIB-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS
-CMAKE_C_FLAGS-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_DEBUG
-CMAKE_C_FLAGS_DEBUG-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_MINSIZEREL
-CMAKE_C_FLAGS_MINSIZEREL-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_RELEASE
-CMAKE_C_FLAGS_RELEASE-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_C_FLAGS_RELWITHDEBINFO
-CMAKE_C_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_DLLTOOL
 CMAKE_DLLTOOL-ADVANCED:INTERNAL=1
 //Executable file format
@@ -911,7 +863,7 @@ FIND_PACKAGE_MESSAGE_DETAILS_CUDAToolkit:INTERNAL=[/usr/include][12.0.140][/usr/
 //Details about finding PYTHON
 FIND_PACKAGE_MESSAGE_DETAILS_PYTHON:INTERNAL=/root/miniconda3/bin/python3.12.8
 //Details about finding Python
-FIND_PACKAGE_MESSAGE_DETAILS_Python:INTERNAL=[/root/miniconda3/envs/cudat/bin/python3][cfound components: Interpreter ][v3.12.8()]
+FIND_PACKAGE_MESSAGE_DETAILS_Python:INTERNAL=[/root/miniconda3/bin/python3][cfound components: Interpreter ][v3.12.8()]
 //Details about finding PythonInterp
 FIND_PACKAGE_MESSAGE_DETAILS_PythonInterp:INTERNAL=[/root/miniconda3/bin/python][v3.12.8(3.12)]
 //Details about finding Threads
@@ -920,8 +872,6 @@ FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 FIND_PACKAGE_MESSAGE_DETAILS_Torch:INTERNAL=[/home/libtorch/libtorch/lib/libtorch.so][/home/libtorch/libtorch/include;/home/libtorch/libtorch/include/torch/csrc/api/include][v()]
 //Test HAS_FLTO
 HAS_FLTO:INTERNAL=1
-//Python executable during the last CMake run
-PYBIND11_PYTHON_EXECUTABLE_LAST:INTERNAL=/root/miniconda3/envs/cudat/bin/python3
 //ADVANCED property for variable: PYTHON_EXECUTABLE
 PYTHON_EXECUTABLE-ADVANCED:INTERNAL=1
 PYTHON_INCLUDE_DIRS:INTERNAL=/root/miniconda3/include/python3.12
@@ -945,10 +895,10 @@ _Python_Compiler_REASON_FAILURE:INTERNAL=
 //Development reason failure
 _Python_Development_REASON_FAILURE:INTERNAL=
 //Path to a program.
-_Python_EXECUTABLE:INTERNAL=/root/miniconda3/envs/cudat/bin/python3
+_Python_EXECUTABLE:INTERNAL=/root/miniconda3/bin/python3
 //Python Properties
-_Python_INTERPRETER_PROPERTIES:INTERNAL=Python;3;12;8;64;32;;cpython-312-x86_64-linux-gnu;abi3;/root/miniconda3/envs/cudat/lib/python3.12;/root/miniconda3/envs/cudat/lib/python3.12;/root/miniconda3/envs/cudat/lib/python3.12/site-packages;/root/miniconda3/envs/cudat/lib/python3.12/site-packages
-_Python_INTERPRETER_SIGNATURE:INTERNAL=83208b2488b60d8dd4f9de9270ae45af
+_Python_INTERPRETER_PROPERTIES:INTERNAL=Python;3;12;8;64;32;;cpython-312-x86_64-linux-gnu;abi3;/root/miniconda3/lib/python3.12;/root/miniconda3/lib/python3.12;/root/miniconda3/lib/python3.12/site-packages;/root/miniconda3/lib/python3.12/site-packages
+_Python_INTERPRETER_SIGNATURE:INTERNAL=2555dcb70f063531c052c106adb316bf
 //NumPy reason failure
 _Python_NumPy_REASON_FAILURE:INTERNAL=
 //Result of TRY_COMPILE
