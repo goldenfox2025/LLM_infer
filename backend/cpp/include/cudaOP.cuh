@@ -18,7 +18,7 @@ Tensor<float> matmul(const Tensor<float> &A, const Tensor<float> &B,
                      cudaStream_t stream = 0);
 void rope(Tensor<float> *tensor, size_t current_pos, float theta);
 void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
-             bool mask = true, size_t heads = 1, size_t offset = 0);
+             bool mask = true);
 void silu(Tensor<float> *output, Tensor<float> *input);
 void multiply(Tensor<float> *output, const Tensor<float> *A,
               const Tensor<float> *B);
