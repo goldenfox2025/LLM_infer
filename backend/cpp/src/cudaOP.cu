@@ -61,19 +61,6 @@ void gather(Tensor<float> *output, const Tensor<uint32_t> *input,
   int embed_dim = static_cast<int>(output->sizes()[1]);
   int vocab_size = static_cast<int>(embedding_table->sizes()[0]);
 
-  // 打印输入参数信息
-  // printf("[CUDA gather] Parameters:\n");
-  // printf("  seq_len=%d, embed_dim=%d, vocab_size=%d\n", seq_len, embed_dim,
-  // vocab_size); printf("  input shape: [%zu], device=%s\n",
-  //        input->numel(),
-  //        input->device() == Device::CUDA ? "CUDA" : "CPU");
-  // //printf("  embedding_table shape: [%zu, %zu], device=%s\n",
-  //        embedding_table->sizes()[0], embedding_table->sizes()[1],
-  //        embedding_table->device() == Device::CUDA ? "CUDA" : "CPU");
-  // //printf("  output shape: [%zu, %zu], device=%s\n",
-  //        output->sizes()[0], output->sizes()[1],
-  //        output->device() == Device::CUDA ? "CUDA" : "CPU");
-
   // 验证设备一致性
   if (input->device() != Device::CUDA ||
       embedding_table->device() != Device::CUDA ||
@@ -139,6 +126,41 @@ void rms_norm(Tensor<float> *output, const Tensor<float> *input,
 // --------------------------------------------------
 // matmul 算子实现
 // --------------------------------------------------
+// __global__ void matmul_kernel(const float *A, const float *B, float *C, int
+// M,
+//                               int K, int N) {
+//   __shared__ float As[16][16];
+//   __shared__ float Bs[16][16];
+//   int row = blockIdx.y * 16 + threadIdx.y;
+//   int col = blockIdx.x * 16 + threadIdx.x;
+//   float sum = 0.0f;
+//   for (int t = 0; t < (16 + K - 1) / 16; ++t) {
+//     int A_col = t * 16 + threadIdx.x;
+//     if (row < M && A_col < K) {
+//       As[threadIdx.y][threadIdx.x] = A[row * K + A_col];
+//     } else {
+//       As[threadIdx.y][threadIdx.x] = 0.0f;
+//     }
+//     int B_row = t * 16 + threadIdx.y;
+//     if (col < N && B_row < K) {
+//       Bs[threadIdx.y][threadIdx.x] = B[B_row * N + col];
+//     } else {
+//       Bs[threadIdx.y][threadIdx.x] = 0.0f;
+//     }
+//     __syncthreads();
+
+//     for (int k = 0; k < 16; ++k) {
+//       sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+//     }
+
+//     __syncthreads();
+//   }
+
+//   if (row < M && col < N) {
+//     C[row * N + col] = sum;
+//   }
+// }
+
 __global__ void matmul_kernel(const float *A, const float *B, float *C, int m,
                               int k, int n) {
   int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -372,7 +394,7 @@ __global__ void multiply_kernel(const float *A, const float *B, float *out,
 
 void multiply(Tensor<float> *output, const Tensor<float> *A,
               const Tensor<float> *B) {
-  size_t total = A.numel();
+  size_t total = A->numel();
   int threads = 256;
   int blocks = (total + threads - 1) / threads;
   multiply_kernel<<<blocks, threads>>>(A->data_ptr(), B->data_ptr(),
@@ -707,9 +729,5 @@ void compute_att_output_prefill(const Tensor<float> &att_probs,
   checkCudaError(cudaGetLastError());
   checkCudaError(cudaDeviceSynchronize());
 }
-
-// --------------------------------------------------
-// 重排attention heads数据的kernel
-// --------------------------------------------------
 
 } // namespace cuda_OP
