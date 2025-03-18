@@ -283,7 +283,7 @@ void rope(Tensor<float> *x, size_t offset, float theta) {
 // 3D softmax 内核（用于 3D 张量，假设 softmax 操作在
 // dim==2，即对序列长度进行归一化），支持 mask 逻辑
 __global__ void softmax_3d_kernel(float *data, int seq_len, int n_heads,
-                                  int total_seq_len, bool mask) {
+                                  int total_seq_len, bool mask, int offset) {
   int idx = blockIdx.x;
   int seq_id = idx / n_heads;
   int head_id = idx % n_heads;
@@ -293,7 +293,7 @@ __global__ void softmax_3d_kernel(float *data, int seq_len, int n_heads,
     int valid_length = total_seq_len;
     if (mask) {
       int query_index = idx / n_heads;
-      valid_length = query_index + 1;
+      valid_length = (offset > 0 ? offset + query_index : query_index) + 1;
       if (valid_length > total_seq_len) {
         valid_length = total_seq_len;
       }
@@ -322,7 +322,7 @@ __global__ void softmax_3d_kernel(float *data, int seq_len, int n_heads,
 // CUDA 版 softmax 函数（默认 mask 为 true，可手动传入
 // false），要求输出张量与输入张量形状一致
 void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
-             bool mask) {
+             bool mask, int offset) {
   // 如果 output 与 input 不同，则先复制数据（设备内拷贝）
   if (output != input) {
     size_t total = 1;
@@ -339,14 +339,14 @@ void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
     int total_seq_len = shape[2];
     int total_rows = seq_len * n_heads;
     softmax_3d_kernel<<<total_rows, 1>>>(output->data_ptr(), seq_len, n_heads,
-                                         total_seq_len, mask);
+                                         total_seq_len, mask, offset);
   } else if (shape.size() == 2 && dim == 1) {
     int seq_len = 1;
     int n_heads = shape[0];
     int total_seq_len = shape[1];
     int total_rows = seq_len * n_heads;
     softmax_3d_kernel<<<total_rows, 1>>>(output->data_ptr(), seq_len, n_heads,
-                                         total_seq_len, mask);
+                                         total_seq_len, mask, offset);
   } else {
     throw std::runtime_error(
         "softmax: Unsupported tensor dimension or dim value");

@@ -536,7 +536,7 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
                                       n_kv_h_);
 
     cuda_OP::softmax(&att_scores, &att_scores,
-                     /*dim=*/1, false);
+                     /*dim=*/1, false, current_pos);
 
     // Debug print attention scores
     // debugPrintTensor(att_scores,
