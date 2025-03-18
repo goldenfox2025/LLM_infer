@@ -129,10 +129,11 @@ if __name__ == "__main__":
             continue
 
         # 构造对话文本（包含系统提示和用户输入）
-        conversation = "<|system|>\nYou are a friendly chatbot who always responds in the style of a pirate.</s>"
-        conversation += f"<|user|>user\n{user_message}\n"
+        conversation = "<|system|>\nYou are a friendly chatbot who always responds in the style of a pirate.</s>\n"
+        conversation += f"<|user|>user\n{user_message}</s>\n"
         conversation += "<|assistant|>\n"
         encoded = tokenizer.encode(conversation)
+       
         input_ids = encoded.ids
 
         # 使用队列和回调函数传递生成信息

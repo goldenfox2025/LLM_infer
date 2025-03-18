@@ -1,26 +1,13 @@
 #include "cudaOP.cuh"
-
+#include <cstdio> // //printf
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <math.h>
-
 #include <iostream>
+#include <math.h>
 #include <stdexcept>
 #include <vector>
 
 namespace cuda_OP {
-
-// 将print_cuda_memory_usage移到命名空间开始处
-void print_cuda_memory_usage(const char *location) {
-  // 完全注释掉函数内部的所有打印
-  // size_t free_mem, total_mem;
-  // cudaMemGetInfo(&free_mem, &total_mem);
-  // std::cout << "[CUDA Memory at " << location << "]" << std::endl;
-  // std::cout << "  总内存: " << total_mem / (1024*1024) << " MB" << std::endl;
-  // std::cout << "  已用内存: " << (total_mem - free_mem) / (1024*1024) << "
-  // MB" << std::endl; std::cout << "  可用内存: " << free_mem / (1024*1024) <<
-  // " MB" << std::endl;
-}
 
 // --------------------------------------------------
 // 内联函数：检查 CUDA 错误
@@ -38,10 +25,8 @@ void checkCudaError(cudaError_t error) {
 // --------------------------------------------------
 // kernel：output[i, :] = embedding_table[input[i], :]
 // CUDA kernel 使用二维线程块与网格
-#include <cstdio>    // //printf
-#include <stdexcept> // runtime_error
 
-// 假设 embedding_table: [vocab_size, embed_dim]
+// embedding_table: [vocab_size, embed_dim]
 // input: [seq_len] (里面是 token_id)
 // output: [seq_len, embed_dim]
 __global__ void gather_kernel(const uint32_t *input,
@@ -50,60 +35,23 @@ __global__ void gather_kernel(const uint32_t *input,
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
   int total = seq_len * embed_dim;
-
-  // 打印线程信息（仅在第一个线程）
-  if (tid == 0) {
-    // printf("[CUDA gather_kernel] Thread info: blockDim=%d, gridDim=%d,
-    // total=%d\n",
-    //   blockDim.x, gridDim.x, total);
-  }
-
-  // 遍历所有元素
   for (int idx = tid; idx < total; idx += stride) {
-    int row = idx / embed_dim; // 计算行索引
-    int col = idx % embed_dim; // 计算列索引
-
-    // 详细的边界检查
-    if (row >= seq_len) {
-      // //printf("[CUDA gather_kernel] ERROR: Row index out of bounds: row=%d,
-      // seq_len=%d\n",
-      //        row, seq_len);
+    int row = idx / embed_dim;
+    int col = idx % embed_dim;
+    if (row >= seq_len || col >= embed_dim) {
       continue;
     }
-
     uint32_t token_id = input[row];
     if (token_id >= vocab_size) {
-      // //printf("[CUDA gather_kernel] ERROR: Token ID out of bounds:
-      // token_id=%u, vocab_size=%d, row=%d\n",
-      //        token_id, vocab_size, row);
       continue;
     }
-
-    if (col >= embed_dim) {
-      // //printf("[CUDA gather_kernel] ERROR: Column index out of bounds:
-      // col=%d, embed_dim=%d\n",
-      //        col, embed_dim);
-      continue;
-    }
-
     int emb_index = token_id * embed_dim + col;
     if (emb_index >= vocab_size * embed_dim) {
-      // //printf("[CUDA gather_kernel] ERROR: Embedding index out of bounds:
-      // emb_index=%d, max_index=%d\n",
-      //        emb_index, vocab_size * embed_dim - 1);
       continue;
     }
 
-    // 读取并写入数据
     float value = embedding_table[emb_index];
     output[idx] = value;
-
-    // 打印一些样本数据（仅在第一个线程的前几个元素）
-    if (tid == 0 && idx < 5) {
-      // printf("[CUDA gather_kernel] Sample: idx=%d, row=%d, col=%d,
-      // token_id=%u, emb_index=%d, value=%f\n",
-      //   idx, row, col, token_id, emb_index, value);
-    }
   }
 }
 
@@ -142,29 +90,19 @@ void gather(Tensor<float> *output, const Tensor<uint32_t> *input,
   int total = seq_len * embed_dim;
   int blocks = (total + threadsPerBlock - 1) / threadsPerBlock;
 
-  // 打印CUDA启动参数
-  // printf("[CUDA gather] Launch parameters: blocks=%d, threadsPerBlock=%d\n",
-  //  blocks, threadsPerBlock);
-
   gather_kernel<<<blocks, threadsPerBlock>>>(
       input->data_ptr(), embedding_table->data_ptr(), output->data_ptr(),
       seq_len, embed_dim, vocab_size);
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
-    // printf("[CUDA gather] Kernel launch error: %s\n",
-    // cudaGetErrorString(err));
     throw std::runtime_error("CUDA gather kernel launch failed");
   }
 
   err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
-    // printf("[CUDA gather] Synchronization error: %s\n",
-    // cudaGetErrorString(err));
     throw std::runtime_error("CUDA gather synchronization failed");
   }
-
-  // printf("[CUDA gather] Operation completed successfully\n");
 }
 
 // --------------------------------------------------
@@ -189,7 +127,7 @@ __global__ void rms_norm_kernel(const float *input, float *output,
 
 void rms_norm(Tensor<float> *output, const Tensor<float> *input,
               const Tensor<float> *weight, float eps) {
-  // 假定 input/output shape 均为 [seq_len, d]
+  // input/output shape 均为 [seq_len, d]
   size_t seq_len = input->sizes()[0];
   size_t d = input->sizes()[1];
   rms_norm_kernel<<<seq_len, 1>>>(input->data_ptr(), output->data_ptr(),
@@ -199,7 +137,7 @@ void rms_norm(Tensor<float> *output, const Tensor<float> *input,
 }
 
 // --------------------------------------------------
-// matmul 算子实现（使用 cuBLAS）
+// matmul 算子实现
 // --------------------------------------------------
 __global__ void matmul_kernel(const float *A, const float *B, float *C, int m,
                               int k, int n) {
@@ -208,24 +146,11 @@ __global__ void matmul_kernel(const float *A, const float *B, float *C, int m,
 
   if (row < m && col < n) {
     float sum = 0.0f;
-    // 仅在计算 C[0] 时打印 A 和 B 的值
-    // if (row == 0 && col == 0) {
-    //   printf("Calculating C[0]:\n");
-    // }
     for (int i = 0; i < k; ++i) {
       float a_val = A[row * k + i];
       float b_val = B[col * k + i];
-
       sum += a_val * b_val;
-      // if (row == 0 && col == 0) {
-      //   // 这里用 i 作为 key，打印对应 A 和 B 的值
-      //   printf("sum %.8f: A[%d] = %.8f, B[%d] = %.8f\n", sum, i, a_val, i,
-      //          b_val);
-      // }
     }
-    // if (row == 0 && col == 0) {
-    //   printf("C[0] = %.8f\n", sum);
-    // }
     C[row * n + col] = sum;
   }
 }
@@ -238,22 +163,19 @@ Tensor<float> matmul(const Tensor<float> &A, const Tensor<float> &B,
   size_t m = A_shape[0];
   size_t k = A_shape[1];
   size_t n = B_shape[1];
-  // std::cout << m << " " << k << " " << n << std::endl;
   Tensor<float> C({m, n}, Device::CUDA);
 
   // 启动 CUDA 核
-  dim3 threadsPerBlock(32, 32); // 每个线程块的维度
+
+  dim3 threadsPerBlock(32, 32);
   dim3 numBlocks((m + threadsPerBlock.x - 1) / threadsPerBlock.x,
-                 (n + threadsPerBlock.y - 1) / threadsPerBlock.y); // 块的数量
+                 (n + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
   // 计算矩阵乘法 C = A * B^T
   matmul_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
       A.data_ptr(), B.data_ptr(), C.data_ptr(), m, k, n);
 
-  // 检查CUDA错误
-
   cudaError_t err = cudaGetLastError();
-
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA kernel launch failed: " +
                              std::string(cudaGetErrorString(err)));
@@ -338,36 +260,38 @@ void rope(Tensor<float> *x, size_t offset, float theta) {
 
 // 3D softmax 内核（用于 3D 张量，假设 softmax 操作在
 // dim==2，即对序列长度进行归一化），支持 mask 逻辑
-__global__ void softmax_3d_kernel(float *data, int batch_size, int n_heads,
-                                  int seq_len, bool mask, int offset,
-                                  int heads) {
+__global__ void softmax_3d_kernel(float *data, int seq_len, int n_heads,
+                                  int total_seq_len, bool mask) {
   int idx = blockIdx.x;
-  int batch_id = idx / n_heads;
+  int seq_id = idx / n_heads;
   int head_id = idx % n_heads;
-  if (batch_id < batch_size && head_id < n_heads) {
-    int start_idx = batch_id * (n_heads * seq_len) + head_id * seq_len;
-    int valid_length = seq_len;
+  if (seq_id < seq_len && head_id < n_heads) {
+    int start_idx =
+        seq_id * (n_heads * total_seq_len) + head_id * total_seq_len;
+    int valid_length = total_seq_len;
     if (mask) {
-      int query_index = idx / heads; // 与 CPU 版本一致，outer = batch_size *
-                                     // n_heads，query_index = outer / heads
-      valid_length = (offset > 0 ? offset + query_index : query_index) + 1;
-      if (valid_length > seq_len)
-        valid_length = seq_len;
+      int query_index = idx / n_heads;
+      valid_length = query_index + 1;
+      if (valid_length > total_seq_len) {
+        valid_length = total_seq_len;
+      }
     }
     float max_val = -1e9f;
-    for (int i = 0; i < seq_len; i++) {
+    for (int i = 0; i < total_seq_len; i++) {
       float val = (mask && (i >= valid_length)) ? -1e9f : data[start_idx + i];
       if (val > max_val)
         max_val = val;
     }
+
     float sum = 0.0f;
-    for (int i = 0; i < seq_len; i++) {
+
+    for (int i = 0; i < total_seq_len; i++) {
       float val = (mask && (i >= valid_length)) ? -1e9f : data[start_idx + i];
       float exp_val = expf(val - max_val);
       data[start_idx + i] = exp_val;
       sum += exp_val;
     }
-    for (int i = 0; i < seq_len; i++) {
+    for (int i = 0; i < total_seq_len; i++) {
       data[start_idx + i] /= sum;
     }
   }
@@ -376,7 +300,7 @@ __global__ void softmax_3d_kernel(float *data, int batch_size, int n_heads,
 // CUDA 版 softmax 函数（默认 mask 为 true，可手动传入
 // false），要求输出张量与输入张量形状一致
 void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
-             bool mask, size_t heads, size_t offset) {
+             bool mask) {
   // 如果 output 与 input 不同，则先复制数据（设备内拷贝）
   if (output != input) {
     size_t total = 1;
@@ -386,24 +310,21 @@ void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
                               total * sizeof(float), cudaMemcpyDeviceToDevice));
   }
   const std::vector<size_t> &shape = input->sizes();
-  // 对于 3D 张量，假设 softmax 操作在 dim==2，即对序列长度归一化
+  // 我们对序列长度归一化
   if (shape.size() == 3 && dim == 2) {
-    int batch_size = shape[0];
+    int seq_len = shape[0];
     int n_heads = shape[1];
-    int seq_len = shape[2];
-    int total_rows = batch_size * n_heads;
-    softmax_3d_kernel<<<total_rows, 1>>>(
-        output->data_ptr(), batch_size, n_heads, seq_len, mask,
-        static_cast<int>(offset), static_cast<int>(heads));
-  }
-  else if (shape.size() == 2 && dim == 1) {
-    int batch_size = 1;
+    int total_seq_len = shape[2];
+    int total_rows = seq_len * n_heads;
+    softmax_3d_kernel<<<total_rows, 1>>>(output->data_ptr(), seq_len, n_heads,
+                                         total_seq_len, mask);
+  } else if (shape.size() == 2 && dim == 1) {
+    int seq_len = 1;
     int n_heads = shape[0];
-    int seq_len = shape[1];
-    int total_rows = batch_size * n_heads;
-    softmax_3d_kernel<<<total_rows, 1>>>(
-        output->data_ptr(), batch_size, n_heads, seq_len, mask,
-        static_cast<int>(offset), static_cast<int>(heads));
+    int total_seq_len = shape[1];
+    int total_rows = seq_len * n_heads;
+    softmax_3d_kernel<<<total_rows, 1>>>(output->data_ptr(), seq_len, n_heads,
+                                         total_seq_len, mask);
   } else {
     throw std::runtime_error(
         "softmax: Unsupported tensor dimension or dim value");
@@ -451,9 +372,7 @@ __global__ void multiply_kernel(const float *A, const float *B, float *out,
 
 void multiply(Tensor<float> *output, const Tensor<float> *A,
               const Tensor<float> *B) {
-  size_t total = 1;
-  for (auto s : A->sizes())
-    total *= s;
+  size_t total = A.numel();
   int threads = 256;
   int blocks = (total + threads - 1) / threads;
   multiply_kernel<<<blocks, threads>>>(A->data_ptr(), B->data_ptr(),
@@ -542,24 +461,16 @@ __global__ void att_output_kernel(const float *att_probs, int n_q_h,
                                   float *att_output, int n_kv_h) {
   int q = blockIdx.x;
   int d = blockIdx.y;
+
   if (q < n_q_h && d < dqkv) {
-    // GQA映射: 完全匹配CPU版本
-    int n_groups = n_q_h / n_kv_h; // 头分组数
-    int kv_head = q / n_groups;    // 对应的KV头
-
+    int n_groups = n_q_h / n_kv_h;
+    int kv_head = q / n_groups;
     float sum = 0.0f;
-    for (int pos = 0; pos < cache_length; pos++) {
-      // 注意力概率的索引计算：q * cache_length + pos
+    for (int pos = 0; pos < cache_length; ++pos) {
       float prob = att_probs[q * cache_length + pos];
-
-      // V的布局: [cache_length, n_kv_h, dqkv]
-      // 索引计算为: (pos * n_kv_h + kv_head) * dqkv + d
       float val = V[(pos * n_kv_h + kv_head) * dqkv + d];
-
       sum += prob * val;
     }
-
-    // 输出索引计算：q * dqkv + d
     att_output[q * dqkv + d] = sum;
   }
 }
@@ -608,7 +519,7 @@ void compute_att_output(const Tensor<float> &att_probs, const Tensor<float> &V,
 
 // --------------------------------------------------
 // 注意力计算：prefill 版本 — 计算注意力分数
-// 假定 Q shape: [batch_size, n_q_h, dqkv], K shape: [cache_length, n_kv_h,
+// Q shape: [batch_size, n_q_h, dqkv], K shape: [cache_length, n_kv_h,
 // dqkv], 输出 att_scores shape: [batch_size, n_q_h, cache_length]
 __global__ void attention_scores_prefill_kernel(const float *Q, const float *K,
                                                 float *att_scores, int n_q,
@@ -616,27 +527,6 @@ __global__ void attention_scores_prefill_kernel(const float *Q, const float *K,
                                                 int n_q_h, int n_kv_h) {
   int q = blockIdx.x;  // 扁平化后的查询索引：q in [0, n_q)
   int j = threadIdx.x; // 缓存位置索引，j in [0, cache_length)
-
-  // if (q == 1 && j == 1) {
-  //   int qh = 1;
-  //   int s = 1;
-  //   int n_groups = n_q_h / n_kv_h;
-  //   int kv_head = qh / n_groups;
-  //   printf(
-  //       "[Kernel Debug] --- Start printing Q and K for first 5 elements
-  //       ---\n");
-  //   for (int d = 0; d < dqkv; d++) {
-  //     float q_val = Q[(s * n_q_h + qh) * dqkv + d];
-  //     float k_val = K[(j * n_kv_h + kv_head) * dqkv + d];
-
-  //     if (s == 1 && qh == 1 && j == 1 && d < 5) { //
-  //     打印第一个查询的前5个特征
-  //       printf("[Kernel Debug] s=%d, qh=%d, j=%d, d=%d: q_val=%f,
-  //       k_val=%f\n",
-  //              s, qh, j, d, q_val, k_val);
-  //     }
-  //   }
-  // }
 
   if (q < n_q && j < cache_length) {
     // 拆分出序列索引 s 和查询头索引 qh
@@ -653,18 +543,7 @@ __global__ void attention_scores_prefill_kernel(const float *Q, const float *K,
       float q_val = Q[(s * n_q_h + qh) * dqkv + d];
       float k_val = K[(j * n_kv_h + kv_head) * dqkv + d];
       dot += q_val * k_val;
-
-      // if (s == 1 && qh == 0 && j == 1 && d < 10) {
-      //   printf("[Kernel Debug] s=%d, qh=%d, j=%d: q_val=%f, d=%d,
-      //   offset=%d\n",
-      //          s, qh, j, q_val, d, ((s * n_q_h + qh) * dqkv + d));
-      // }
     }
-
-    // if (s == 0 && qh == 0 && j == 0) {
-    //   printf("[Kernel Debug] s=%d, qh=%d, j=%d: dot=%f\n", s, qh, j, dot);
-    // }
-
     int out_idx = s * (n_q_h * cache_length) + qh * cache_length + j;
     att_scores[out_idx] = dot / sqrtf((float)dqkv);
   }
@@ -673,9 +552,9 @@ __global__ void attention_scores_prefill_kernel(const float *Q, const float *K,
 void compute_attention_scores_prefill(const Tensor<float> &Q,
                                       const Tensor<float> &K,
                                       Tensor<float> &att_scores, size_t dqkv) {
-  // Q的形状应为[batch_size, n_q_h, dqkv]
-  // K的形状应为[cache_length, n_kv_h, dqkv]
-  // att_scores的形状应为[batch_size, n_q_h, cache_length]
+  // Q [seq_len, n_q_h, dqkv]
+  // K [cache_length, n_kv_h, dqkv]
+  // att_scores [seq_len, n_q_h, cache_length]
 
   // 获取维度信息
   size_t seq_len = Q.sizes()[0];
@@ -731,8 +610,8 @@ void compute_attention_scores_prefill(const Tensor<float> &Q,
 
 // --------------------------------------------------
 // 注意力计算：prefill 版本 — 计算注意力输出
-// 假定 att_probs shape: [batch_size, n_q_h, cache_length], V shape:
-// [cache_length, n_kv_h, dqkv], 输出 att_output shape: [batch_size, n_q_h,
+// att_probs shape: [seq_len, n_q_h, cache_length], V shape:
+// [cache_length, n_kv_h, dqkv], 输出 att_output shape: [seq_len, n_q_h,
 // dqkv]
 __global__ void att_output_prefill_kernel(const float *att_probs,
                                           const float *V, float *att_output,

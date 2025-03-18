@@ -454,7 +454,7 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
     Tensor<float> att_scores({seq_len, n_q_h_, total_seq_len}, Device::CUDA);
     cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores, dqkv_);
     // debugPrintTensor(att_scores, "compute_attention_scores_prefill");
-    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, n_q_h_, offset);
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true);
     // debugPrintTensor(att_scores, "softmax");
     Tensor<float> att_heads({seq_len, n_q_h_, dqkv_}, Device::CUDA);
     cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads, n_q_h_,
