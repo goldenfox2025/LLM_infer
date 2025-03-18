@@ -336,37 +336,6 @@ void rope(Tensor<float> *x, size_t offset, float theta) {
 // softmax 算子实现 (支持多维张量)
 // --------------------------------------------------
 
-// 1D softmax 内核（用于 2D 张量，softmax 操作在第1维），支持 mask 逻辑
-__global__ void softmax_1d_kernel(float *data, int row_length, bool mask,
-                                  int heads, int offset) {
-  int row = blockIdx.x;
-  int valid_length = row_length;
-  if (mask) {
-    int query_index = row / heads; // 根据 outer index 计算 query token 序号
-    valid_length = (offset > 0 ? offset + query_index : query_index) + 1;
-    if (valid_length > row_length)
-      valid_length = row_length;
-  }
-  float max_val = -1e9f;
-  for (int i = 0; i < row_length; i++) {
-    float val =
-        (mask && (i >= valid_length)) ? -1e9f : data[row * row_length + i];
-    if (val > max_val)
-      max_val = val;
-  }
-  float sum = 0.0f;
-  for (int i = 0; i < row_length; i++) {
-    float val =
-        (mask && (i >= valid_length)) ? -1e9f : data[row * row_length + i];
-    float exp_val = expf(val - max_val);
-    data[row * row_length + i] = exp_val;
-    sum += exp_val;
-  }
-  for (int i = 0; i < row_length; i++) {
-    data[row * row_length + i] /= sum;
-  }
-}
-
 // 3D softmax 内核（用于 3D 张量，假设 softmax 操作在
 // dim==2，即对序列长度进行归一化），支持 mask 逻辑
 __global__ void softmax_3d_kernel(float *data, int batch_size, int n_heads,
@@ -427,7 +396,6 @@ void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
         output->data_ptr(), batch_size, n_heads, seq_len, mask,
         static_cast<int>(offset), static_cast<int>(heads));
   }
-  // 对于 2D 张量，假设 softmax 操作在 dim==1（每行）
   else if (shape.size() == 2 && dim == 1) {
     int batch_size = 1;
     int n_heads = shape[0];
@@ -436,11 +404,6 @@ void softmax(Tensor<float> *output, const Tensor<float> *input, int dim,
     softmax_3d_kernel<<<total_rows, 1>>>(
         output->data_ptr(), batch_size, n_heads, seq_len, mask,
         static_cast<int>(offset), static_cast<int>(heads));
-    // int rows = shape[0];
-    // int cols = shape[1];
-    // softmax_1d_kernel<<<rows, 1>>>(output->data_ptr(), cols, mask,
-    //                                static_cast<int>(heads),
-    //                                static_cast<int>(offset));
   } else {
     throw std::runtime_error(
         "softmax: Unsupported tensor dimension or dim value");
@@ -869,7 +832,5 @@ void compute_att_output_prefill(const Tensor<float> &att_probs,
 // --------------------------------------------------
 // 重排attention heads数据的kernel
 // --------------------------------------------------
-
-
 
 } // namespace cuda_OP
