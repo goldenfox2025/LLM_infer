@@ -126,54 +126,35 @@ void rms_norm(Tensor<float> *output, const Tensor<float> *input,
 // --------------------------------------------------
 // matmul 算子实现
 // --------------------------------------------------
-// __global__ void matmul_kernel(const float *A, const float *B, float *C, int
-// M,
-//                               int K, int N) {
-//   __shared__ float As[16][16];
-//   __shared__ float Bs[16][16];
-//   int row = blockIdx.y * 16 + threadIdx.y;
-//   int col = blockIdx.x * 16 + threadIdx.x;
-//   float sum = 0.0f;
-//   for (int t = 0; t < (16 + K - 1) / 16; ++t) {
-//     int A_col = t * 16 + threadIdx.x;
-//     if (row < M && A_col < K) {
-//       As[threadIdx.y][threadIdx.x] = A[row * K + A_col];
-//     } else {
-//       As[threadIdx.y][threadIdx.x] = 0.0f;
-//     }
-//     int B_row = t * 16 + threadIdx.y;
-//     if (col < N && B_row < K) {
-//       Bs[threadIdx.y][threadIdx.x] = B[B_row * N + col];
-//     } else {
-//       Bs[threadIdx.y][threadIdx.x] = 0.0f;
-//     }
-//     __syncthreads();
-
-//     for (int k = 0; k < 16; ++k) {
-//       sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
-//     }
-
-//     __syncthreads();
-//   }
-
-//   if (row < M && col < N) {
-//     C[row * N + col] = sum;
-//   }
-// }
-
-__global__ void matmul_kernel(const float *A, const float *B, float *C, int m,
-                              int k, int n) {
-  int row = blockIdx.x * blockDim.x + threadIdx.x;
-  int col = blockIdx.y * blockDim.y + threadIdx.y;
-
-  if (row < m && col < n) {
-    float sum = 0.0f;
-    for (int i = 0; i < k; ++i) {
-      float a_val = A[row * k + i];
-      float b_val = B[col * k + i];
-      sum += a_val * b_val;
+__global__ void matmul_kernel(const float *A, const float *B, float *C, int M,
+                              int K, int N) {
+  __shared__ float As[16][16];
+  __shared__ float Bs[16][16];
+  int row = blockIdx.y * 16 + threadIdx.y;
+  int col = blockIdx.x * 16 + threadIdx.x;
+  float sum = 0.0f;
+  for (int t = 0; t < (16 + K - 1) / 16; ++t) {
+    int A_col = t * 16 + threadIdx.x;
+    if (row < M && A_col < K) {
+      As[threadIdx.y][threadIdx.x] = A[row * K + A_col];
+    } else {
+      As[threadIdx.y][threadIdx.x] = 0.0f;
     }
-    C[row * n + col] = sum;
+    int B_row = t * 16 + threadIdx.y;
+    if (col < N && B_row < K) {
+      Bs[threadIdx.y][threadIdx.x] = B[col * K + B_row];
+    } else {
+      Bs[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+    __syncthreads();
+    for (int k = 0; k < 16; ++k) {
+      sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+    }
+    __syncthreads();
+  }
+
+  if (row < M && col < N) {
+    C[row * N + col] = sum;
   }
 }
 
@@ -189,9 +170,9 @@ Tensor<float> matmul(const Tensor<float> &A, const Tensor<float> &B,
 
   // 启动 CUDA 核
 
-  dim3 threadsPerBlock(32, 32);
-  dim3 numBlocks((m + threadsPerBlock.x - 1) / threadsPerBlock.x,
-                 (n + threadsPerBlock.y - 1) / threadsPerBlock.y);
+  dim3 threadsPerBlock(16, 16);
+  dim3 numBlocks((n + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                 (m + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
   // 计算矩阵乘法 C = A * B^T
   matmul_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
