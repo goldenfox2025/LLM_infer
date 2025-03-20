@@ -77,7 +77,7 @@ void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
   }
 }
 
-// =========== 2. CPU版本 prefill_cpu（添加了 //debugPrintTensor 调试打印）
+// =========== 2. CPU版本 prefill_cpu
 // ===========
 Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
                                       KVCache* kv_cache,
