@@ -307,7 +307,7 @@ Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
   return logits;
 }
 
-// =========== 3. CUDA版本 prefill_cuda（添加了 //debugPrintTensor 调试打印）
+// =========== 3. CUDA版本 prefill_cuda
 // ===========
 Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
                                        KVCache* kv_cache) {

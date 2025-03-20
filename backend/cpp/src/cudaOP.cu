@@ -49,7 +49,6 @@ __global__ void gather_kernel(const uint32_t *input,
     if (emb_index >= vocab_size * embed_dim) {
       continue;
     }
-
     float value = embedding_table[emb_index];
     output[idx] = value;
   }
