@@ -19,8 +19,8 @@
 // dim==2，即对序列长度进行归一化），支持 mask 逻辑
 namespace cuda_OP {
 
-__global__ void softmax_3d_kernel(float* data, int seq_len, int n_heads,
-                                  int total_seq_len, bool mask, int offset) {
+__global__ void softmax_3d_kernel_v2(float* data, int seq_len, int n_heads,
+                                     int total_seq_len, bool mask, int offset) {
   // 每个 block 负责一行（对应一个 softmax 操作）
   int idx = blockIdx.x;
   int seq_id = idx / n_heads;
@@ -61,9 +61,9 @@ __global__ void softmax_3d_kernel(float* data, int seq_len, int n_heads,
 
   // 跨 warp归约：由于 blockDim.x==64，只有 2 个 warp，采用原有共享内存归约
   float max_val;
-  if (tid < (blockDim.x / warpSize)) {  // 仅 tid==0和tid==1参与
-    // 简单归约2个 warp的结果，避免使用 __shfl_down_sync 对不足 warpSize
-    // 的归约
+  if (tid < (blockDim.x / warpSize)) {
+    // 仅 tid==0和tid==1参与
+    // 简单归约2个 warp的结果，避免使用 __shfl_down_sync对不足 warpSize 的归约
     if (blockDim.x / warpSize == 2) {
       if (tid == 0) {
         max_val = sdata[0] > sdata[1] ? sdata[0] : sdata[1];
@@ -127,9 +127,8 @@ __global__ void softmax_3d_kernel(float* data, int seq_len, int n_heads,
   }
 }
 
-__global__ void softmax_3d_kernel_normal(float* data, int seq_len, int n_heads,
-                                         int total_seq_len, bool mask,
-                                         int offset) {
+__global__ void softmax_3d_kernel_v1(float* data, int seq_len, int n_heads,
+                                     int total_seq_len, bool mask, int offset) {
   int idx = blockIdx.x;
   int seq_id = idx / n_heads;
   int head_id = idx % n_heads;
@@ -144,46 +143,38 @@ __global__ void softmax_3d_kernel_normal(float* data, int seq_len, int n_heads,
   __shared__ float sdata[64];
   int tid = threadIdx.x;
   float thread_max = -1e9f;
-
-  // 1. 寻找最大值
-  for (int i = 0; i < blockDim.x; i += blockDim.x) {
+  for (int i = 0; i < total_seq_len; i += blockDim.x) {
     float val = (mask && (i >= valid_length)) ? -1e9f : data[start_idx + i];
     thread_max = fmaxf(thread_max, val);
   }
   sdata[tid] = thread_max;
-  __syncthreads();
-
-  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (tid < s) {
-      sdata[tid] = sdata[tid] > sdata[tid + s] ? sdata[tid] : sdata[tid + s];
+  for (int i = blockDim.x >> 1; i > 0; i >>= 1) {
+    if (tid < i) {
+      sdata[tid] = sdata[tid] > sdata[tid + i] ? sdata[tid] : sdata[tid + i];
     }
     __syncthreads();
   }
+
   float max_val = sdata[0];
   __syncthreads();
-  // 2. 计算expf
   float thread_sum = 0.0f;
   for (int i = tid; i < total_seq_len; i += blockDim.x) {
-    float val = (mask && (i >= valid_length)) ? -1e9f : data[start_idx + i];
+    float val = (mask && i >= valid_length ? -1e9f : data[start_idx + i]);
     float exp_val = expf(val - max_val);
-    // 写入全局内存保存结果，因共享内存不足保存
     data[start_idx + i] = exp_val;
     thread_sum += exp_val;
   }
+
   sdata[tid] = thread_sum;
   __syncthreads();
 
-  // 归约计算总和
-  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (tid < s) {
-      sdata[tid] += sdata[tid + s];
+  for (int i = blockDim.x >> 1; i > 0; i >>= 1) {
+    if (tid < i) {
+      sdata[tid] += sdata[tid + i];
     }
     __syncthreads();
   }
   float sum_val = sdata[0];
-  __syncthreads();
-
-  // 归一化
   for (int i = tid; i < total_seq_len; i += blockDim.x) {
     data[start_idx + i] /= sum_val;
   }
@@ -209,7 +200,7 @@ void softmax(Tensor<float>* output, const Tensor<float>* input, int dim,
     int total_rows = seq_len * n_heads;
     int THREADS_PER_BLOCK = 64;  // 可根据具体情况调节
     // int shared_mem_size = THREADS_PER_BLOCK * sizeof(float);
-    softmax_3d_kernel<<<total_rows, THREADS_PER_BLOCK>>>(
+    softmax_3d_kernel_v2<<<total_rows, THREADS_PER_BLOCK>>>(
         output->data_ptr(), seq_len, n_heads, total_seq_len, mask, offset);
   } else if (shape.size() == 2 && dim == 1) {
     int seq_len = 1;
@@ -218,7 +209,7 @@ void softmax(Tensor<float>* output, const Tensor<float>* input, int dim,
     int total_rows = seq_len * n_heads;
     int THREADS_PER_BLOCK = 64;  // 可根据具体情况调节
     // int shared_mem_size = THREADS_PER_BLOCK * sizeof(float);
-    softmax_3d_kernel<<<total_rows, THREADS_PER_BLOCK>>>(
+    softmax_3d_kernel_v2<<<total_rows, THREADS_PER_BLOCK>>>(
         output->data_ptr(), seq_len, n_heads, total_seq_len, mask, offset);
   } else {
     throw std::runtime_error(
