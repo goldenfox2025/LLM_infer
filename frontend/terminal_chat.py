@@ -154,7 +154,7 @@ if __name__ == "__main__":
                 input_ids,
                 token_callback,
                 max_length=200,      # 根据需要调整生成最大 token 数
-                temperature=0.7,     # 可调整温度
+                temperature=0.5,     # 可调整温度
                 top_p=1.0,
                 top_k=10
             )
