@@ -10,21 +10,27 @@ find_package(pybind11 REQUIRED)
 
 # 设置 Torch 的 cmake 配置路径
 set(Torch_DIR "/home/libtorch/libtorch/share/cmake/Torch")
-# 或者：list(APPEND CMAKE_PREFIX_PATH "/home/libtorch/libtorch")
 find_package(Torch REQUIRED)
 
+
 include_directories(backend/cpp/include)
+add_subdirectory(backend/cpp/src/CUDAoperators)
+# 自动收集 operators 文件夹下的所有源文件
+file(GLOB_RECURSE OPERATOR_SOURCES
+     "backend/cpp/src/CUDAoperators/*.cu"
+     "backend/cpp/src/CUDAoperators/*.cpp")
 
 pybind11_add_module(model_bridge 
     interface/model_bridge.cpp
+    ${OPERATOR_SOURCES}  # 自动添加算子实现文件
     backend/cpp/src/llama_decode.cpp
     backend/cpp/src/llama_prefill.cpp
     backend/cpp/src/inference.cpp
     backend/cpp/src/thread_pool.cpp
-    backend/cpp/src/cudaOP.cu
 )
 
-target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES})
+target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES} operators)
+
 target_compile_options(model_bridge PRIVATE -mavx2 -mfma)
 
 # 启用 CUDA 分离式编译
