@@ -1,27 +1,20 @@
-
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <math.h>
 
-#include <cstdio>  // //printf
+#include <cmath>
+#include <cstdio>  // printf
 #include <iostream>
 #include <stdexcept>
 #include <vector>
 
 #include "cudaOP.cuh"
-
-// --------------------------------------------------
-// gather 算子实现
-// --------------------------------------------------
-// kernel：output[i, :] = embedding_table[input[i], :]
-// CUDA kernel 使用二维线程块与网格
-
-// embedding_table: [vocab_size, embed_dim]
-// input: [seq_len] (里面是 token_id)
-// output: [seq_len, embed_dim]
+#include "tensor.hpp"
 namespace cuda_OP {
-__global__ void gather_kernel_v1(const uint32_t *input,
-                                 const float *embedding_table, float *output,
+
+// 模板化的 CUDA kernel，output[i, :] = embedding_table[input[i], :]
+template <typename T>
+__global__ void gather_kernel_v1(const uint32_t* input,
+                                 const T* embedding_table, T* output,
                                  int seq_len, int embed_dim, int vocab_size) {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
@@ -29,6 +22,8 @@ __global__ void gather_kernel_v1(const uint32_t *input,
   for (int idx = tid; idx < total; idx += stride) {
     int row = idx / embed_dim;
     int col = idx % embed_dim;
+    // 越界检查（理论上 grid-stride loop
+    // 已经保证了，不需要再次判断，但增加健壮性）
     if (row >= seq_len || col >= embed_dim) {
       continue;
     }
@@ -37,16 +32,19 @@ __global__ void gather_kernel_v1(const uint32_t *input,
       continue;
     }
     int emb_index = token_id * embed_dim + col;
+    // 再次检查防止溢出
     if (emb_index >= vocab_size * embed_dim) {
       continue;
     }
-    float value = embedding_table[emb_index];
+    T value = embedding_table[emb_index];
     output[idx] = value;
   }
 }
 
-void gather(Tensor<float> *output, const Tensor<uint32_t> *input,
-            const Tensor<float> *embedding_table) {
+// 模板化的 host 端 gather 函数
+template <typename T>
+void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
+            const Tensor<T>* embedding_table) {
   int seq_len = static_cast<int>(input->numel());
   int embed_dim = static_cast<int>(output->sizes()[1]);
   int vocab_size = static_cast<int>(embedding_table->sizes()[0]);
@@ -67,7 +65,8 @@ void gather(Tensor<float> *output, const Tensor<uint32_t> *input,
   int total = seq_len * embed_dim;
   int blocks = (total + threadsPerBlock - 1) / threadsPerBlock;
 
-  gather_kernel_v1<<<blocks, threadsPerBlock>>>(
+  // 启动 CUDA kernel
+  gather_kernel_v1<T><<<blocks, threadsPerBlock>>>(
       input->data_ptr(), embedding_table->data_ptr(), output->data_ptr(),
       seq_len, embed_dim, vocab_size);
 
@@ -75,10 +74,13 @@ void gather(Tensor<float> *output, const Tensor<uint32_t> *input,
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA gather kernel launch failed");
   }
-
   err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA gather synchronization failed");
   }
 }
+template void gather<nvbf16>(Tensor<nvbf16>*, const Tensor<uint32_t>*,
+    const Tensor<nvbf16>*);
+    template void gather<float>(Tensor<float>*, const Tensor<uint32_t>*,
+       const Tensor<float>*);
 }  // namespace cuda_OP

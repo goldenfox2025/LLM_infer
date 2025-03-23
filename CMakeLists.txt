@@ -22,11 +22,12 @@ file(GLOB_RECURSE OPERATOR_SOURCES
 
 pybind11_add_module(model_bridge 
     interface/model_bridge.cpp
-    ${OPERATOR_SOURCES}  # 自动添加算子实现文件
+    ${OPERATOR_SOURCES} 
     backend/cpp/src/llama_decode.cpp
     backend/cpp/src/llama_prefill.cpp
     backend/cpp/src/inference.cpp
     backend/cpp/src/thread_pool.cpp
+
 )
 
 target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES} operators)
