@@ -16,7 +16,7 @@
 #include "thread_pool.hpp"
 
 template <typename T>
-
+// =========== 1. debugPrintTensor
 void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
                       size_t num_to_print = 10) {
   std::cout << "[Debug] " << tensor_name << ":\n";
@@ -80,12 +80,14 @@ void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
 // =========== 2. CPU版本 prefill_cpu
 // ===========
 Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
-                                      KVCache* kv_cache,
+                                      KVCache<float>* typed_kv_cache,
                                       ThreadPool& thread_pool) {
+  // 首先转换为正确的KVCache类型
+
   const size_t seq_len = input->numel();
   size_t offset = 0;
-  if (kv_cache) {
-    offset = kv_cache->size() - seq_len;
+  if (typed_kv_cache) {
+    offset = typed_kv_cache->size() - seq_len;
   }
 
   std::vector<float> residual_data(seq_len * d_);
@@ -136,7 +138,7 @@ Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
     // debugPrintTensor(q_buf_view, "CPU q_buf_view after rope");
     // debugPrintTensor(k_buf_view, "CPU k_buf_view after rope");
 
-    if (kv_cache) {
+    if (typed_kv_cache) {
       Tensor<float> k_buf_contiguous = k_buf;
       Tensor<float> v_buf_contiguous = v_buf;
       size_t row_size = n_kv_h_ * dqkv_;
@@ -145,9 +147,9 @@ Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
         const float* v_ptr = v_buf_contiguous.data_ptr() + i * row_size;
         std::vector<float> k_i(k_ptr, k_ptr + row_size);
         std::vector<float> v_i(v_ptr, v_ptr + row_size);
-        kv_cache->k_cache(layer, offset + i) =
+        typed_kv_cache->k_cache(layer, offset + i) =
             Tensor<float>(std::move(k_i), {1, row_size});
-        kv_cache->v_cache(layer, offset + i) =
+        typed_kv_cache->v_cache(layer, offset + i) =
             Tensor<float>(std::move(v_i), {1, row_size});
       }
     }
@@ -165,8 +167,8 @@ Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
       std::vector<float> total_V_data(total_seq_len * row_size);
 
       for (size_t pos = 0; pos < cached_len; pos++) {
-        Tensor<float>& cached_k = kv_cache->k_cache(layer, pos);
-        Tensor<float>& cached_v = kv_cache->v_cache(layer, pos);
+        Tensor<float>& cached_k = typed_kv_cache->k_cache(layer, pos);
+        Tensor<float>& cached_v = typed_kv_cache->v_cache(layer, pos);
         memcpy(&total_K_data[pos * row_size], cached_k.data_ptr(),
                row_size * sizeof(float));
         memcpy(&total_V_data[pos * row_size], cached_v.data_ptr(),
@@ -310,17 +312,20 @@ Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
 // =========== 3. CUDA版本 prefill_cuda
 // ===========
 Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
-                                       KVCache* kv_cache) {
-  // std::cout << "\n[prefill_cuda] ====== Starting prefill_cuda ======" <<
-  // std::endl;
-  for (const auto& pair : params_) {
-    if (pair.second.device() != Device::CUDA) {
-      // std::cout << "[prefill_cuda] Parameter " << pair.first << " is not on
-      // CUDA device" << std::endl; std::cout << "[prefill_cuda] Moving
-      // parameter to CUDA..." << std::endl;
-      params_.at(pair.first).cuda();
-    }
-  }
+                                       KVCache<float>* typed_kv_cache) {
+  // 首先转换为正确的KVCache类型
+
+  // std::cout << "\n[prefill_cuda] ====== Starting prefill_cuda ======"
+  //           << std::endl;
+  // for (const auto& pair : params_) {
+  //   if (pair.second.device() != Device::CUDA) {
+  //     // std::cout << "[prefill_cuda] Parameter " << pair.first
+  //     //           << " is not on CUDA device" << std::endl;
+  //     // std::cout << "[prefill_cuda] Moving parameter to CUDA... " <<
+  //     // std::endl;
+  //     params_.at(pair.first).cuda();
+  //   }
+  // }
 
   // 1. 输入参数验证和初始化
   if (!input || !input->data_ptr()) {
@@ -332,11 +337,11 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
 
   const size_t seq_len = input->numel();
   size_t offset = 0;
-  if (kv_cache) {
-    if (kv_cache->device() != Device::CUDA) {
+  if (typed_kv_cache) {
+    if (typed_kv_cache->device() != Device::CUDA) {
       throw std::runtime_error("KVCache must be on CUDA device");
     }
-    offset = kv_cache->size() - seq_len;
+    offset = typed_kv_cache->size() - seq_len;
   }
 
   // 2. 分配和初始化CUDA张量
@@ -394,7 +399,7 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
     // debugPrintTensor(k_buf_view, "CUDA k_buf_view after rope");
 
     // 4.5 保存KV Cache
-    if (kv_cache) {
+    if (typed_kv_cache) {
       size_t row_size = n_kv_h_ * dqkv_;
       for (size_t i = 0; i < seq_len; i++) {
         Tensor<float> k_i({1, row_size}, Device::CUDA);
@@ -406,8 +411,8 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
         cudaMemcpy(v_i.data_ptr(), v_buf.data_ptr() + i * row_size,
                    row_size * sizeof(float), cudaMemcpyDeviceToDevice);
 
-        kv_cache->k_cache(layer, offset + i) = std::move(k_i);
-        kv_cache->v_cache(layer, offset + i) = std::move(v_i);
+        typed_kv_cache->k_cache(layer, offset + i) = std::move(k_i);
+        typed_kv_cache->v_cache(layer, offset + i) = std::move(v_i);
       }
     }
 
@@ -427,8 +432,8 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
 
       // 拼接缓存 K、V
       for (size_t pos = 0; pos < cached_len; pos++) {
-        Tensor<float>& cached_k = kv_cache->k_cache(layer, pos);
-        Tensor<float>& cached_v = kv_cache->v_cache(layer, pos);
+        Tensor<float>& cached_k = typed_kv_cache->k_cache(layer, pos);
+        Tensor<float>& cached_v = typed_kv_cache->v_cache(layer, pos);
 
         cudaMemcpy(total_K.data_ptr() + pos * row_size, cached_k.data_ptr(),
                    row_size * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -499,13 +504,47 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
   logits = cuda_OP::matmul(final_h, lm_head);
   return logits.cpu();
 }
+
+// 实现BaseModel的prefill接口
 Tensor<float> LlamaModel::prefill(const Tensor<uint32_t>* input,
-                                  ThreadPool& thread_pool, KVCache* kv_cache) {
-  if (input->device() == Device::CPU) {
-    return prefill_cpu(input, kv_cache, thread_pool);
-  } else if (input->device() == Device::CUDA) {
-    return prefill_cuda(input, kv_cache);
-  } else {
-    throw std::runtime_error("Unsupported device for input tensor in prefill");
+                                  ThreadPool& thread_pool,
+                                  KVCacheBase* kv_cache) {
+  // 对输入检查
+  if (!input) {
+    throw std::invalid_argument("Input tensor cannot be null");
+  }
+  // 打印设备
+  // std::cout << "[prefill] Input tensor device: "
+  //           << (input->device() == Device::CUDA ? "CUDA" : "CPU") <<
+  //           std::endl;
+  // 首先转换为正确的KVCache类型
+  // std::cout << "[prefill] KVCache type: " << kv_cache->get_n_layers() << " x
+  // "
+  //           << kv_cache->get_max_seq_len() << std::endl;
+  auto typed_kv_cache = dynamic_cast<KVCache<float>*>(kv_cache);
+  if (!typed_kv_cache) {
+    throw std::runtime_error(
+        "Invalid KVCache type for LlamaModel::prefill_cuda");
+  }
+  // std::cout << "[prefill] KVCache type: " << typed_kv_cache->get_n_layers()
+  //           << " x " << typed_kv_cache->get_max_seq_len() << std::endl;
+  // std::cout << "[LlamaModel::prefill] 进入prefill方法" << std::endl;
+  // std::cout << "[LlamaModel::prefill] 模型设备: "
+  //           << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
+  // std::cout << "[LlamaModel::prefill] 输入张量设备: "
+  //           << (input->device() == Device::CUDA ? "CUDA" : "CPU") <<
+  //           std::endl;
+
+  try {
+    if (device_ == Device::CUDA) {
+      // std::cout << "[LlamaModel::prefill] 准备调用prefill_cuda" << std::endl;
+      return prefill_cuda(input, typed_kv_cache);
+    } else {
+      // std::cout << "[LlamaModel::prefill] 准备调用prefill_cpu" << std::endl;
+      return prefill_cpu(input, typed_kv_cache, thread_pool);
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "[LlamaModel::prefill] 异常: " << e.what() << std::endl;
+    throw;
   }
 }

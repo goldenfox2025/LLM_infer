@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cuda_bf16.h>
+
 #include <cuda_runtime.h>
 
 #include <stdexcept>
@@ -52,6 +52,16 @@ void silu(Tensor<T>* output, const Tensor<T>* input);
 // 逐元素乘法算子
 template <typename T>
 void multiply(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
+
+// 逐元素加法算子
+template <typename T>
+void add(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
+
+// Layer normalization算子 - 沿最后一个维度进行归一化
+template <typename T>
+void layer_norm(Tensor<T>* output, const Tensor<T>* input, 
+               const Tensor<T>* weight, const Tensor<T>* bias,
+               float eps = 1e-5);
 
 // 计算注意力分数（多头注意力机制相关算子）
 template <typename T>

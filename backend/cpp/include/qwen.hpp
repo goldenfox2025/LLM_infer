@@ -1,5 +1,6 @@
 #pragma once
 #include <cuda_bf16.h>  // For __nv_bfloat16 support
+
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -15,27 +16,22 @@ class QwenModel : public BaseModel {
  public:
   QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
             const std::unordered_map<std::string, int>& config);
-  
+
   bool verify_params() const override;
   void print_model_info() const override;
 
-  // Implementation of BaseModel interface
+  // Implementation of BaseModel interface:
+  // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
   Tensor<float> forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                      KVCache* kv_cache) override;
+                        KVCacheBase* kv_cache) override {
+    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
+    return forward_cuda(input, typed_cache).to_float();
+  }
   Tensor<float> prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                      KVCache* kv_cache) override;
-  
-  // Qwen-specific implementations
-  Tensor<T> prefill_internal(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                           KVCache* kv_cache);
-  Tensor<T> prefill_cpu(const Tensor<uint32_t>* input, KVCache* kv_cache,
-                       ThreadPool& thread_pool);
-  Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache* kv_cache);
-  Tensor<T> forward_internal(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                           KVCache* kv_cache);
-  Tensor<T> forward_cpu(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                       KVCache* kv_cache);
-  Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache* kv_cache);
+                        KVCacheBase* kv_cache) override {
+    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
+    return prefill_cuda(input, typed_cache).to_float();
+  }
 
   // Token generation
   std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
@@ -48,6 +44,23 @@ class QwenModel : public BaseModel {
   size_t get_head_dim() const override { return head_dim_; }
   size_t get_n_kv_heads() const override { return n_kv_heads_; }
   uint32_t get_eos_token_id() const override { return eos_token_id_; }
+
+  // Additional getter methods for qwen_decode.cpp
+  size_t get_n_heads() const { return n_heads_; }
+  size_t get_hidden_size() const { return hidden_size_; }
+  size_t get_intermediate_size() const { return intermediate_size_; }
+  float get_rms_norm_eps() const { return rms_norm_eps_; }
+  float get_rope_theta() const { return rope_theta_; }
+  size_t get_vocab_size() const { return vocab_size_; }
+  const std::unordered_map<std::string, Tensor<T>>& get_params() const {
+    return params_;
+  }
+
+  // CUDA versions of forward and prefill.
+  // Their implementations can be filled in later (currently as stubs mimicking
+  // Llama).
+  Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+  Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
   // Device management
   QwenModel& cuda() override;
@@ -74,18 +87,12 @@ class QwenModel : public BaseModel {
   Device device_;
 };
 
-// 使用extern template声明已在别处定义的模板特化
-// QwenModel<float>特化
+// 使用 extern template 声明已在别处定义的模板特化
+// QwenModel<float> 特化
 extern template class QwenModel<float>;
-
-// QwenModel<__nv_bfloat16>特化
+// QwenModel<__nv_bfloat16> 特化
 extern template class QwenModel<__nv_bfloat16>;
 
 // Helper function to convert weights from float to __nv_bfloat16
 std::unordered_map<std::string, Tensor<__nv_bfloat16>> convert_weights_to_bf16(
     const std::unordered_map<std::string, Tensor<float>>& float_weights);
-
-// 添加extern template声明，表示这些实例化将在别处定义
-// 这可以防止包含此头文件的其他代码隐式实例化这些模板
-extern template class QwenModel<float>;
-extern template class QwenModel<__nv_bfloat16>;

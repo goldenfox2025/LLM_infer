@@ -202,10 +202,18 @@ void LlamaModel::print_model_info() const {
 
 Tensor<float> LlamaModel::forward_cpu(const Tensor<uint32_t>* input,
                                       ThreadPool& thread_pool,
-                                      KVCache* kv_cache) {
+                                      KVCache<float>* typed_kv_cache) {
+  // 首先转换为正确的KVCache类型
+
+  if (!typed_kv_cache) {
+    throw std::runtime_error(
+        "Invalid KVCache type for LlamaModel::forward_cpu");
+  }
+
   const size_t seq_len = input->numel();
   const size_t n_groups = n_q_h_ / n_kv_h_;
-  const size_t current_pos = kv_cache ? kv_cache->size() - seq_len : 0;
+  const size_t current_pos =
+      typed_kv_cache ? typed_kv_cache->size() - seq_len : 0;
 
   std::vector<float> residual_data(seq_len * d_);
   std::vector<float> hidden_states_data(seq_len * d_);
@@ -263,23 +271,17 @@ Tensor<float> LlamaModel::forward_cpu(const Tensor<uint32_t>* input,
     OP::rope(&q_buf_view, current_pos, rope_theta_);
     OP::rope(&k_buf_view, current_pos, rope_theta_);
 
-    // debugPrintTensor(q_buf_view, "Q buffer view after RoPE - layer " +
-    //  std::to_string(layer));
-    // debugPrintTensor(k_buf_view, "K buffer
-    // view after RoPE - layer " +
-    //  std::to_string(layer));
-
-    if (kv_cache) {
-      kv_cache->k_cache(layer, current_pos) = k_buf_view;
-      kv_cache->v_cache(layer, current_pos) = v_buf_view;
+    if (typed_kv_cache) {
+      typed_kv_cache->k_cache(layer, current_pos) = k_buf_view;
+      typed_kv_cache->v_cache(layer, current_pos) = v_buf_view;
     }
 
-    std::vector<float> att_scores(n_q_h_ * kv_cache->size(), 0.0f);
+    std::vector<float> att_scores(n_q_h_ * typed_kv_cache->size(), 0.0f);
     for (size_t q_head = 0; q_head < n_q_h_; q_head++) {
       size_t kv_head = q_head / n_groups;
       float* q_ptr = q_buf_view.data_ptr() + q_head * dqkv_;
-      for (size_t pos = 0; pos < kv_cache->size(); pos++) {
-        Tensor<float>& cached_key = kv_cache->k_cache(layer, pos);
+      for (size_t pos = 0; pos < typed_kv_cache->size(); pos++) {
+        Tensor<float>& cached_key = typed_kv_cache->k_cache(layer, pos);
         Tensor<float> cached_key_view = cached_key.view({n_kv_h_, dqkv_});
         float* key_ptr = cached_key_view.data_ptr() + kv_head * dqkv_;
         float dot = 0.0f;
@@ -287,11 +289,11 @@ Tensor<float> LlamaModel::forward_cpu(const Tensor<uint32_t>* input,
           dot += q_ptr[d] * key_ptr[d];
         }
         float scale = 1.0f / sqrtf((float)dqkv_);
-        att_scores[q_head * kv_cache->size() + pos] = dot * scale;
+        att_scores[q_head * typed_kv_cache->size() + pos] = dot * scale;
       }
     }
     Tensor<float> att_scores_tensor(std::move(att_scores),
-                                    {n_q_h_, kv_cache->size()});
+                                    {n_q_h_, typed_kv_cache->size()});
     Tensor<float> att_probs = att_scores_tensor;
     OP::softmax(&att_probs, &att_scores_tensor,
                 /*dim=*/1, false, n_q_h_);
@@ -308,12 +310,12 @@ Tensor<float> LlamaModel::forward_cpu(const Tensor<uint32_t>* input,
       size_t kv_head = q_head / n_groups;
       for (size_t d = 0; d < dqkv_; d++) {
         float weighted_sum = 0.0f;
-        for (size_t pos = 0; pos < kv_cache->size(); pos++) {
-          Tensor<float>& cached_val = kv_cache->v_cache(layer, pos);
+        for (size_t pos = 0; pos < typed_kv_cache->size(); pos++) {
+          Tensor<float>& cached_val = typed_kv_cache->v_cache(layer, pos);
           Tensor<float> cached_val_view = cached_val.view({n_kv_h_, dqkv_});
           float* val_ptr = cached_val_view.data_ptr() + kv_head * dqkv_;
           weighted_sum +=
-              att_probs.data_ptr()[q_head * kv_cache->size() + pos] *
+              att_probs.data_ptr()[q_head * typed_kv_cache->size() + pos] *
               val_ptr[d];
         }
         att_out[q_head * dqkv_ + d] = weighted_sum;
@@ -371,10 +373,13 @@ Tensor<float> LlamaModel::forward_cpu(const Tensor<uint32_t>* input,
 }
 
 Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
-                                       KVCache* kv_cache) {
+                                       KVCache<float>* typed_kv_cache) {
+  // 首先转换为正确的KVCache类型
+
   const size_t seq_len = input->numel();
-  const size_t current_pos = kv_cache ? kv_cache->size() - seq_len : 0;
   const size_t n_groups = n_q_h_ / n_kv_h_;
+  const size_t current_pos =
+      typed_kv_cache ? typed_kv_cache->size() - seq_len : 0;
 
   Tensor<float> residual({seq_len, d_}, Device::CUDA);
   Tensor<float> hidden_states({seq_len, d_}, Device::CUDA);
@@ -404,7 +409,7 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
     // debugPrintTensor(
     // hidden_states,
     // "Hidden states after RMSNorm (att) - layer " +
-    // std::to_string(layer));
+    //  std::to_string(layer));
 
     Tensor<float>& wq = params_.at("wq" + std::to_string(layer));
     Tensor<float>& wk = params_.at("wk" + std::to_string(layer));
@@ -450,7 +455,7 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
     cuda_OP::rope(&q_buf_view, current_pos, rope_theta_);
     cuda_OP::rope(&k_buf_view, current_pos, rope_theta_);
 
-    if (kv_cache) {
+    if (typed_kv_cache) {
       size_t row_size = n_kv_h_ * dqkv_;
       for (size_t i = 0; i < seq_len; i++) {
         Tensor<float> k_i({1, row_size}, Device::CUDA);
@@ -469,8 +474,8 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
           throw std::runtime_error("KV Cache copy failed");
         }
 
-        kv_cache->k_cache(layer, current_pos + i) = std::move(k_i);
-        kv_cache->v_cache(layer, current_pos + i) = std::move(v_i);
+        typed_kv_cache->k_cache(layer, current_pos + i) = std::move(k_i);
+        typed_kv_cache->v_cache(layer, current_pos + i) = std::move(v_i);
       }
     }
 
@@ -495,8 +500,8 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
       total_V = Tensor<float>({total_seq_len, n_kv_h_, dqkv_}, Device::CUDA);
 
       for (size_t pos = 0; pos < cached_len; pos++) {
-        Tensor<float>& cached_k = kv_cache->k_cache(layer, pos);
-        Tensor<float>& cached_v = kv_cache->v_cache(layer, pos);
+        Tensor<float>& cached_k = typed_kv_cache->k_cache(layer, pos);
+        Tensor<float>& cached_v = typed_kv_cache->v_cache(layer, pos);
 
         cudaError_t err =
             cudaMemcpy(total_K.data_ptr() + pos * row_size, cached_k.data_ptr(),
@@ -599,12 +604,26 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
 }
 
 Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
-                                  ThreadPool& thread_pool, KVCache* kv_cache) {
-  if (input->device() == Device::CPU) {
-    return forward_cpu(input, thread_pool, kv_cache);
-  } else if (input->device() == Device::CUDA) {
-    return forward_cuda(input, kv_cache);
+                                  ThreadPool& thread_pool,
+                                  KVCacheBase* kv_cache) {
+  // 对输入检查
+  if (!input) {
+    throw std::invalid_argument("Input tensor cannot be null");
+  }
+
+  // if (!kv_cache) {
+  //   throw std::invalid_argument("KV cache cannot be null");
+  // }
+
+  auto typed_kv_cache = dynamic_cast<KVCache<float>*>(kv_cache);
+
+  if (!typed_kv_cache) {
+    throw std::runtime_error("Invalid KVCache type for LlamaModel");
+  }
+
+  if (device_ == Device::CUDA) {
+    return forward_cuda(input, typed_kv_cache);
   } else {
-    throw std::runtime_error("Unsupported device for input tensor in prefill");
+    return forward_cpu(input, thread_pool, typed_kv_cache);
   }
 }
