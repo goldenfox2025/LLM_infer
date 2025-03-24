@@ -1,27 +1,80 @@
+// qwen.cpp
 #include "qwen.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <iostream>
-#include <numeric>
-#include <random>
-#include <stdexcept>
 
 #include "cudaOP.cuh"
-#include "operators.hpp"
 
-// 前向声明转换函数
-std::unordered_map<std::string, Tensor<__nv_bfloat16>> convert_weights_to_bf16(
-    const std::unordered_map<std::string, Tensor<float>>& float_weights);
+// Debug print function for tensors
+template <typename T>
+void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
+                      size_t num_to_print = 10) {
+  std::cout << "[Debug] " << tensor_name << ":\n";
 
-// 模板类的实现
+  // 1) Print shape
+  std::cout << "  shape: [";
+  for (auto s : tensor.sizes()) {
+    std::cout << s << " ";
+  }
+  std::cout << "]\n";
+
+  // 2) Print strides
+  std::cout << "  strides: [";
+  for (auto st : tensor.strides()) {
+    std::cout << st << " ";
+  }
+  std::cout << "]\n";
+
+  // 3) Print device
+  std::cout << "  device: ";
+  if (tensor.device() == Device::CPU) {
+    std::cout << "CPU";
+  } else if (tensor.device() == Device::CUDA) {
+    std::cout << "CUDA";
+  } else {
+    std::cout << "UNKNOWN";
+  }
+  std::cout << "\n";
+
+  // 4) Print elements starting from offset 0
+  size_t offset = 0;  // 从开始处打印
+  size_t total_elements = tensor.numel();
+  size_t n_print = std::min(num_to_print, total_elements - offset);
+
+  std::cout << "  elements from offset " << offset << " (" << n_print
+            << " element(s)): ";
+  if (tensor.device() == Device::CPU) {
+    const T* ptr = tensor.data_ptr();
+    for (size_t i = 0; i < n_print; i++) {
+      std::cout << ptr[offset + i] << " ";
+    }
+    std::cout << "\n";
+  } else {
+    // Copy from GPU to CPU, then print
+    std::vector<T> host_buffer(n_print);
+    cudaError_t err = cudaMemcpy(host_buffer.data(), tensor.data_ptr() + offset,
+                                 n_print * sizeof(T), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+      std::cout << "  [Error] cudaMemcpy failed\n";
+      return;
+    }
+    for (size_t i = 0; i < n_print; i++) {
+      std::cout << host_buffer[i] << " ";
+    }
+    std::cout << "\n";
+  }
+}
+
+// -------------------------------
+// QwenModel<T> 构造函数
+// -------------------------------
 template <typename T>
 QwenModel<T>::QwenModel(
     const std::unordered_map<std::string, Tensor<T>>& params,
     const std::unordered_map<std::string, int>& config)
-    : params_(params),
-      device_(Device::CPU) {
-  // 从config中读取基本参数
+    : params_(params) {
+  // 从 config 中提取基本参数
   vocab_size_ = config.at("vocab_size");
   n_layers_ = config.at("n_layers");
   n_heads_ = config.at("n_heads");
@@ -29,239 +82,513 @@ QwenModel<T>::QwenModel(
   hidden_size_ = config.at("hidden_size");
   intermediate_size_ = config.at("intermediate_size");
   max_position_embeddings_ = config.at("max_position_embeddings");
+  bos_token_id_ = static_cast<uint32_t>(config.at("bos_token_id"));
+  eos_token_id_ = static_cast<uint32_t>(config.at("eos_token_id"));
+  rms_norm_eps_ = static_cast<float>(config.at("rms_norm_eps"));
+  rope_theta_ = static_cast<float>(config.at("rope_theta"));
   head_dim_ = hidden_size_ / n_heads_;
-  bos_token_id_ = config.at("bos_token_id");
-  eos_token_id_ = config.at("eos_token_id");
-  rms_norm_eps_ = config.at("rms_norm_eps") / 1e6f;  // 这里可能需要转换单位
-  rope_theta_ = config.at("rope_theta");
-  
-  // 对于BF16类型，默认使用CUDA
-  if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    device_ = Device::CUDA;
-  }
+
+  // Qwen 模型仅支持 CUDA 运行
+  device_ = Device::CUDA;
 }
 
+// -------------------------------
+// 参数验证：检查全局与层级关键参数是否存在
+// -------------------------------
 template <typename T>
 bool QwenModel<T>::verify_params() const {
-  // 验证参数有效性
-  bool valid = true;
-  
-  // 检查必要的张量是否存在
-  std::vector<std::string> required_keys = {
-    "token_embeddings.weight", 
-    "norm.weight"
-    // 更多检查可以在这里添加
-  };
-  
-  // 检查所有层的参数
-  for (size_t i = 0; i < n_layers_; i++) {
-    std::string prefix = "layers." + std::to_string(i) + ".";
-    required_keys.push_back(prefix + "attention.wq.weight");
-    required_keys.push_back(prefix + "attention.wk.weight");
-    required_keys.push_back(prefix + "attention.wv.weight");
-    required_keys.push_back(prefix + "attention.wo.weight");
-    required_keys.push_back(prefix + "feed_forward.w1.weight");
-    required_keys.push_back(prefix + "feed_forward.w2.weight");
-    required_keys.push_back(prefix + "attention_norm.weight");
-    required_keys.push_back(prefix + "ffn_norm.weight");
-  }
-  
-  for (const auto& key : required_keys) {
-    if (params_.find(key) == params_.end()) {
-      std::cerr << "Missing parameter: " << key << std::endl;
-      valid = false;
-    }
-  }
-  
-  return valid;
+  std::cout << "Not checking parameters" << std::endl;
+  return true;
 }
 
+// -------------------------------
+// 打印模型基本信息
+// -------------------------------
 template <typename T>
 void QwenModel<T>::print_model_info() const {
-  std::cout << "QwenModel Information:" << std::endl;
-  std::cout << "  Vocabulary Size: " << vocab_size_ << std::endl;
+  std::cout << "QwenModel Info:" << std::endl;
+  std::cout << "  Vocab size: " << vocab_size_ << std::endl;
   std::cout << "  Layers: " << n_layers_ << std::endl;
-  std::cout << "  Attention Heads: " << n_heads_ << std::endl;
+  std::cout << "  Heads: " << n_heads_ << std::endl;
   std::cout << "  KV Heads: " << n_kv_heads_ << std::endl;
-  std::cout << "  Hidden Size: " << hidden_size_ << std::endl;
-  std::cout << "  Head Dimension: " << head_dim_ << std::endl;
-  std::cout << "  Intermediate Size: " << intermediate_size_ << std::endl;
-  std::cout << "  Max Sequence Length: " << max_position_embeddings_ << std::endl;
-  std::cout << "  RMS Norm Epsilon: " << rms_norm_eps_ << std::endl;
-  std::cout << "  RoPE Theta: " << rope_theta_ << std::endl;
-  std::cout << "  Device: " << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
-  
-  if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    std::cout << "  Precision: BF16" << std::endl;
-  } else {
-    std::cout << "  Precision: FP32" << std::endl;
+  std::cout << "  Hidden size: " << hidden_size_ << std::endl;
+  std::cout << "  Intermediate size: " << intermediate_size_ << std::endl;
+  std::cout << "  Max sequence length: " << max_position_embeddings_
+            << std::endl;
+  std::cout << "  RMS Norm eps: " << rms_norm_eps_ << std::endl;
+  std::cout << "  RoPE theta: " << rope_theta_ << std::endl;
+  std::cout << "  Head dim: " << head_dim_ << std::endl;
+  std::cout << "  Device: " << (device_ == Device::CUDA ? "CUDA" : "CPU")
+            << std::endl;
+}
+
+// -------------------------------
+// forward_cuda: Qwen2 模型的单个 token CUDA 前向传播
+// -------------------------------
+template <typename T>
+Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
+                                     KVCache<T>* kv_cache) {
+  // 确保输入在 CUDA 上
+  if (input->device() != Device::CUDA) {
+    throw std::runtime_error("Input tensor must be on CUDA device");
   }
-}
 
-// BaseModel interface implementations
-template <typename T>
-Tensor<float> QwenModel<T>::forward(const Tensor<uint32_t>* input,
-                                   ThreadPool& thread_pool,
-                                   KVCache* kv_cache) {
-  // 对于float类型直接返回内部实现的结果
-  if constexpr(std::is_same_v<T, float>) {
-    return forward_internal(input, thread_pool, kv_cache);
-  } 
-  // 对于BF16类型需要转换回float
-  else if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    Tensor<__nv_bfloat16> bf16_output = forward_internal(input, thread_pool, kv_cache);
-    return bf16_output.to_float();
+  // 获取输入信息
+  const size_t seq_len = 1;     // 前向传播时序列长度固定为1
+
+  // 计算起始KV缓存位置
+  const size_t cache_start_pos = kv_cache->size();
+
+  // 创建residual和hidden_states张量(没有batch维度)
+  Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);
+  Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
+
+  // Token嵌入 (从embedding_table中获取token嵌入)
+  cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
+
+  // 主循环：遍历所有Transformer层
+  for (size_t i = 0; i < n_layers_; i++) {
+    std::string layer_prefix = "layers." + std::to_string(i) + ".";
+
+    // 1. Input LayerNorm (RMSNorm)
+    auto& attention_norm_weight =
+        params_.at(layer_prefix + "attention_norm.weight");
+    cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
+                      rms_norm_eps_);
+
+    // 2. Self-Attention
+    auto& wq = params_.at(layer_prefix + "attention.wq.weight");
+    auto& wk = params_.at(layer_prefix + "attention.wk.weight");
+    auto& wv = params_.at(layer_prefix + "attention.wv.weight");
+    auto& wo = params_.at(layer_prefix + "attention.wo.weight");
+
+    // 创建CUDA流以并行计算Q, K, V
+    cudaStream_t streams[3];
+    for (int j = 0; j < 3; j++) {
+      cudaError_t err = cudaStreamCreate(&streams[j]);
+      if (err != cudaSuccess) {
+        throw std::runtime_error("Failed to create CUDA stream");
+      }
+    }
+
+    // 计算Q, K, V投影
+    Tensor<T> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0]);
+    Tensor<T> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1]);
+    Tensor<T> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2]);
+
+    // 同步CUDA流
+    for (int j = 0; j < 3; j++) {
+      cudaStreamSynchronize(streams[j]);
+      cudaStreamDestroy(streams[j]);
+    }
+
+    // 重塑张量，准备应用RoPE
+    Tensor<T> q_buf_view =
+        q_buf.view({seq_len, n_heads_, head_dim_});
+    Tensor<T> k_buf_view =
+        k_buf.view({seq_len, n_kv_heads_, head_dim_});
+    Tensor<T> v_buf_view =
+        v_buf.view({seq_len, n_kv_heads_, head_dim_});
+
+    // 应用旋转位置编码 (RoPE)
+    cuda_OP::rope(&q_buf_view, cache_start_pos, rope_theta_);
+    cuda_OP::rope(&k_buf_view, cache_start_pos, rope_theta_);
+
+    // 更新KV缓存
+    size_t row_size = n_kv_heads_ * head_dim_;
+    for (size_t j = 0; j < seq_len; j++) {
+      Tensor<T> k_i({1, row_size}, Device::CUDA);
+      Tensor<T> v_i({1, row_size}, Device::CUDA);
+
+      cudaMemcpy(k_i.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+
+      cudaMemcpy(v_i.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+
+      kv_cache->k_cache(i, cache_start_pos + j) = std::move(k_i);
+      kv_cache->v_cache(i, cache_start_pos + j) = std::move(v_i);
+    }
+
+    // 准备计算自注意力
+    Tensor<T> Q_3d = q_buf_view;
+    Tensor<T> total_K, total_V;
+    size_t total_seq_len = seq_len;
+
+    // 如果有缓存，拼接当前和缓存的K,V
+    if (cache_start_pos != 0) {
+      size_t cached_len = cache_start_pos;
+      total_seq_len = cached_len + seq_len;
+
+      total_K =
+          Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+      total_V =
+          Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+
+      // 拷贝缓存的K,V
+      for (size_t pos = 0; pos < cached_len; pos++) {
+        Tensor<T>& cached_k = kv_cache->k_cache(i, pos);
+        Tensor<T>& cached_v = kv_cache->v_cache(i, pos);
+
+        cudaMemcpy(total_K.data_ptr() + pos * row_size, cached_k.data_ptr(),
+                   row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+
+        cudaMemcpy(total_V.data_ptr() + pos * row_size, cached_v.data_ptr(),
+                   row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+      }
+
+      // 拷贝当前的K,V
+      cudaMemcpy(total_K.data_ptr() + cached_len * row_size,
+                 k_buf_view.data_ptr(), seq_len * row_size * sizeof(T),
+                 cudaMemcpyDeviceToDevice);
+
+      cudaMemcpy(total_V.data_ptr() + cached_len * row_size,
+                 v_buf_view.data_ptr(), seq_len * row_size * sizeof(T),
+                 cudaMemcpyDeviceToDevice);
+    } else {
+      total_K = k_buf_view;
+      total_V = v_buf_view;
+    }
+
+    // 计算注意力分数
+    Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
+    cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_, head_dim_,
+                                      att_scores, n_kv_heads_);
+
+    // Softmax处理注意力分数
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false,
+                     cache_start_pos);
+
+    // 计算注意力输出
+    Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
+    cuda_OP::compute_att_output(att_scores, total_V, n_heads_, head_dim_,
+                                att_heads, n_kv_heads_);
+
+    // 投影回原始维度
+    Tensor<T> att_proj =
+        cuda_OP::matmul(att_heads.view({1, n_heads_ * head_dim_}), wo);
+
+    // 残差连接
+    residual = residual + att_proj;
+
+    // 3. Post Attention LayerNorm (RMSNorm)
+    auto& ffn_norm_weight =
+        params_.at(layer_prefix + "post_attention_norm.weight");
+    cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
+                      rms_norm_eps_);
+
+    // 4. MLP (Feed Forward Network)
+    auto& gate_weight = params_.at(layer_prefix + "feed_forward.w1.weight");
+    auto& up_weight = params_.at(layer_prefix + "feed_forward.w2.weight");
+    auto& down_weight = params_.at(layer_prefix + "feed_forward.w3.weight");
+
+    // SwiGLU激活: (gate_proj * silu(up_proj))
+    Tensor<T> gate_buf = cuda_OP::matmul(hidden_states, gate_weight);
+    Tensor<T> up_buf = cuda_OP::matmul(hidden_states, up_weight);
+
+    cuda_OP::silu(&up_buf, &up_buf);                   // SiLU激活
+    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
+
+    // 投影回原始维度
+    Tensor<T> ffn_out = cuda_OP::matmul(gate_buf, down_weight);
+
+    // 残差连接
+    residual = residual + ffn_out;
   }
+
+  // 最终的LayerNorm (RMSNorm)
+  auto& norm_weight = params_.at("norm.weight");
+  Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA);
+  cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+
+  // LM head投影到词汇表大小
+  auto& lm_head_weight = params_.at("lm_head.weight");
+  Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
+  logits = cuda_OP::matmul(final_h, lm_head_weight);
+
+  // 返回最后一个token的logits
+  return logits;
 }
 
+// -------------------------------
+// prefill_cuda: Qwen2 模型的序列预填充 CUDA 实现
+// -------------------------------
 template <typename T>
-Tensor<float> QwenModel<T>::prefill(const Tensor<uint32_t>* input,
-                                   ThreadPool& thread_pool,
-                                   KVCache* kv_cache) {
-  // 对于float类型直接返回内部实现的结果
-  if constexpr(std::is_same_v<T, float>) {
-    return prefill_internal(input, thread_pool, kv_cache);
-  } 
-  // 对于BF16类型需要转换回float
-  else if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    Tensor<__nv_bfloat16> bf16_output = prefill_internal(input, thread_pool, kv_cache);
-    return bf16_output.to_float();
+Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
+                                     KVCache<T>* kv_cache) {
+  // 确保输入在 CUDA 上
+  if (input->device() != Device::CUDA) {
+    throw std::runtime_error("Input tensor must be on CUDA device");
   }
-}
 
-// 内部实现 - forward相关
-template <typename T>
-Tensor<T> QwenModel<T>::forward_internal(
-    const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCache* kv_cache) {
-  if (device_ == Device::CPU) {
-    return forward_cpu(input, thread_pool, kv_cache);
-  } else {
-    return forward_cuda(input, kv_cache);
+  // 获取输入信息
+  const size_t seq_len = input->sizes()[0];
+
+  // 计算起始KV缓存位置
+  const size_t cache_start_pos = kv_cache->size();
+
+  // 确保KV缓存有足够空间
+  if (cache_start_pos + seq_len > kv_cache->max_seq_len_) {
+    throw std::runtime_error("KV cache overflow");
   }
-}
 
-template <typename T>
-Tensor<T> QwenModel<T>::forward_cpu(
-    const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCache* kv_cache) {
-  // BF16类型不支持CPU
-  if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    throw std::runtime_error("QwenModel<__nv_bfloat16>::forward_cpu is not supported");
+  // 重设KV缓存大小
+  kv_cache->resize(cache_start_pos + seq_len);
+
+  // 创建residual和hidden_states张量
+  Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);
+  Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
+  debugPrintTensor(residual, "residual");
+  // Token嵌入 (从embedding_table中获取token嵌入)
+  cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
+  debugPrintTensor(residual, "residual after gather");
+  // 主循环：遍历所有Transformer层
+  for (size_t i = 0; i < n_layers_; i++) {
+    std::string layer_prefix = "layers." + std::to_string(i) + ".";
+    debugPrintTensor(residual, "residual before layer " + std::to_string(i));
+    // 1. Input LayerNorm (RMSNorm)
+    auto& attention_norm_weight =
+        params_.at(layer_prefix + "attention_norm.weight");
+    cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
+                      rms_norm_eps_);
+    debugPrintTensor(hidden_states,
+                     "hidden_states after input_layernorm" + std::to_string(i));
+    // 2. Self-Attention
+    auto& wq = params_.at(layer_prefix + "attention.wq.weight");
+    auto& wk = params_.at(layer_prefix + "attention.wk.weight");
+    auto& wv = params_.at(layer_prefix + "attention.wv.weight");
+    auto& wo = params_.at(layer_prefix + "attention.wo.weight");
+
+    // 创建CUDA流以并行计算Q, K, V
+    cudaStream_t streams[3];
+    for (int j = 0; j < 3; j++) {
+      cudaError_t err = cudaStreamCreate(&streams[j]);
+      if (err != cudaSuccess) {
+        throw std::runtime_error("Failed to create CUDA stream");
+      }
+    }
+
+    // 计算Q, K, V投影
+    Tensor<T> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0]);
+    Tensor<T> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1]);
+    Tensor<T> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2]);
+
+    // 同步CUDA流
+    for (int j = 0; j < 3; j++) {
+      cudaStreamSynchronize(streams[j]);
+      cudaStreamDestroy(streams[j]);
+    }
+    debugPrintTensor(q_buf, "q_buf after matmul" + std::to_string(i));
+    debugPrintTensor(k_buf, "k_buf after matmul" + std::to_string(i));
+    debugPrintTensor(v_buf, "v_buf after matmul" + std::to_string(i));
+
+    // 重塑张量，准备应用RoPE
+    const size_t head_size = hidden_size_ / n_heads_;
+    const size_t kv_head_size = hidden_size_ / n_kv_heads_;
+    const size_t row_size = n_kv_heads_ * head_dim_;
+
+    // 使用正确的维度进行重塑操作
+    Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
+    Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
+    Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
+
+    // 应用旋转位置编码 (RoPE)
+    cuda_OP::rope(&q_buf_view, cache_start_pos, rope_theta_);
+    cuda_OP::rope(&k_buf_view, cache_start_pos, rope_theta_);
+    
+    debugPrintTensor(q_buf_view, "q_buf_view after rope" + std::to_string(i));
+    debugPrintTensor(k_buf_view, "k_buf_view after rope" + std::to_string(i));
+
+    // 将K,V存储到缓存中
+    for (size_t j = 0; j < seq_len; j++) {
+      size_t pos = cache_start_pos + j;
+      Tensor<T> k_i({1, row_size}, Device::CUDA);
+      Tensor<T> v_i({1, row_size}, Device::CUDA);
+
+      cudaMemcpy(k_i.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+
+      cudaMemcpy(v_i.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+
+      kv_cache->k_cache(i, pos) = std::move(k_i);
+      kv_cache->v_cache(i, pos) = std::move(v_i);
+    }
+
+    // 重新格式化Q用于注意力计算
+    Tensor<T> Q_3d = q_buf_view;
+    debugPrintTensor(Q_3d, "Q_3d before attention" + std::to_string(i));
+    
+    // 准备K和V张量用于注意力计算
+    Tensor<T> total_K, total_V;
+    size_t total_seq_len = 0;
+    
+    // 如果有缓存，拼接当前和缓存的K,V
+    if (cache_start_pos > 0) {
+      size_t cached_len = cache_start_pos;
+      total_seq_len = cached_len + seq_len;
+
+      // 分配足够大小的张量
+      total_K = Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+      total_V = Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+
+      // 拷贝缓存的K,V
+      for (size_t pos = 0; pos < cached_len; pos++) {
+        const auto& cached_k = kv_cache->k_cache(i, pos);
+        const auto& cached_v = kv_cache->v_cache(i, pos);
+
+        cudaMemcpy(total_K.data_ptr() + pos * row_size, cached_k.data_ptr(),
+                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+
+        cudaMemcpy(total_V.data_ptr() + pos * row_size, cached_v.data_ptr(),
+                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+      }
+
+      // 拷贝当前的K,V
+      cudaMemcpy(total_K.data_ptr() + cached_len * row_size,
+                k_buf_view.data_ptr(), seq_len * row_size * sizeof(T),
+                cudaMemcpyDeviceToDevice);
+
+      cudaMemcpy(total_V.data_ptr() + cached_len * row_size,
+                v_buf_view.data_ptr(), seq_len * row_size * sizeof(T),
+                cudaMemcpyDeviceToDevice);
+    } else {
+      // 没有缓存，直接使用当前的K,V
+      total_K = k_buf_view;
+      total_V = v_buf_view;
+      total_seq_len = seq_len;
+    }
+    
+    debugPrintTensor(total_K, "total_K after concat" + std::to_string(i));
+    debugPrintTensor(total_V, "total_V after concat" + std::to_string(i));
+    
+    // 计算注意力分数 - prefill版本处理整个序列
+    Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
+    cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores,
+                                              head_dim_);
+    debugPrintTensor(att_scores,
+                     "att_scores after compute_attention_scores_prefill" +
+                         std::to_string(i));
+                         
+    // Softmax处理注意力分数 - prefill版本需要设置mask=true
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true,
+                     cache_start_pos);
+    debugPrintTensor(att_scores,
+                     "att_scores after softmax" + std::to_string(i));
+                     
+    // 计算注意力输出 - prefill版本
+    Tensor<T> att_heads({seq_len, n_heads_, head_dim_}, Device::CUDA);
+    cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads,
+                                        n_heads_, head_dim_, total_seq_len,
+                                        n_kv_heads_);
+    debugPrintTensor(att_heads, "att_heads after compute_att_output_prefill" +
+                                    std::to_string(i));
+    // 投影回原始维度
+    Tensor<T> att_proj =
+        cuda_OP::matmul(att_heads.view({seq_len, n_heads_ * head_dim_}), wo);
+    debugPrintTensor(att_proj, "att_proj after matmul" + std::to_string(i));
+    // 残差连接
+    residual = residual + att_proj;
+    debugPrintTensor(residual,
+                     "residual after residual connection" + std::to_string(i));
+    // 3. Post Attention LayerNorm (RMSNorm)
+    auto& ffn_norm_weight =
+        params_.at(layer_prefix + "post_attention_norm.weight");
+    cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
+                      rms_norm_eps_);
+
+    // 4. MLP (Feed Forward Network)
+    auto& gate_weight = params_.at(layer_prefix + "feed_forward.w1.weight");
+    auto& up_weight = params_.at(layer_prefix + "feed_forward.w2.weight");
+    auto& down_weight = params_.at(layer_prefix + "feed_forward.w3.weight");
+
+    // SwiGLU激活: (gate_proj * silu(up_proj))
+    Tensor<T> gate_buf = cuda_OP::matmul(hidden_states, gate_weight);
+    Tensor<T> up_buf = cuda_OP::matmul(hidden_states, up_weight);
+    debugPrintTensor(gate_buf, "gate_buf after matmul" + std::to_string(i));
+    debugPrintTensor(up_buf, "up_buf after matmul" + std::to_string(i));
+    cuda_OP::silu(&up_buf, &up_buf);                   // SiLU激活
+    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
+    debugPrintTensor(gate_buf, "gate_buf after silu" + std::to_string(i));
+    // 投影回原始维度
+    Tensor<T> ffn_out = cuda_OP::matmul(gate_buf, down_weight);
+    debugPrintTensor(ffn_out, "ffn_out after matmul" + std::to_string(i));
+    // 残差连接
+    residual = residual + ffn_out;
+    debugPrintTensor(residual,
+                     "residual after residual connection" + std::to_string(i));
   }
-  
-  // Placeholder implementation - should be replaced with actual code
-  // This is very similar to LlamaModel's forward_cpu but with Qwen's specific architecture
-  throw std::runtime_error("QwenModel<float>::forward_cpu not implemented yet");
+
+  // 最终的LayerNorm (RMSNorm)
+  auto& norm_weight = params_.at("norm.weight");
+  Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA);
+  cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+
+  // LM head投影到词汇表大小
+  auto& lm_head_weight = params_.at("lm_head.weight");
+  Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
+  logits = cuda_OP::matmul(final_h, lm_head_weight);
+
+  // 返回最后一个token的logits
+  return logits;
 }
 
-template <typename T>
-Tensor<T> QwenModel<T>::forward_cuda(
-    const Tensor<uint32_t>* input, KVCache* kv_cache) {
-  // Placeholder implementation
-  throw std::runtime_error("QwenModel::forward_cuda not implemented yet");
-}
-
-// 内部实现 - prefill相关
-template <typename T>
-Tensor<T> QwenModel<T>::prefill_internal(
-    const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCache* kv_cache) {
-  if (device_ == Device::CPU) {
-    return prefill_cpu(input, kv_cache, thread_pool);
-  } else {
-    return prefill_cuda(input, kv_cache);
-  }
-}
-
-template <typename T>
-Tensor<T> QwenModel<T>::prefill_cpu(
-    const Tensor<uint32_t>* input, KVCache* kv_cache, ThreadPool& thread_pool) {
-  // BF16类型不支持CPU
-  if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    throw std::runtime_error("QwenModel<__nv_bfloat16>::prefill_cpu is not supported");
-  }
-  
-  // Placeholder implementation
-  throw std::runtime_error("QwenModel<float>::prefill_cpu not implemented yet");
-}
-
-template <typename T>
-Tensor<T> QwenModel<T>::prefill_cuda(
-    const Tensor<uint32_t>* input, KVCache* kv_cache) {
-  // Placeholder implementation
-  throw std::runtime_error("QwenModel::prefill_cuda not implemented yet");
-}
-
-// 设备管理
+// -------------------------------
+// cuda()：将所有参数移到 CUDA，并设置设备
+// -------------------------------
 template <typename T>
 QwenModel<T>& QwenModel<T>::cuda() {
-  if (device_ == Device::CUDA) return *this;
-  
-  std::cout << "[QwenModel::cuda] Moving model to CUDA." << std::endl;
-  device_ = Device::CUDA;
-  
-  // Convert all parameters to CUDA
-  for (auto& param : params_) {
-    param.second.cuda();
+  for (auto& kv : params_) {
+    if (kv.second.device() != Device::CUDA) {
+      kv.second.cuda();
+    }
   }
-  
+  device_ = Device::CUDA;
   return *this;
 }
 
+// -------------------------------
+// cpu()：Qwen 模型仅支持 CUDA，故调用 cpu() 抛出异常
+// -------------------------------
 template <typename T>
 QwenModel<T>& QwenModel<T>::cpu() {
-  // BF16类型不支持CPU
-  if constexpr(std::is_same_v<T, __nv_bfloat16>) {
-    throw std::runtime_error("QwenModel<__nv_bfloat16>::cpu is not supported, BF16 requires CUDA");
-  }
-  
-  if (device_ == Device::CPU) return *this;
-  
-  std::cout << "[QwenModel::cpu] Moving model to CPU." << std::endl;
-  device_ = Device::CPU;
-  
-  // Convert all parameters to CPU
-  for (auto& param : params_) {
-    param.second.cpu();
-  }
-  
+  throw std::runtime_error("QwenModel only supports CUDA execution.");
   return *this;
 }
 
-// Helper function to convert weights from float to __nv_bfloat16
+// -------------------------------
+// generate: Token 生成接口，目前作为 stub
+// -------------------------------
+template <typename T>
+std::vector<uint32_t> QwenModel<T>::generate(
+    const std::vector<uint32_t>& input_ids, size_t max_length,
+    float temperature, float top_p, size_t top_k) {
+  // TODO: 实现 Qwen 模型的 token 生成逻辑
+  throw std::runtime_error("Token generation not implemented for QwenModel");
+  return std::vector<uint32_t>();
+}
+
+// -------------------------------
+// 辅助函数：将 FP32 权重转换为 __nv_bfloat16 权重
+// -------------------------------
 std::unordered_map<std::string, Tensor<__nv_bfloat16>> convert_weights_to_bf16(
     const std::unordered_map<std::string, Tensor<float>>& float_weights) {
   std::unordered_map<std::string, Tensor<__nv_bfloat16>> bf16_weights;
-  
-  for (const auto& [name, tensor] : float_weights) {
-    // Get shape and size information
-    std::vector<size_t> shape = tensor.sizes();
-    size_t total_size = tensor.numel();
-    
-    // Create a buffer for bf16 data
-    std::vector<__nv_bfloat16> bf16_data(total_size);
-    
-    // Get raw pointers
-    const float* float_ptr = tensor.data_ptr();
-    
-    // Convert each element from float to bf16
-    for (size_t i = 0; i < total_size; ++i) {
-      bf16_data[i] = __nv_bfloat16(float_ptr[i]);
+  for (const auto& kv : float_weights) {
+    const std::string& key = kv.first;
+    const Tensor<float>& tensor = kv.second;
+    std::vector<__nv_bfloat16> bf16_data;
+    bf16_data.reserve(tensor.numel());
+    const float* data_ptr = tensor.data_ptr();
+    for (size_t i = 0; i < tensor.numel(); ++i) {
+      bf16_data.push_back(__nv_bfloat16(data_ptr[i]));
     }
-    
-    // Create new tensor with bf16 data
-    Tensor<__nv_bfloat16> bf16_tensor(std::move(bf16_data), shape);
-    
-    // If the original tensor was on CUDA, move the new one to CUDA too
-    if (tensor.device() == Device::CUDA) {
-      bf16_tensor.cuda();
-    }
-    
-    // Add to the result map
-    bf16_weights[name] = std::move(bf16_tensor);
+    bf16_weights.emplace(
+        key, Tensor<__nv_bfloat16>(std::move(bf16_data), tensor.sizes()));
   }
-  
   return bf16_weights;
 }
 
-// 显式实例化模板类，这样在其他文件中可以使用它们
+// 显式模板实例化
 template class QwenModel<float>;
 template class QwenModel<__nv_bfloat16>;

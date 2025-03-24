@@ -3,10 +3,12 @@
 #include <string>
 #include <unordered_map>
 
+#include "kvcache_base.hpp"  // Include the new header for KVCacheBase
 #include "tensor.hpp"
 #include "thread_pool.hpp"
 
 // Forward declaration of KVCache
+template <typename T>
 class KVCache;
 
 // Base model class that will be used for both LlamaModel and QwenModel
@@ -15,10 +17,12 @@ class BaseModel {
   virtual ~BaseModel() = default;
 
   // Core inference methods that must be implemented by derived classes
-  virtual Tensor<float> forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                           KVCache* kv_cache) = 0;
-  virtual Tensor<float> prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                           KVCache* kv_cache) = 0;
+  virtual Tensor<float> forward(const Tensor<uint32_t>* input,
+                                ThreadPool& thread_pool,
+                                KVCacheBase* kv_cache) = 0;
+  virtual Tensor<float> prefill(const Tensor<uint32_t>* input,
+                                ThreadPool& thread_pool,
+                                KVCacheBase* kv_cache) = 0;
 
   // Common methods for all model types
   virtual bool verify_params() const = 0;

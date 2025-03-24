@@ -50,10 +50,14 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
   int vocab_size = static_cast<int>(embedding_table->sizes()[0]);
 
   // 验证设备一致性
-  if (input->device() != Device::CUDA ||
-      embedding_table->device() != Device::CUDA ||
-      output->device() != Device::CUDA) {
-    throw std::runtime_error("All tensors must be on CUDA device");
+  if (input->device() != Device::CUDA) {
+    throw std::runtime_error("Input must be on CUDA device");
+  }
+  if (output->device() != Device::CUDA) {
+    throw std::runtime_error("Output must be on CUDA device");
+  }
+  if (embedding_table->device() != Device::CUDA) {
+    throw std::runtime_error("Embedding table must be on CUDA device");
   }
 
   // 验证输入数据有效性
