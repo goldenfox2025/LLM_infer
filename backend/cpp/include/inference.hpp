@@ -6,8 +6,8 @@
 
 #include "tensor.hpp"
 #include "thread_pool.hpp"
-// 前向声明 LlamaModel
-class LlamaModel;
+// 前向声明 BaseModel
+class BaseModel;
 
 // KVCache：用于存储每一层每个 token 的 Key 和 Value 张量
 class KVCache {
@@ -49,9 +49,9 @@ class KVCache {
 
 class InferenceEngine {
  public:
-  // 构造时传入共享的 LlamaModel 实例
+  // 构造时传入共享的 BaseModel 实例
   // device: 指定 InferenceEngine 运行的设备 (CPU or CUDA)
-  InferenceEngine(std::shared_ptr<LlamaModel> model,
+  InferenceEngine(std::shared_ptr<BaseModel> model,
                   Device device = Device::CUDA);
 
   // 生成单个 token
@@ -75,7 +75,7 @@ class InferenceEngine {
 
  private:
   ThreadPool thread_pool_;
-  std::shared_ptr<LlamaModel> model_;
+  std::shared_ptr<BaseModel> model_;
   KVCache kv_cache_;
   Device device_;
 };

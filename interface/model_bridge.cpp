@@ -1,21 +1,23 @@
-
-
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include <iostream>
 
+#include "base_model.hpp"
 #include "inference.hpp"
 #include "llama.hpp"
+#include "qwen.hpp"
 
 enum class ModelType {
   LLAMA,
+  QWEN,
+  QWEN_BF16,
 };
 
 class ModelFactory {
  public:
-  static std::shared_ptr<LlamaModel> create_model(
+  static std::shared_ptr<BaseModel> create_model(
       ModelType type,
       const std::unordered_map<std::string, Tensor<float>>& weights,
       const std::unordered_map<std::string, int>& config) {
@@ -28,6 +30,29 @@ class ModelFactory {
         }
         return model;
       }
+      case ModelType::QWEN: {
+        auto model = std::make_shared<QwenModel<float>>(weights, config);
+        model->print_model_info();
+        if (!model->verify_params()) {
+          throw std::runtime_error("Model parameter verification failed");
+        }
+        return model;
+      }
+      case ModelType::QWEN_BF16: {
+        // Convert weights to bfloat16
+        auto bf16_weights = convert_weights_to_bf16(weights);
+
+        // Create the bf16 model
+        auto bf16_model =
+            std::make_shared<QwenModel<__nv_bfloat16>>(bf16_weights, config);
+        bf16_model->print_model_info();
+        if (!bf16_model->verify_params()) {
+          throw std::runtime_error("Model parameter verification failed");
+        }
+        
+        // 直接返回QwenModel<__nv_bfloat16>，现在它已经能直接继承BaseModel
+        return bf16_model;
+      }
       default:
         throw std::runtime_error("Unsupported model type");
     }
@@ -37,7 +62,7 @@ class ModelFactory {
 namespace py = pybind11;
 
 // 全局变量存储模型和推理引擎实例
-std::shared_ptr<LlamaModel> g_model;
+std::shared_ptr<BaseModel> g_model;
 std::unique_ptr<InferenceEngine> g_engine;
 
 bool init_model(py::dict config, py::dict weights,
@@ -165,6 +190,10 @@ bool init_model(py::dict config, py::dict weights,
     ModelType type;
     if (model_type == "llama") {
       type = ModelType::LLAMA;
+    } else if (model_type == "qwen") {
+      type = ModelType::QWEN;
+    } else if (model_type == "qwen_bf16") {
+      type = ModelType::QWEN_BF16;
     } else {
       throw std::runtime_error("Unsupported model type: " + model_type);
     }

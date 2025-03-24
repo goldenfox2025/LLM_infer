@@ -11,6 +11,15 @@
 #include <string>
 #include <vector>
 enum class Device { CPU, CUDA };
+
+// 前向声明Tensor类模板，用于友元声明
+template <typename T>
+class Tensor;
+
+// 声明类型转换辅助函数，专用于Tensor<__nv_bfloat16>到Tensor<float>的转换
+template <typename FromType, typename ToType>
+Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
+
 template <typename T>
 class Tensor {
  private:
@@ -26,6 +35,14 @@ class Tensor {
   static inline void myCudaFree(T* p) { cudaFree(p); }
 
  public:
+  // 友元声明，允许任何Tensor<U>访问Tensor<T>的私有成员
+  template <typename U>
+  friend class Tensor;
+  
+  // 类型转换辅助函数声明为友元
+  template <typename FromType, typename ToType>
+  friend Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
+
   // 默认构造函数
   Tensor()
       : data_(std::make_shared<std::vector<T>>()),
@@ -134,6 +151,31 @@ class Tensor {
     strides_ = compute_strides(shape_);
   }
 
+  // 新增构造函数：从shape和device构造
+  Tensor(const std::vector<size_t>& shape, Device device)
+      : shape_(shape),
+        offset_(0),
+        length_(1),
+        device_(device),
+        gpu_data_(nullptr, myCudaFree) {
+    for (size_t dim : shape_) {
+      length_ *= dim;
+    }
+    strides_ = compute_strides(shape_);
+    if (device_ == Device::CPU) {
+      data_ = std::make_shared<std::vector<T>>(length_);
+      gpu_data_.reset();
+    } else if (device_ == Device::CUDA) {
+      data_.reset();
+      T* gpu_ptr;
+      cudaError_t error = cudaMalloc(&gpu_ptr, length_ * sizeof(T));
+      checkCudaError(error);
+      gpu_data_ = std::shared_ptr<T>(gpu_ptr, myCudaFree);
+    } else {
+      throw std::runtime_error("Invalid device specified");
+    }
+  }
+
   // 拷贝构造函数（CUDA 下采用浅拷贝，即共享 gpu_data_）
   Tensor(const Tensor& other)
       : data_(other.data_),
@@ -169,41 +211,13 @@ class Tensor {
   }
   // 转换为 Tensor<float>（若当前类型 T 不是 float，则每个元素转换为 float）
   Tensor<float> to_float() const {
-    // 构造与当前形状和设备相同的结果张量
-    Tensor<float> result(this->shape_, this->device_);
-    result.offset_ = this->offset_;
-    result.length_ = this->length_;
-    result.strides_ = this->strides_;
-    if (device_ == Device::CPU) {
-      // CPU 模式：data_ 保存有效数据
-      // 分配一个新的 vector，并逐元素转换为 float
-      auto new_data = std::make_shared<std::vector<float>>(length_);
-      const T* src = this->data_ptr();
-      for (size_t i = 0; i < length_; ++i) {
-        (*new_data)[i] = static_cast<float>(src[i]);
-      }
-      result.data_ = new_data;
+    // 如果已经是float类型，直接返回自身的拷贝
+    if constexpr (std::is_same_v<T, float>) {
+      return *this;
     } else {
-      // CUDA 模式：gpu_data_ 保存数据
-      std::vector<T> host_data(length_);
-      cudaError_t err = cudaMemcpy(host_data.data(), gpu_data_.get(),
-                                   length_ * sizeof(T), cudaMemcpyDeviceToHost);
-      // 使用类内的 checkCudaError 检查错误
-      checkCudaError(err);
-      std::vector<float> host_data_float(length_);
-      for (size_t i = 0; i < length_; ++i) {
-        host_data_float[i] = static_cast<float>(host_data[i]);
-      }
-      // 分配新的 GPU 内存用于存放 float 数据
-      float* gpu_ptr;
-      err = cudaMalloc(&gpu_ptr, length_ * sizeof(float));
-      checkCudaError(err);
-      err = cudaMemcpy(gpu_ptr, host_data_float.data(), length_ * sizeof(float),
-                       cudaMemcpyHostToDevice);
-      checkCudaError(err);
-      result.gpu_data_ = std::shared_ptr<float>(gpu_ptr, myCudaFree);
+      // 否则调用专用的类型转换函数
+      return tensor_convert<T, float>(*this);
     }
-    return result;
   }
 
   // 返回数据指针
@@ -395,3 +409,45 @@ class Tensor {
   size_t length_;
   Device device_;
 };
+
+// 实现类型转换辅助函数
+template <typename FromType, typename ToType>
+Tensor<ToType> tensor_convert(const Tensor<FromType>& src) {
+  // 构造与当前形状和设备相同的结果张量
+  Tensor<ToType> result(src.shape_, src.device_);
+  result.offset_ = src.offset_;
+  result.length_ = src.length_;
+  result.strides_ = src.strides_;
+  if (src.device_ == Device::CPU) {
+    // CPU 模式：data_ 保存有效数据
+    // 分配一个新的 vector，并逐元素转换为 float
+    auto new_data = std::make_shared<std::vector<ToType>>(src.length_);
+    const FromType* src_ptr = src.data_ptr();  // 这里已经考虑了offset_
+    for (size_t i = 0; i < src.length_; ++i) {
+      (*new_data)[i] = static_cast<ToType>(src_ptr[i]);
+    }
+    result.data_ = new_data;
+  } else {
+    // CUDA 模式：gpu_data_ 保存数据
+    std::vector<FromType> host_data(src.length_);
+    // 使用data_ptr()获取正确的指针（包含offset_）
+    const FromType* src_ptr = src.data_ptr();
+    cudaError_t err = cudaMemcpy(host_data.data(), src_ptr,
+                                 src.length_ * sizeof(FromType), cudaMemcpyDeviceToHost);
+    // 使用类内的 checkCudaError 检查错误
+    result.checkCudaError(err);
+    std::vector<ToType> host_data_float(src.length_);
+    for (size_t i = 0; i < src.length_; ++i) {
+      host_data_float[i] = static_cast<ToType>(host_data[i]);
+    }
+    // 分配新的 GPU 内存用于存放 float 数据
+    ToType* gpu_ptr;
+    err = cudaMalloc(&gpu_ptr, src.length_ * sizeof(ToType));
+    result.checkCudaError(err);
+    err = cudaMemcpy(gpu_ptr, host_data_float.data(), src.length_ * sizeof(ToType),
+                     cudaMemcpyHostToDevice);
+    result.checkCudaError(err);
+    result.gpu_data_ = std::shared_ptr<ToType>(gpu_ptr, result.myCudaFree);
+  }
+  return result;
+}

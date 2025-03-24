@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "base_model.hpp"
 #include "llama.hpp"
 #include "operators.hpp"
 
@@ -124,7 +125,7 @@ KVCache& KVCache::cpu() {
 // ------------------------
 // InferenceEngine 实现
 // ------------------------
-InferenceEngine::InferenceEngine(std::shared_ptr<LlamaModel> model,
+InferenceEngine::InferenceEngine(std::shared_ptr<BaseModel> model,
                                  Device device)
     : model_(model),
       // 使用模型参数初始化 KVCache，并指定设备
@@ -135,7 +136,7 @@ InferenceEngine::InferenceEngine(std::shared_ptr<LlamaModel> model,
   // std::cout
   //     << "[InferenceEngine::InferenceEngine] 初始化 InferenceEngine, device="
   //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
-  // 将模型也移动到指定的设备 (假设 LlamaModel 也实现了 cuda/cpu)
+  // 将模型也移动到指定的设备 (假设 BaseModel 也实现了 cuda/cpu)
   if (device_ == Device::CUDA) {
     this->cuda();
   }
