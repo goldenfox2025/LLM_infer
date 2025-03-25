@@ -67,6 +67,7 @@
 | **thread_pool.hpp / .cpp**  | 线程池实现，支持CPU推理时的多线程异步任务调度                              |
 | **llama_prefill.cpp**       | 实现 Prefill 阶段（上下文预填充）                                |
 | **llama_decode.cpp**        | 实现 Decode 阶段（逐步生成与输出）                               |
+| **qwen.hpp/ . cpp**        | 实现 qwen模型的支持                   |
 
 ### 2. CUDA 后端适配
 
