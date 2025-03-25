@@ -8,7 +8,7 @@
 #include "base_model.hpp"
 #include "llama.hpp"
 #include "operators.hpp"
-
+#include "qwen.hpp"
 // ------------------------
 // KVCache 实现
 // ------------------------
@@ -147,6 +147,9 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
   //     << "[InferenceEngine::InferenceEngine] 初始化 InferenceEngine, device="
   //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
   if (device_ == Device::CUDA) {
+    std::cout
+        << "[InferenceEngine::InferenceEngine] Moving InferenceEngine to CUDA"
+        << std::endl;
     this->cuda();
   }
 }
@@ -225,6 +228,7 @@ void InferenceEngine<T>::generate_with_callback(
   Tensor<float> prefill_logits =
       model_->prefill(&input_tensor, thread_pool_, &kv_cache_);
 
+  // debugPrintTensor(prefill_logits, "prefill_logits");
   // std::cout << "[InferenceEngine::prefill] " << std::endl;
 
   // prefill_logits.shape = [seq_len, vocab_size]
@@ -242,13 +246,14 @@ void InferenceEngine<T>::generate_with_callback(
   Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
                             Device::CPU);  // 强制使用CPU设备
 
+  // debugPrintTensor(last_logits, "last_logits");
   uint32_t next_token = OP::sample(&last_logits, temperature, top_p, top_k);
 
   // 通过回调函数将 token 传回给 Python
-  callback(next_token);
   if (next_token == model_->get_eos_token_id()) {
     return;
   }
+  callback(next_token);
 
   std::vector<uint32_t> output = input_ids;
   output.push_back(next_token);
@@ -262,10 +267,10 @@ void InferenceEngine<T>::generate_with_callback(
     next_token =
         generate_next_token(thread_pool_, output, temperature, top_p, top_k);
     output.push_back(next_token);
-    callback(next_token);
     if (next_token == model_->get_eos_token_id()) {
       break;
     }
+    callback(next_token);
   }
 }
 template <typename T>
@@ -277,8 +282,14 @@ InferenceEngine<T>& InferenceEngine<T>::cuda() {
   if (device_ == Device::CUDA) {
     return *this;
   }
-  model_->cuda();
+  if (model_->device() == Device::CPU) {
+    std::cout << "[InferenceEngine::cuda] Moving model to CUDA" << std::endl;
+    model_->cuda();
+  }
+
+  std::cout << "[InferenceEngine::cuda] Moving KVCache to CUDA" << std::endl;
   kv_cache_.cuda();
+
   device_ = Device::CUDA;
   return *this;
 }

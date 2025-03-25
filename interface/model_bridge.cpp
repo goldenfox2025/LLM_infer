@@ -249,7 +249,10 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
   const std::unordered_map<std::string, std::string> qwen_key_mapping = {
       {"model.embed_tokens.weight", "token_embeddings.weight"},
       {"model.norm.weight", "norm.weight"},
-      {"lm_head.weight", "lm_head"}};
+      {"lm_head.weight", "lm_head"},
+      {"transformer.wte.weight", "token_embeddings.weight"},
+      {"transformer.ln_f.weight", "norm.weight"}
+  };
   for (const auto& [src_key, dst_key] : qwen_key_mapping) {
     if (weights.contains(src_key)) {
       std::cout << "Processing Qwen FP32 key: " << src_key << " -> " << dst_key
@@ -273,21 +276,21 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
   // 处理层级权重（权重与偏置）
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_key_mapping = {
-          {"input_layernorm.weight", "attention_norm.weight"},
-          {"post_attention_layernorm.weight", "ffn_norm.weight"},
-          {"self_attn.q_proj.weight", "attention.wq.weight"},
-          {"self_attn.k_proj.weight", "attention.wk.weight"},
-          {"self_attn.v_proj.weight", "attention.wv.weight"},
-          {"self_attn.o_proj.weight", "attention.wo.weight"},
-          {"mlp.gate_proj.weight", "feed_forward.w1.weight"},
-          {"mlp.up_proj.weight", "feed_forward.w2.weight"},
-          {"mlp.down_proj.weight", "feed_forward.w3.weight"}};
+          {"input_layernorm.weight", "input_layernorm.weight"},
+          {"post_attention_layernorm.weight", "post_attention_layernorm.weight"},
+          {"self_attn.q_proj.weight", "self_attn.q_proj.weight"},
+          {"self_attn.k_proj.weight", "self_attn.k_proj.weight"},
+          {"self_attn.v_proj.weight", "self_attn.v_proj.weight"},
+          {"self_attn.o_proj.weight", "self_attn.o_proj.weight"},
+          {"mlp.gate_proj.weight", "mlp.gate_proj.weight"},
+          {"mlp.up_proj.weight", "mlp.up_proj.weight"},
+          {"mlp.down_proj.weight", "mlp.down_proj.weight"}};
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_bias_mapping = {
-          {"self_attn.q_proj.bias", "attention.wq.bias"},
-          {"self_attn.k_proj.bias", "attention.wk.bias"},
-          {"self_attn.v_proj.bias", "attention.wv.bias"},
-          {"self_attn.o_proj.bias", "attention.wo.bias"}};
+          {"self_attn.q_proj.bias", "self_attn.q_proj.bias"},
+          {"self_attn.k_proj.bias", "self_attn.k_proj.bias"},
+          {"self_attn.v_proj.bias", "self_attn.v_proj.bias"},
+          {"self_attn.o_proj.bias", "self_attn.o_proj.bias"}};
   for (auto item : weights) {
     std::string key = py::str(item.first).cast<std::string>();
     if (key.find("model.layers.") == 0) {
@@ -348,11 +351,41 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
                  "token_embeddings.weight"
               << std::endl;
     if (cpp_weights.find("token_embeddings.weight") != cpp_weights.end()) {
-      Tensor<float> lm_head =
-          cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
-      cpp_weights.emplace("lm_head", std::move(lm_head));
+      try {
+        Tensor<float> lm_head =
+            cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
+        cpp_weights.emplace("lm_head", std::move(lm_head));
+      } catch (const std::exception& e) {
+        std::cerr << "Error creating lm_head: " << e.what() << std::endl;
+        throw;
+      }
     } else {
       std::cerr << "Error: token_embeddings.weight not found" << std::endl;
+      // 尝试直接查找模型中可能的embedding键
+      for (auto item : weights) {
+        std::string key = py::str(item.first).cast<std::string>();
+        std::cout << "Available key: " << key << std::endl;
+        if (key.find("embed") != std::string::npos || 
+            key.find("wte") != std::string::npos) {
+          std::cout << "Found potential embedding key: " << key << std::endl;
+          py::array_t<float> np_array = item.second.cast<py::array_t<float>>();
+          std::vector<size_t> shape;
+          for (int i = 0; i < np_array.ndim(); i++) {
+            shape.push_back(np_array.shape(i));
+          }
+          std::vector<float> data(np_array.data(),
+                                np_array.data() + np_array.size());
+          cpp_weights.emplace("token_embeddings.weight", 
+                             Tensor<float>(std::move(data), shape));
+          try {
+            Tensor<float> lm_head = cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
+            cpp_weights.emplace("lm_head", std::move(lm_head));
+            break;
+          } catch (const std::exception& e) {
+            std::cerr << "Error creating lm_head from found key: " << e.what() << std::endl;
+          }
+        }
+      }
     }
   }
   return cpp_weights;
@@ -386,21 +419,21 @@ process_qwen_weights_bf16(const py::dict& weights) {
   // 处理层级权重（权重与偏置）
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_key_mapping = {
-          {"input_layernorm.weight", "attention_norm.weight"},
-          {"post_attention_layernorm.weight", "ffn_norm.weight"},
-          {"self_attn.q_proj.weight", "attention.wq.weight"},
-          {"self_attn.k_proj.weight", "attention.wk.weight"},
-          {"self_attn.v_proj.weight", "attention.wv.weight"},
-          {"self_attn.o_proj.weight", "attention.wo.weight"},
-          {"mlp.gate_proj.weight", "feed_forward.w1.weight"},
-          {"mlp.up_proj.weight", "feed_forward.w2.weight"},
-          {"mlp.down_proj.weight", "feed_forward.w3.weight"}};
+          {"input_layernorm.weight", "input_layernorm.weight"},
+          {"post_attention_layernorm.weight", "post_attention_layernorm.weight"},
+          {"self_attn.q_proj.weight", "self_attn.q_proj.weight"},
+          {"self_attn.k_proj.weight", "self_attn.k_proj.weight"},
+          {"self_attn.v_proj.weight", "self_attn.v_proj.weight"},
+          {"self_attn.o_proj.weight", "self_attn.o_proj.weight"},
+          {"mlp.gate_proj.weight", "mlp.gate_proj.weight"},
+          {"mlp.up_proj.weight", "mlp.up_proj.weight"},
+          {"mlp.down_proj.weight", "mlp.down_proj.weight"}};
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_bias_mapping = {
-          {"self_attn.q_proj.bias", "attention.wq.bias"},
-          {"self_attn.k_proj.bias", "attention.wk.bias"},
-          {"self_attn.v_proj.bias", "attention.wv.bias"},
-          {"self_attn.o_proj.bias", "attention.wo.bias"}};
+          {"self_attn.q_proj.bias", "self_attn.q_proj.bias"},
+          {"self_attn.k_proj.bias", "self_attn.k_proj.bias"},
+          {"self_attn.v_proj.bias", "self_attn.v_proj.bias"},
+          {"self_attn.o_proj.bias", "self_attn.o_proj.bias"}};
   for (auto item : weights) {
     std::string key = py::str(item.first).cast<std::string>();
     if (key.find("model.layers.") == 0) {
@@ -532,6 +565,10 @@ bool init_model(py::dict config, py::dict weights,
           config["max_position_embeddings"].cast<int>();
       cpp_config["bos_token_id"] = config["bos_token_id"].cast<int>();
       cpp_config["eos_token_id"] = config["eos_token_id"].cast<int>();
+      cpp_config["rms_norm_eps"] =
+          static_cast<int>(config["rms_norm_eps"].cast<float>());
+      cpp_config["rope_theta"] =
+          static_cast<int>(config["rope_theta"].cast<float>());
       // 处理 Qwen FP32 权重
       cpp_weights_fp32 = process_qwen_weights_fp32(weights);
       g_model = ModelFactory::create_model(type, cpp_weights_fp32, cpp_config);
@@ -554,7 +591,7 @@ bool init_model(py::dict config, py::dict weights,
       cpp_config["bos_token_id"] = config["bos_token_id"].cast<int>();
       cpp_config["eos_token_id"] = config["eos_token_id"].cast<int>();
       cpp_config["rms_norm_eps"] =
-          static_cast<int>(config["rms_norm_eps"].cast<float>() * 1e6f);
+          static_cast<int>(config["rms_norm_eps"].cast<float>());
       cpp_config["rope_theta"] =
           static_cast<int>(config["rope_theta"].cast<float>());
       // 处理 Qwen BF16 权重（输入必须为 PyTorch bf16 类型）

@@ -7,64 +7,6 @@
 #include "cudaOP.cuh"
 
 // Debug print function for tensors
-template <typename T>
-void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
-                      size_t num_to_print = 10) {
-  std::cout << "[Debug] " << tensor_name << ":\n";
-
-  // 1) Print shape
-  std::cout << "  shape: [";
-  for (auto s : tensor.sizes()) {
-    std::cout << s << " ";
-  }
-  std::cout << "]\n";
-
-  // 2) Print strides
-  std::cout << "  strides: [";
-  for (auto st : tensor.strides()) {
-    std::cout << st << " ";
-  }
-  std::cout << "]\n";
-
-  // 3) Print device
-  std::cout << "  device: ";
-  if (tensor.device() == Device::CPU) {
-    std::cout << "CPU";
-  } else if (tensor.device() == Device::CUDA) {
-    std::cout << "CUDA";
-  } else {
-    std::cout << "UNKNOWN";
-  }
-  std::cout << "\n";
-
-  // 4) Print elements starting from offset 0
-  size_t offset = 0;  // 从开始处打印
-  size_t total_elements = tensor.numel();
-  size_t n_print = std::min(num_to_print, total_elements - offset);
-
-  std::cout << "  elements from offset " << offset << " (" << n_print
-            << " element(s)): ";
-  if (tensor.device() == Device::CPU) {
-    const T* ptr = tensor.data_ptr();
-    for (size_t i = 0; i < n_print; i++) {
-      std::cout << ptr[offset + i] << " ";
-    }
-    std::cout << "\n";
-  } else {
-    // Copy from GPU to CPU, then print
-    std::vector<T> host_buffer(n_print);
-    cudaError_t err = cudaMemcpy(host_buffer.data(), tensor.data_ptr() + offset,
-                                 n_print * sizeof(T), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      std::cout << "  [Error] cudaMemcpy failed\n";
-      return;
-    }
-    for (size_t i = 0; i < n_print; i++) {
-      std::cout << host_buffer[i] << " ";
-    }
-    std::cout << "\n";
-  }
-}
 
 // -------------------------------
 // QwenModel<T> 构造函数
@@ -134,10 +76,16 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   }
 
   // 获取输入信息
-  const size_t seq_len = 1;     // 前向传播时序列长度固定为1
+  const size_t seq_len = 1;  // 前向传播时序列长度固定为1
 
   // 计算起始KV缓存位置
-  const size_t cache_start_pos = kv_cache->size();
+  size_t offset = 0;
+  if (kv_cache) {
+    if (kv_cache->device() != Device::CUDA) {
+      throw std::runtime_error("KVCache must be on CUDA device");
+    }
+    offset = kv_cache->size() - seq_len;
+  }
 
   // 创建residual和hidden_states张量(没有batch维度)
   Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);
@@ -152,15 +100,49 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
     // 1. Input LayerNorm (RMSNorm)
     auto& attention_norm_weight =
-        params_.at(layer_prefix + "attention_norm.weight");
+        params_.at(layer_prefix + "input_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
                       rms_norm_eps_);
 
     // 2. Self-Attention
-    auto& wq = params_.at(layer_prefix + "attention.wq.weight");
-    auto& wk = params_.at(layer_prefix + "attention.wk.weight");
-    auto& wv = params_.at(layer_prefix + "attention.wv.weight");
-    auto& wo = params_.at(layer_prefix + "attention.wo.weight");
+    auto& wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
+    auto& wk = params_.at(layer_prefix + "self_attn.k_proj.weight");
+    auto& wv = params_.at(layer_prefix + "self_attn.v_proj.weight");
+    auto& wo = params_.at(layer_prefix + "self_attn.o_proj.weight");
+
+    // 获取偏置项（如果存在）
+    const Tensor<T>* q_bias = nullptr;
+    const Tensor<T>* k_bias = nullptr;
+    const Tensor<T>* v_bias = nullptr;
+    const Tensor<T>* o_bias = nullptr;
+
+    try {
+      q_bias = &params_.at(layer_prefix + "self_attn.q_proj.bias");
+      // std::cout << "Found q_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      k_bias = &params_.at(layer_prefix + "self_attn.k_proj.bias");
+      // std::cout << "Found k_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      v_bias = &params_.at(layer_prefix + "self_attn.v_proj.bias");
+      // std::cout << "Found v_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      o_bias = &params_.at(layer_prefix + "self_attn.o_proj.bias");
+      // std::cout << "Found o_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
 
     // 创建CUDA流以并行计算Q, K, V
     cudaStream_t streams[3];
@@ -171,10 +153,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       }
     }
 
-    // 计算Q, K, V投影
-    Tensor<T> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0]);
-    Tensor<T> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1]);
-    Tensor<T> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2]);
+    // 计算Q, K, V投影（使用新的matmul接口，bias作为第四个参数）
+    Tensor<T> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0], q_bias);
+    Tensor<T> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1], k_bias);
+    Tensor<T> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2], v_bias);
 
     // 同步CUDA流
     for (int j = 0; j < 3; j++) {
@@ -183,16 +165,13 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     }
 
     // 重塑张量，准备应用RoPE
-    Tensor<T> q_buf_view =
-        q_buf.view({seq_len, n_heads_, head_dim_});
-    Tensor<T> k_buf_view =
-        k_buf.view({seq_len, n_kv_heads_, head_dim_});
-    Tensor<T> v_buf_view =
-        v_buf.view({seq_len, n_kv_heads_, head_dim_});
+    Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
+    Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
+    Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, cache_start_pos, rope_theta_);
-    cuda_OP::rope(&k_buf_view, cache_start_pos, rope_theta_);
+    cuda_OP::rope(&q_buf_view, offset, rope_theta_);
+    cuda_OP::rope(&k_buf_view, offset, rope_theta_);
 
     // 更新KV缓存
     size_t row_size = n_kv_heads_ * head_dim_;
@@ -206,8 +185,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       cudaMemcpy(v_i.data_ptr(), v_buf_view.data_ptr() + j * row_size,
                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
 
-      kv_cache->k_cache(i, cache_start_pos + j) = std::move(k_i);
-      kv_cache->v_cache(i, cache_start_pos + j) = std::move(v_i);
+      kv_cache->k_cache(i, offset + j) = std::move(k_i);
+      kv_cache->v_cache(i, offset + j) = std::move(v_i);
     }
 
     // 准备计算自注意力
@@ -216,8 +195,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     size_t total_seq_len = seq_len;
 
     // 如果有缓存，拼接当前和缓存的K,V
-    if (cache_start_pos != 0) {
-      size_t cached_len = cache_start_pos;
+    if (offset != 0) {
+      size_t cached_len = offset;
       total_seq_len = cached_len + seq_len;
 
       total_K =
@@ -256,8 +235,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
                                       att_scores, n_kv_heads_);
 
     // Softmax处理注意力分数
-    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false,
-                     cache_start_pos);
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false, offset);
 
     // 计算注意力输出
     Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
@@ -265,32 +243,61 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
                                 att_heads, n_kv_heads_);
 
     // 投影回原始维度
-    Tensor<T> att_proj =
-        cuda_OP::matmul(att_heads.view({1, n_heads_ * head_dim_}), wo);
+    Tensor<T> att_proj = cuda_OP::matmul(
+        att_heads.view({1, n_heads_ * head_dim_}), wo, nullptr, o_bias);
 
     // 残差连接
     residual = residual + att_proj;
 
     // 3. Post Attention LayerNorm (RMSNorm)
     auto& ffn_norm_weight =
-        params_.at(layer_prefix + "post_attention_norm.weight");
+        params_.at(layer_prefix + "post_attention_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
                       rms_norm_eps_);
 
     // 4. MLP (Feed Forward Network)
-    auto& gate_weight = params_.at(layer_prefix + "feed_forward.w1.weight");
-    auto& up_weight = params_.at(layer_prefix + "feed_forward.w2.weight");
-    auto& down_weight = params_.at(layer_prefix + "feed_forward.w3.weight");
+    auto& gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
+    auto& up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
+    auto& down_weight = params_.at(layer_prefix + "mlp.down_proj.weight");
+
+    // 获取偏置项（如果存在）
+    const Tensor<T>* gate_bias = nullptr;
+    const Tensor<T>* up_bias = nullptr;
+    const Tensor<T>* down_bias = nullptr;
+
+    try {
+      gate_bias = &params_.at(layer_prefix + "mlp.gate_proj.bias");
+      // std::cout << "Found gate_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      up_bias = &params_.at(layer_prefix + "mlp.up_proj.bias");
+      // std::cout << "Found up_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      down_bias = &params_.at(layer_prefix + "mlp.down_proj.bias");
+      // std::cout << "Found down_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
 
     // SwiGLU激活: (gate_proj * silu(up_proj))
-    Tensor<T> gate_buf = cuda_OP::matmul(hidden_states, gate_weight);
-    Tensor<T> up_buf = cuda_OP::matmul(hidden_states, up_weight);
+    Tensor<T> gate_buf =
+        cuda_OP::matmul(hidden_states, gate_weight, nullptr, gate_bias);
+    Tensor<T> up_buf =
+        cuda_OP::matmul(hidden_states, up_weight, nullptr, up_bias);
 
-    cuda_OP::silu(&up_buf, &up_buf);                   // SiLU激活
+    cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
     cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
     // 投影回原始维度
-    Tensor<T> ffn_out = cuda_OP::matmul(gate_buf, down_weight);
+    Tensor<T> ffn_out =
+        cuda_OP::matmul(gate_buf, down_weight, nullptr, down_bias);
 
     // 残差连接
     residual = residual + ffn_out;
@@ -302,9 +309,19 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
 
   // LM head投影到词汇表大小
-  auto& lm_head_weight = params_.at("lm_head.weight");
+  auto& lm_head_weight = params_.at("lm_head");
+
+  // 检查是否存在lm_head的偏置
+  const Tensor<T>* lm_head_bias = nullptr;
+  try {
+    lm_head_bias = &params_.at("lm_head_bias");
+    std::cout << "Found lm_head_bias" << std::endl;
+  } catch (const std::out_of_range&) {
+    // 偏置不存在，保持为nullptr
+  }
+
   Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
-  logits = cuda_OP::matmul(final_h, lm_head_weight);
+  logits = cuda_OP::matmul(final_h, lm_head_weight, nullptr, lm_head_bias);
 
   // 返回最后一个token的logits
   return logits;
@@ -325,39 +342,76 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
   const size_t seq_len = input->sizes()[0];
 
   // 计算起始KV缓存位置
-  const size_t cache_start_pos = kv_cache->size();
-
-  // 确保KV缓存有足够空间
-  if (cache_start_pos + seq_len > kv_cache->max_seq_len_) {
-    throw std::runtime_error("KV cache overflow");
+  size_t offset = 0;
+  if (kv_cache) {
+    if (kv_cache->device() != Device::CUDA) {
+      throw std::runtime_error("KVCache must be on CUDA device");
+    }
+    offset = kv_cache->size() - seq_len;
   }
 
   // 重设KV缓存大小
-  kv_cache->resize(cache_start_pos + seq_len);
+  kv_cache->resize(offset + seq_len);
 
   // 创建residual和hidden_states张量
   Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);
   Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
-  debugPrintTensor(residual, "residual");
+
   // Token嵌入 (从embedding_table中获取token嵌入)
   cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
-  debugPrintTensor(residual, "residual after gather");
+
   // 主循环：遍历所有Transformer层
   for (size_t i = 0; i < n_layers_; i++) {
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
-    debugPrintTensor(residual, "residual before layer " + std::to_string(i));
+
     // 1. Input LayerNorm (RMSNorm)
     auto& attention_norm_weight =
-        params_.at(layer_prefix + "attention_norm.weight");
+        params_.at(layer_prefix + "input_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
                       rms_norm_eps_);
-    debugPrintTensor(hidden_states,
-                     "hidden_states after input_layernorm" + std::to_string(i));
+    // debugPrintTensor(hidden_states,
+    //  "hidden_states after input_layernorm" + std::to_string(i));
     // 2. Self-Attention
-    auto& wq = params_.at(layer_prefix + "attention.wq.weight");
-    auto& wk = params_.at(layer_prefix + "attention.wk.weight");
-    auto& wv = params_.at(layer_prefix + "attention.wv.weight");
-    auto& wo = params_.at(layer_prefix + "attention.wo.weight");
+    auto& wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
+    auto& wk = params_.at(layer_prefix + "self_attn.k_proj.weight");
+    auto& wv = params_.at(layer_prefix + "self_attn.v_proj.weight");
+    auto& wo = params_.at(layer_prefix + "self_attn.o_proj.weight");
+    // debugPrintTensor(wq, "wq after input_layernorm" +
+    // std::to_string(i));
+
+    // 获取偏置项（如果存在）
+    const Tensor<T>* q_bias = nullptr;
+    const Tensor<T>* k_bias = nullptr;
+    const Tensor<T>* v_bias = nullptr;
+    const Tensor<T>* o_bias = nullptr;
+
+    try {
+      q_bias = &params_.at(layer_prefix + "self_attn.q_proj.bias");
+      // std::cout << "Found q_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      k_bias = &params_.at(layer_prefix + "self_attn.k_proj.bias");
+      // std::cout << "Found k_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      v_bias = &params_.at(layer_prefix + "self_attn.v_proj.bias");
+      // std::cout << "Found v_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      o_bias = &params_.at(layer_prefix + "self_attn.o_proj.bias");
+      // std::cout << "Found o_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
 
     // 创建CUDA流以并行计算Q, K, V
     cudaStream_t streams[3];
@@ -368,19 +422,19 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
       }
     }
 
-    // 计算Q, K, V投影
-    Tensor<T> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0]);
-    Tensor<T> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1]);
-    Tensor<T> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2]);
-
-    // 同步CUDA流
+    // 计算Q, K, V投影（使用新的matmul接口，bias作为第四个参数）
+    Tensor<T> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0], q_bias);
+    Tensor<T> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1], k_bias);
+    Tensor<T> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2], v_bias);
+    // debugPrintTensor(q_buf, "q_buf after matmul" +
+    // std::to_string(i)); debugPrintTensor(k_buf, "k_buf after
+    // matmul" + std::to_string(i)); debugPrintTensor(v_buf,
+    // "v_buf after matmul" + std::to_string(i));
+    //  同步CUDA流
     for (int j = 0; j < 3; j++) {
       cudaStreamSynchronize(streams[j]);
       cudaStreamDestroy(streams[j]);
     }
-    debugPrintTensor(q_buf, "q_buf after matmul" + std::to_string(i));
-    debugPrintTensor(k_buf, "k_buf after matmul" + std::to_string(i));
-    debugPrintTensor(v_buf, "v_buf after matmul" + std::to_string(i));
 
     // 重塑张量，准备应用RoPE
     const size_t head_size = hidden_size_ / n_heads_;
@@ -391,24 +445,33 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
     Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
     Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
+    // debugPrintTensor(q_buf_view,
+    //   "q_buf_view after reshape" + std::to_string(i));
+    // debugPrintTensor(k_buf_view,
+    //   "k_buf_view after reshape" + std::to_string(i));
+    // debugPrintTensor(v_buf_view,
+    //   "v_buf_view after reshape" + std::to_string(i));
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, cache_start_pos, rope_theta_);
-    cuda_OP::rope(&k_buf_view, cache_start_pos, rope_theta_);
-    
-    debugPrintTensor(q_buf_view, "q_buf_view after rope" + std::to_string(i));
-    debugPrintTensor(k_buf_view, "k_buf_view after rope" + std::to_string(i));
+    cuda_OP::rope(&q_buf_view, offset, rope_theta_);
+    cuda_OP::rope(&k_buf_view, offset, rope_theta_);
+    // debugPrintTensor(q_buf_view, "q_buf_view after rope" +
+    // std::to_string(i)); debugPrintTensor(k_buf_view,
+    // "k_buf_view after rope" + std::to_string(i));
 
     // 将K,V存储到缓存中
     for (size_t j = 0; j < seq_len; j++) {
-      size_t pos = cache_start_pos + j;
+      size_t pos = offset + j;
       Tensor<T> k_i({1, row_size}, Device::CUDA);
       Tensor<T> v_i({1, row_size}, Device::CUDA);
 
-      cudaMemcpy(k_i.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+      // 修正：从k_buf和v_buf中取正确的数据（使用view确保使用正确的内存布局）
+      cudaMemcpy(k_i.data_ptr(),
+                 k_buf_view.data_ptr() + j * n_kv_heads_ * head_dim_,
                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
 
-      cudaMemcpy(v_i.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+      cudaMemcpy(v_i.data_ptr(),
+                 v_buf_view.data_ptr() + j * n_kv_heads_ * head_dim_,
                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
 
       kv_cache->k_cache(i, pos) = std::move(k_i);
@@ -417,117 +480,193 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
 
     // 重新格式化Q用于注意力计算
     Tensor<T> Q_3d = q_buf_view;
-    debugPrintTensor(Q_3d, "Q_3d before attention" + std::to_string(i));
-    
+
     // 准备K和V张量用于注意力计算
     Tensor<T> total_K, total_V;
     size_t total_seq_len = 0;
-    
-    // 如果有缓存，拼接当前和缓存的K,V
-    if (cache_start_pos > 0) {
-      size_t cached_len = cache_start_pos;
+    // debugPrintTensor(Q_3d, "Q_3d before attention" +
+    // std::to_string(i));
+    //  如果有缓存，拼接当前和缓存的K,V
+    if (offset > 0) {
+      size_t cached_len = offset;
       total_seq_len = cached_len + seq_len;
 
-      // 分配足够大小的张量
-      total_K = Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
-      total_V = Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+      // 分配足够大小的张量，使用正确的维度
+      total_K =
+          Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+      total_V =
+          Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
 
-      // 拷贝缓存的K,V
+      // 拷贝缓存的K,V - 确保正确处理内存布局
       for (size_t pos = 0; pos < cached_len; pos++) {
         const auto& cached_k = kv_cache->k_cache(i, pos);
         const auto& cached_v = kv_cache->v_cache(i, pos);
+        // debugPrintTensor(cached_k, "cached_k before copy" +
+        // std::to_string(i)); debugPrintTensor(cached_v,
+        // "cached_v before copy" + std::to_string(i));
 
-        cudaMemcpy(total_K.data_ptr() + pos * row_size, cached_k.data_ptr(),
-                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+        // 确保从一维k_cache中正确拷贝到三维total_K
+        cudaMemcpy(total_K.data_ptr() + pos * n_kv_heads_ * head_dim_,
+                   cached_k.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
+                   cudaMemcpyDeviceToDevice);
 
-        cudaMemcpy(total_V.data_ptr() + pos * row_size, cached_v.data_ptr(),
-                  row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(total_V.data_ptr() + pos * n_kv_heads_ * head_dim_,
+                   cached_v.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
+                   cudaMemcpyDeviceToDevice);
       }
+      // debugPrintTensor(total_K, "total_K after copy" +
+      // std::to_string(i)); debugPrintTensor(total_V, "total_V
+      // after copy" + std::to_string(i));
 
       // 拷贝当前的K,V
-      cudaMemcpy(total_K.data_ptr() + cached_len * row_size,
-                k_buf_view.data_ptr(), seq_len * row_size * sizeof(T),
-                cudaMemcpyDeviceToDevice);
+      cudaMemcpy(total_K.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
+                 k_buf_view.data_ptr(),
+                 seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
+                 cudaMemcpyDeviceToDevice);
 
-      cudaMemcpy(total_V.data_ptr() + cached_len * row_size,
-                v_buf_view.data_ptr(), seq_len * row_size * sizeof(T),
-                cudaMemcpyDeviceToDevice);
+      cudaMemcpy(total_V.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
+                 v_buf_view.data_ptr(),
+                 seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
+                 cudaMemcpyDeviceToDevice);
+      // debugPrintTensor(total_K, "total_K after copy" +
+      // std::to_string(i)); debugPrintTensor(total_V, "total_V
+      // after copy" + std::to_string(i));
     } else {
-      // 没有缓存，直接使用当前的K,V
       total_K = k_buf_view;
       total_V = v_buf_view;
       total_seq_len = seq_len;
     }
-    
-    debugPrintTensor(total_K, "total_K after concat" + std::to_string(i));
-    debugPrintTensor(total_V, "total_V after concat" + std::to_string(i));
-    
+    // debugPrintTensor(total_K, "total_K after attention" +
+    // std::to_string(i)); debugPrintTensor(total_V, "total_V
+    // after attention" + std::to_string(i));
+
     // 计算注意力分数 - prefill版本处理整个序列
     Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
     cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores,
                                               head_dim_);
-    debugPrintTensor(att_scores,
-                     "att_scores after compute_attention_scores_prefill" +
-                         std::to_string(i));
-                         
+
     // Softmax处理注意力分数 - prefill版本需要设置mask=true
-    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true,
-                     cache_start_pos);
-    debugPrintTensor(att_scores,
-                     "att_scores after softmax" + std::to_string(i));
-                     
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
+    // debugPrintTensor(att_scores,
+    //  "att_scores after softmax" + std::to_string(i));
+
     // 计算注意力输出 - prefill版本
     Tensor<T> att_heads({seq_len, n_heads_, head_dim_}, Device::CUDA);
     cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads,
                                         n_heads_, head_dim_, total_seq_len,
                                         n_kv_heads_);
-    debugPrintTensor(att_heads, "att_heads after compute_att_output_prefill" +
-                                    std::to_string(i));
+    // debugPrintTensor(att_heads, "att_heads after
+    // compute_att_output_prefill" +
+    // std::to_string(i));
+
     // 投影回原始维度
-    Tensor<T> att_proj =
-        cuda_OP::matmul(att_heads.view({seq_len, n_heads_ * head_dim_}), wo);
-    debugPrintTensor(att_proj, "att_proj after matmul" + std::to_string(i));
+    Tensor<T> att_proj = cuda_OP::matmul(
+        att_heads.view({seq_len, n_heads_ * head_dim_}), wo, nullptr, o_bias);
+    // debugPrintTensor(att_proj, "att_proj
+    // after matmul" + std::to_string(i));
+
     // 残差连接
     residual = residual + att_proj;
-    debugPrintTensor(residual,
-                     "residual after residual connection" + std::to_string(i));
+    // debugPrintTensor(residual,
+    //  "residual after residual connection" +
+    //  std::to_string(i));
+
     // 3. Post Attention LayerNorm (RMSNorm)
     auto& ffn_norm_weight =
-        params_.at(layer_prefix + "post_attention_norm.weight");
+        params_.at(layer_prefix + "post_attention_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
                       rms_norm_eps_);
+    // debugPrintTensor(
+    //  hidden_states,
+    //  "hidden_states after
+    //  post_attention_layernorm" +
+    //  std::to_string(i));
 
     // 4. MLP (Feed Forward Network)
-    auto& gate_weight = params_.at(layer_prefix + "feed_forward.w1.weight");
-    auto& up_weight = params_.at(layer_prefix + "feed_forward.w2.weight");
-    auto& down_weight = params_.at(layer_prefix + "feed_forward.w3.weight");
+    auto& gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
+    auto& up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
+    auto& down_weight = params_.at(layer_prefix + "mlp.down_proj.weight");
+    // debugPrintTensor(gate_weight,
+    // "gate_weight after mlp" +
+    // std::to_string(i));
+    // debugPrintTensor(up_weight, "up_weight
+    // after mlp" + std::to_string(i));
+    // debugPrintTensor(down_weight,
+    // "down_weight after mlp" +
+    // std::to_string(i));
+
+    // 获取偏置项（如果存在）
+    const Tensor<T>* gate_bias = nullptr;
+    const Tensor<T>* up_bias = nullptr;
+    const Tensor<T>* down_bias = nullptr;
+
+    try {
+      gate_bias = &params_.at(layer_prefix + "mlp.gate_proj.bias");
+      // std::cout << "Found gate_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      up_bias = &params_.at(layer_prefix + "mlp.up_proj.bias");
+      // std::cout << "Found up_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
+
+    try {
+      down_bias = &params_.at(layer_prefix + "mlp.down_proj.bias");
+      // std::cout << "Found down_bias for layer " << i << std::endl;
+    } catch (const std::out_of_range&) {
+      // 偏置不存在，保持为nullptr
+    }
 
     // SwiGLU激活: (gate_proj * silu(up_proj))
-    Tensor<T> gate_buf = cuda_OP::matmul(hidden_states, gate_weight);
-    Tensor<T> up_buf = cuda_OP::matmul(hidden_states, up_weight);
-    debugPrintTensor(gate_buf, "gate_buf after matmul" + std::to_string(i));
-    debugPrintTensor(up_buf, "up_buf after matmul" + std::to_string(i));
-    cuda_OP::silu(&up_buf, &up_buf);                   // SiLU激活
-    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
-    debugPrintTensor(gate_buf, "gate_buf after silu" + std::to_string(i));
+    Tensor<T> gate_buf =
+        cuda_OP::matmul(hidden_states, gate_weight, nullptr, gate_bias);
+    Tensor<T> up_buf =
+        cuda_OP::matmul(hidden_states, up_weight, nullptr, up_bias);
+
+    cuda_OP::silu(&gate_buf,
+                  &gate_buf);  // SiLU激活
+    cuda_OP::multiply(&gate_buf, &gate_buf,
+                      &up_buf);  // 逐元素相乘
+    // debugPrintTensor(gate_buf, "gate_buf
+    // after silu" + std::to_string(i));
+    // debugPrintTensor(up_buf, "up_buf after
+    // silu" + std::to_string(i));
+
     // 投影回原始维度
-    Tensor<T> ffn_out = cuda_OP::matmul(gate_buf, down_weight);
-    debugPrintTensor(ffn_out, "ffn_out after matmul" + std::to_string(i));
+    Tensor<T> ffn_out =
+        cuda_OP::matmul(gate_buf, down_weight, nullptr, down_bias);
+
     // 残差连接
     residual = residual + ffn_out;
-    debugPrintTensor(residual,
-                     "residual after residual connection" + std::to_string(i));
+    // debugPrintTensor(residual,
+    //  "residual after residual connection" +
+    //  std::to_string(i));
   }
 
   // 最终的LayerNorm (RMSNorm)
   auto& norm_weight = params_.at("norm.weight");
   Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA);
   cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+  // debugPrintTensor(final_h, "final_h after rms_norm");
 
   // LM head投影到词汇表大小
-  auto& lm_head_weight = params_.at("lm_head.weight");
+  auto& lm_head_weight = params_.at("lm_head");
+
+  // 检查是否存在lm_head的偏置
+  const Tensor<T>* lm_head_bias = nullptr;
+  try {
+    lm_head_bias = &params_.at("lm_head_bias");
+    std::cout << "Found lm_head_bias" << std::endl;
+  } catch (const std::out_of_range&) {
+    // 偏置不存在，保持为nullptr
+  }
+
   Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
-  logits = cuda_OP::matmul(final_h, lm_head_weight);
+  logits = cuda_OP::matmul(final_h, lm_head_weight, nullptr, lm_head_bias);
 
   // 返回最后一个token的logits
   return logits;
