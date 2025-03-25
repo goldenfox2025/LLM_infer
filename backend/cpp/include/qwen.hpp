@@ -9,7 +9,64 @@
 #include "inference.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
+template <typename T>
+void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
+                      size_t num_to_print = 10) {
+  std::cout << "[Debug] " << tensor_name << ":\n";
 
+  // 1) Print shape
+  std::cout << "  shape: [";
+  for (auto s : tensor.sizes()) {
+    std::cout << s << " ";
+  }
+  std::cout << "]\n";
+
+  // 2) Print strides
+  std::cout << "  strides: [";
+  for (auto st : tensor.strides()) {
+    std::cout << st << " ";
+  }
+  std::cout << "]\n";
+
+  // 3) Print device
+  std::cout << "  device: ";
+  if (tensor.device() == Device::CPU) {
+    std::cout << "CPU";
+  } else if (tensor.device() == Device::CUDA) {
+    std::cout << "CUDA";
+  } else {
+    std::cout << "UNKNOWN";
+  }
+  std::cout << "\n";
+
+  // 4) Print elements starting from offset 0
+  size_t offset = 0;  // 从开始处打印
+  size_t total_elements = tensor.numel();
+  size_t n_print = std::min(num_to_print, total_elements - offset);
+
+  std::cout << "  elements from offset " << offset << " (" << n_print
+            << " element(s)): ";
+  if (tensor.device() == Device::CPU) {
+    const T* ptr = tensor.data_ptr();
+    for (size_t i = 0; i < n_print; i++) {
+      std::cout << ptr[offset + i] << " ";
+    }
+    std::cout << "\n";
+  } else {
+    // Copy from GPU to CPU, then print
+    std::vector<T> host_buffer(n_print);
+    cudaError_t err = cudaMemcpy(host_buffer.data(), tensor.data_ptr() + offset,
+                                 n_print * sizeof(T), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+      std::cout << "  [Error] cudaMemcpy failed\n";
+      return;
+    }
+    for (size_t i = 0; i < n_print; i++) {
+      std::cout << host_buffer[i] << " ";
+    }
+    std::cout << "\n";
+  }
+}
 // Base QwenModel implementation with templated precision
 template <typename T>
 class QwenModel : public BaseModel {
@@ -25,12 +82,12 @@ class QwenModel : public BaseModel {
   Tensor<float> forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                         KVCacheBase* kv_cache) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-    return forward_cuda(input, typed_cache).to_float();
+    return forward_cuda(input, typed_cache).to_float().cpu();
   }
   Tensor<float> prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                         KVCacheBase* kv_cache) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-    return prefill_cuda(input, typed_cache).to_float();
+    return prefill_cuda(input, typed_cache).to_float().cpu();
   }
 
   // Token generation

@@ -31,10 +31,18 @@ template <typename T>
 void rms_norm(Tensor<T>* output, const Tensor<T>* input,
               const Tensor<T>* weight, float eps);
 
-// 矩阵乘法算子，返回计算结果
+/**
+ * @brief 矩阵乘法 C = AB
+ * @param A 输入矩阵A [M, K]
+ * @param B 输入矩阵B [K, N]（转置后）
+ * @param stream CUDA流
+ * @param bias 可选偏置 [N]，默认为nullptr
+ * @return 输出矩阵C [M, N]
+ */
 template <typename T>
-Tensor<T> matmul(const Tensor<T>& A, const Tensor<T>& B,
-                 cudaStream_t stream = 0);
+Tensor<T> matmul(const Tensor<T>& A, const Tensor<T>& B, 
+                cudaStream_t stream = nullptr, 
+                const Tensor<T>* bias = nullptr);
 
 // rope 算子，用于位置编码
 template <typename T>
