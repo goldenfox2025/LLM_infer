@@ -77,6 +77,11 @@ void compute_att_output(const Tensor<T>& att_probs, const Tensor<T>& V,
                         size_t n_q_h, size_t dqkv, Tensor<T>& att_output,
                         size_t n_kv_h);
 
+// flahattention实现
+template <typename T>
+void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
+                   Tensor<T>& att_output);
+
 // prefill 版本：计算注意力分数
 template <typename T>
 void compute_attention_scores_prefill(const Tensor<T>& Q, const Tensor<T>& K,
