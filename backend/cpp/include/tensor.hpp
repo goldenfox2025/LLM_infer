@@ -10,20 +10,27 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "CudaMemoryPool.hpp"  // 该头中定义了 CudaMemoryPool，提供静态方法 allocate/free
+
 enum class Device { CPU, CUDA };
 
-// 前向声明Tensor类模板，用于友元声明
+// 前向声明 Tensor 类模板（用于友元声明）
 template <typename T>
 class Tensor;
 
-// 声明类型转换辅助函数，专用于Tensor<__nv_bfloat16>到Tensor<float>的转换
+// 声明类型转换辅助函数，专用于 Tensor<__nv_bfloat16> 到 Tensor<float> 的转换
 template <typename FromType, typename ToType>
 Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
 
 template <typename T>
 class Tensor {
  private:
-  // 静态内联函数：检查 CUDA 错误（可在 const 成员中调用）
+  // 静态内存池：所有 GPU 内存分配都使用这个内存池（目前内部仍是简单调用
+  // cudaMalloc/cudaFree）
+  inline static CudaMemoryPool pool;
+
+  // 检查 CUDA 错误的静态内联函数（可在 const 成员中调用）
   static inline void checkCudaError(cudaError_t error) {
     if (error != cudaSuccess) {
       throw std::runtime_error("CUDA error: " +
@@ -31,34 +38,31 @@ class Tensor {
     }
   }
 
-  // 自定义删除器：将 cudaFree 包装为返回 void 的形式
-  static inline void myCudaFree(T* p) { cudaFree(p); }
-
  public:
-  // 友元声明，允许任何Tensor<U>访问Tensor<T>的私有成员
+  // 友元声明，允许任意 Tensor<U> 访问 Tensor<T> 的私有成员
   template <typename U>
   friend class Tensor;
-  
-  // 类型转换辅助函数声明为友元
+
+  // 将类型转换辅助函数声明为友元
   template <typename FromType, typename ToType>
   friend Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
 
-  // 默认构造函数
+  // 默认构造函数（CPU 模式，空 tensor）
   Tensor()
       : data_(std::make_shared<std::vector<T>>()),
         offset_(0),
         length_(0),
         device_(Device::CPU),
-        gpu_data_(nullptr, myCudaFree) {}
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {}
 
-  // 从已有数据和形状构造（要求数据至少包含所有元素）
+  // 从已有数据和形状构造（要求数据至少包含所有元素，CPU 模式）
   Tensor(std::shared_ptr<std::vector<T>> data, const std::vector<size_t>& shape)
       : data_(data),
         shape_(shape),
         offset_(0),
         length_(1),
         device_(Device::CPU),
-        gpu_data_(nullptr, myCudaFree) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -74,7 +78,7 @@ class Tensor {
         offset_(0),
         length_(1),
         device_(device),
-        gpu_data_(nullptr, myCudaFree) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -84,23 +88,23 @@ class Tensor {
       gpu_data_.reset();
     } else if (device_ == Device::CUDA) {
       data_.reset();
-      T* gpu_ptr;
-      cudaError_t error = cudaMalloc(&gpu_ptr, length_ * sizeof(T));
-      checkCudaError(error);
-      gpu_data_ = std::shared_ptr<T>(gpu_ptr, myCudaFree);
+      // 通过内存池申请 GPU 内存
+      T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
+      gpu_data_ = std::shared_ptr<T>(gpu_ptr,
+                                     [](T* ptr) { Tensor<T>::pool.free(ptr); });
     } else {
       throw std::runtime_error("Invalid device specified");
     }
   }
 
-  // 从右值 vector 数据和形状构造（CPU 缺省）
+  // 从右值 vector 数据和形状构造（CPU 模式）
   Tensor(std::vector<T>&& data, const std::vector<size_t>& shape)
       : data_(std::make_shared<std::vector<T>>(std::move(data))),
         shape_(shape),
         offset_(0),
         length_(1),
         device_(Device::CPU),
-        gpu_data_(nullptr, myCudaFree) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -110,28 +114,28 @@ class Tensor {
     strides_ = compute_strides(shape_);
   }
 
-  // 新增：从右值 vector 数据、形状和 device 构造
+  // 从右值 vector 数据、形状和 device 构造
   Tensor(std::vector<T>&& data, const std::vector<size_t>& shape, Device device)
       : shape_(shape),
         offset_(0),
         length_(1),
         device_(device),
-        gpu_data_(nullptr, myCudaFree) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
     strides_ = compute_strides(shape_);
     if (device_ == Device::CPU) {
-      // CPU 模式，直接将 data 存入 std::vector
+      // CPU 模式：直接保存数据
       data_ = std::make_shared<std::vector<T>>(std::move(data));
     } else if (device_ == Device::CUDA) {
-      // GPU 模式，拷贝 data 到 GPU
-      data_.reset();  // 不在 CPU 中保存数据
-      T* gpu_ptr;
-      checkCudaError(cudaMalloc(&gpu_ptr, length_ * sizeof(T)));
+      // GPU 模式：通过内存池申请 GPU 内存并拷贝数据
+      data_.reset();
+      T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
       checkCudaError(cudaMemcpy(gpu_ptr, data.data(), length_ * sizeof(T),
                                 cudaMemcpyHostToDevice));
-      gpu_data_ = std::shared_ptr<T>(gpu_ptr, myCudaFree);
+      gpu_data_ = std::shared_ptr<T>(gpu_ptr,
+                                     [](T* ptr) { Tensor<T>::pool.free(ptr); });
     } else {
       throw std::runtime_error("Invalid device specified");
     }
@@ -143,7 +147,7 @@ class Tensor {
         offset_(0),
         length_(1),
         device_(Device::CPU),
-        gpu_data_(nullptr, myCudaFree) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -151,13 +155,13 @@ class Tensor {
     strides_ = compute_strides(shape_);
   }
 
-  // 新增构造函数：从shape和device构造
+  // 从 shape 和 device 构造
   Tensor(const std::vector<size_t>& shape, Device device)
       : shape_(shape),
         offset_(0),
         length_(1),
         device_(device),
-        gpu_data_(nullptr, myCudaFree) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -167,16 +171,15 @@ class Tensor {
       gpu_data_.reset();
     } else if (device_ == Device::CUDA) {
       data_.reset();
-      T* gpu_ptr;
-      cudaError_t error = cudaMalloc(&gpu_ptr, length_ * sizeof(T));
-      checkCudaError(error);
-      gpu_data_ = std::shared_ptr<T>(gpu_ptr, myCudaFree);
+      T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
+      gpu_data_ = std::shared_ptr<T>(gpu_ptr,
+                                     [](T* ptr) { Tensor<T>::pool.free(ptr); });
     } else {
       throw std::runtime_error("Invalid device specified");
     }
   }
 
-  // 拷贝构造函数（CUDA 下采用浅拷贝，即共享 gpu_data_）
+  // 拷贝构造（CUDA 下采用浅拷贝，即共享 gpu_data_）
   Tensor(const Tensor& other)
       : data_(other.data_),
         shape_(other.shape_),
@@ -209,18 +212,17 @@ class Tensor {
     }
     return *this;
   }
+
   // 转换为 Tensor<float>（若当前类型 T 不是 float，则每个元素转换为 float）
   Tensor<float> to_float() const {
-    // 如果已经是float类型，直接返回自身的拷贝
     if constexpr (std::is_same_v<T, float>) {
       return *this;
     } else {
-      // 否则调用专用的类型转换函数
       return tensor_convert<T, float>(*this);
     }
   }
 
-  // 返回数据指针
+  // 返回数据指针（const 版本）
   const T* data_ptr() const {
     if (device_ == Device::CPU) {
       return data_->data() + offset_;
@@ -228,6 +230,7 @@ class Tensor {
       return gpu_data_.get() + offset_;
     }
   }
+  // 返回数据指针（非 const 版本）
   T* data_ptr() {
     if (device_ == Device::CPU) {
       return data_->data() + offset_;
@@ -242,7 +245,7 @@ class Tensor {
   // 返回元素总数
   size_t numel() const { return length_; }
 
-  // 填充
+  // 填充张量
   void fill_(const T& value) {
     if (device_ == Device::CPU) {
       T* ptr = data_ptr();
@@ -260,20 +263,59 @@ class Tensor {
   // 返回 strides
   const std::vector<size_t>& strides() const { return strides_; }
 
-  // view：返回一个共享底层数据的新张量（不拷贝数据，仅修改元信息）
-  Tensor<T> view(const std::vector<size_t>& new_shape) const {
-    // 计算新形状的元素总数
+  // view：返回一个共享底层数据的新张量（不拷贝数据，仅修改元信息）// 对于非
+  // const 左值：直接修改自身
+  Tensor<T>& view(const std::vector<size_t>& new_shape) & {
     size_t new_numel = 1;
     for (size_t dim : new_shape) {
       new_numel *= dim;
     }
     if (new_numel != length_) {
-      std::cerr << "[Tensor::view] 错误: 新形状的元素数量 (" << new_numel
-                << ") 与原形状元素数量 (" << length_ << ") 不匹配" << std::endl;
-      throw std::runtime_error("view: 新形状必须具有相同数量的元素");
+      std::cerr << "[Tensor::view] Error: New shape's number of elements ("
+                << new_numel << ") does not match original (" << length_ << ")"
+                << std::endl;
+      throw std::runtime_error(
+          "view: New shape must have same number of elements");
     }
-    // 直接复制本张量（共享底层数据），仅更新形状与 strides
-    Tensor<T> result = *this;
+    shape_ = new_shape;
+    strides_ = compute_strides(new_shape);
+    return *this;
+  }
+
+  // 对于非 const 右值：移动后构造一个新张量返回
+  Tensor<T> view(const std::vector<size_t>& new_shape) && {
+    size_t new_numel = 1;
+    for (size_t dim : new_shape) {
+      new_numel *= dim;
+    }
+    if (new_numel != length_) {
+      std::cerr << "[Tensor::view] Error: New shape's number of elements ("
+                << new_numel << ") does not match original (" << length_ << ")"
+                << std::endl;
+      throw std::runtime_error(
+          "view: New shape must have same number of elements");
+    }
+    Tensor<T> result = std::move(*this);
+    result.shape_ = new_shape;
+    result.strides_ = compute_strides(new_shape);
+    return result;
+  }
+
+  // 新增 const 左值版本：对于 const 对象返回一个新
+  // Tensor（拷贝），而不是修改原对象
+  Tensor<T> view(const std::vector<size_t>& new_shape) const& {
+    size_t new_numel = 1;
+    for (size_t dim : new_shape) {
+      new_numel *= dim;
+    }
+    if (new_numel != length_) {
+      std::cerr << "[Tensor::view] Error: New shape's number of elements ("
+                << new_numel << ") does not match original (" << length_ << ")"
+                << std::endl;
+      throw std::runtime_error(
+          "view: New shape must have same number of elements");
+    }
+    Tensor<T> result = *this;  // 拷贝当前对象
     result.shape_ = new_shape;
     result.strides_ = compute_strides(new_shape);
     return result;
@@ -316,21 +358,21 @@ class Tensor {
     }
     Tensor<T> result;
     result.shape_ = new_shape;
-    result.strides_ = strides_;  // 保持原始 strides
+    result.strides_ = strides_;
     result.offset_ = new_offset;
     result.length_ = new_length;
     result.device_ = device_;
     if (device_ == Device::CPU) {
-      result.data_ = data_;  // 共享 CPU 数据
+      result.data_ = data_;
       result.gpu_data_.reset();
     } else {
       result.data_.reset();
-      result.gpu_data_ = gpu_data_;  // 共享 GPU 数据（引用计数增加）
+      result.gpu_data_ = gpu_data_;
     }
     return result;
   }
 
-  // 重载加法
+  // 重载加法运算符
   Tensor operator+(const Tensor& other) {
     if (shape_ != other.shape_) {
       throw std::runtime_error("Tensor shape mismatch");
@@ -360,21 +402,35 @@ class Tensor {
     }
     return result;
   }
+  Tensor<T> squeeze(size_t dim) {
+    if (dim >= shape_.size()) {
+      std::cerr << "Dimension " << dim << " is out of range." << std::endl;
+      return *this;
+    }
+    if (shape_[dim] != 1) {
+      std::cout << "Cannot squeeze dimension " << dim << " because its size is "
+                << shape_[dim] << " (not 1)." << std::endl;
+      return *this;
+    }
+    shape_.erase(shape_.begin() + dim);
+    strides_.erase(strides_.begin() + dim);
+    return *this;
+  }
 
-  // 转换到 CUDA
+  // 转换到 CUDA：将数据从 CPU 拷贝到 GPU，通过内存池申请 GPU 内存
   Tensor<T>& cuda() {
     if (device_ == Device::CUDA) return *this;
-    T* gpu_ptr;
-    checkCudaError(cudaMalloc(&gpu_ptr, length_ * sizeof(T)));
+    T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
     checkCudaError(cudaMemcpy(gpu_ptr, data_ptr(), length_ * sizeof(T),
                               cudaMemcpyHostToDevice));
     data_.reset();
-    gpu_data_ = std::shared_ptr<T>(gpu_ptr, myCudaFree);
+    gpu_data_ =
+        std::shared_ptr<T>(gpu_ptr, [](T* ptr) { Tensor<T>::pool.free(ptr); });
     device_ = Device::CUDA;
     return *this;
   }
 
-  // 转换到 CPU
+  // 转换到 CPU：将数据从 GPU 拷贝到 CPU
   Tensor<T>& cpu() {
     if (device_ == Device::CPU) return *this;
     data_ = std::make_shared<std::vector<T>>(length_);
@@ -385,8 +441,9 @@ class Tensor {
     return *this;
   }
 
-  // 返回设备
+  // 返回当前设备
   Device device() const { return device_; }
+  size_t offset() const { return offset_; }
 
  private:
   // 计算 strides
@@ -419,35 +476,32 @@ Tensor<ToType> tensor_convert(const Tensor<FromType>& src) {
   result.length_ = src.length_;
   result.strides_ = src.strides_;
   if (src.device_ == Device::CPU) {
-    // CPU 模式：data_ 保存有效数据
-    // 分配一个新的 vector，并逐元素转换为 float
+    // CPU 模式：分配新的 vector，并逐元素转换
     auto new_data = std::make_shared<std::vector<ToType>>(src.length_);
-    const FromType* src_ptr = src.data_ptr();  // 这里已经考虑了offset_
+    const FromType* src_ptr = src.data_ptr();
     for (size_t i = 0; i < src.length_; ++i) {
       (*new_data)[i] = static_cast<ToType>(src_ptr[i]);
     }
     result.data_ = new_data;
   } else {
-    // CUDA 模式：gpu_data_ 保存数据
+    // CUDA 模式：先将数据拷贝到 host，再转换后重新分配 GPU 内存
     std::vector<FromType> host_data(src.length_);
-    // 使用data_ptr()获取正确的指针（包含offset_）
     const FromType* src_ptr = src.data_ptr();
-    cudaError_t err = cudaMemcpy(host_data.data(), src_ptr,
-                                 src.length_ * sizeof(FromType), cudaMemcpyDeviceToHost);
-    // 使用类内的 checkCudaError 检查错误
+    cudaError_t err =
+        cudaMemcpy(host_data.data(), src_ptr, src.length_ * sizeof(FromType),
+                   cudaMemcpyDeviceToHost);
     result.checkCudaError(err);
     std::vector<ToType> host_data_float(src.length_);
     for (size_t i = 0; i < src.length_; ++i) {
       host_data_float[i] = static_cast<ToType>(host_data[i]);
     }
-    // 分配新的 GPU 内存用于存放 float 数据
-    ToType* gpu_ptr;
-    err = cudaMalloc(&gpu_ptr, src.length_ * sizeof(ToType));
+    ToType* gpu_ptr = static_cast<ToType*>(
+        Tensor<FromType>::pool.allocate(src.length_ * sizeof(ToType)));
+    err = cudaMemcpy(gpu_ptr, host_data_float.data(),
+                     src.length_ * sizeof(ToType), cudaMemcpyHostToDevice);
     result.checkCudaError(err);
-    err = cudaMemcpy(gpu_ptr, host_data_float.data(), src.length_ * sizeof(ToType),
-                     cudaMemcpyHostToDevice);
-    result.checkCudaError(err);
-    result.gpu_data_ = std::shared_ptr<ToType>(gpu_ptr, result.myCudaFree);
+    result.gpu_data_ = std::shared_ptr<ToType>(
+        gpu_ptr, [](ToType* ptr) { Tensor<FromType>::pool.free(ptr); });
   }
   return result;
 }

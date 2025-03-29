@@ -90,8 +90,8 @@ __global__ void matmul_with_bias_kernel(const T *A, const T *B, const T *bias,
 // --------------------------------------------------
 // --------------------------------------------------
 template <typename T>
-Tensor<T> matmul(const Tensor<T> &A, const Tensor<T> &B, cudaStream_t stream,
-                 const Tensor<T> *bias) {
+void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
+            cudaStream_t stream, const Tensor<T> *bias) {
   const std::vector<size_t> &A_shape = A.sizes();
   const std::vector<size_t> &B_shape = B.sizes();
 
@@ -99,7 +99,6 @@ Tensor<T> matmul(const Tensor<T> &A, const Tensor<T> &B, cudaStream_t stream,
   size_t M = A_shape[0];
   size_t K = A_shape[1];
   size_t N = B_shape[1];
-  Tensor<T> C({M, N}, Device::CUDA);
 
   dim3 threadsPerBlock(16, 16);
   dim3 numBlocks((N + threadsPerBlock.x - 1) / threadsPerBlock.x,
@@ -108,7 +107,7 @@ Tensor<T> matmul(const Tensor<T> &A, const Tensor<T> &B, cudaStream_t stream,
   if (bias == nullptr) {
     // 使用无偏置版本的kernel
     matmul_kernel<T><<<numBlocks, threadsPerBlock, 0, stream>>>(
-        A.data_ptr(), B.data_ptr(), C.data_ptr(), M, K, N);
+        A.data_ptr(), B.data_ptr(), C->data_ptr(), M, K, N);
   } else {
     // 检查偏置形状
     const std::vector<size_t> &bias_shape = bias->sizes();
@@ -121,7 +120,7 @@ Tensor<T> matmul(const Tensor<T> &A, const Tensor<T> &B, cudaStream_t stream,
 
     // 使用带偏置版本的kernel
     matmul_with_bias_kernel<T><<<numBlocks, threadsPerBlock, 0, stream>>>(
-        A.data_ptr(), B.data_ptr(), bias->data_ptr(), C.data_ptr(), M, K, N);
+        A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(), M, K, N);
   }
 
   cudaError_t err = cudaGetLastError();
@@ -130,14 +129,14 @@ Tensor<T> matmul(const Tensor<T> &A, const Tensor<T> &B, cudaStream_t stream,
                              std::string(cudaGetErrorString(err)));
   }
 
-  return C;
+  return;
 }
 
-template Tensor<float> matmul<float>(const Tensor<float> &,
-                                     const Tensor<float> &, cudaStream_t,
-                                     const Tensor<float> *);
-template Tensor<nvbf16> matmul<nvbf16>(const Tensor<nvbf16> &,
-                                       const Tensor<nvbf16> &, cudaStream_t,
-                                       const Tensor<nvbf16> *);
+template void matmul<float>(const Tensor<float> &, const Tensor<float> &,
+                            Tensor<float> *, cudaStream_t,
+                            const Tensor<float> *);
+template void matmul<nvbf16>(const Tensor<nvbf16> &, const Tensor<nvbf16> &,
+                             Tensor<nvbf16> *, cudaStream_t,
+                             const Tensor<nvbf16> *);
 
 }  // namespace cuda_OP

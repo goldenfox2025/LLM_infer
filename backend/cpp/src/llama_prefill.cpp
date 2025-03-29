@@ -313,20 +313,6 @@ Tensor<float> LlamaModel::prefill_cpu(const Tensor<uint32_t>* input,
 // ===========
 Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
                                        KVCache<float>* typed_kv_cache) {
-  // 首先转换为正确的KVCache类型
-
-  // std::cout << "\n[prefill_cuda] ====== Starting prefill_cuda ======"
-  //           << std::endl;
-  // for (const auto& pair : params_) {
-  //   if (pair.second.device() != Device::CUDA) {
-  //     // std::cout << "[prefill_cuda] Parameter " << pair.first
-  //     //           << " is not on CUDA device" << std::endl;
-  //     // std::cout << "[prefill_cuda] Moving parameter to CUDA... " <<
-  //     // std::endl;
-  //     params_.at(pair.first).cuda();
-  //   }
-  // }
-
   // 1. 输入参数验证和初始化
   if (!input || !input->data_ptr()) {
     throw std::runtime_error("Input tensor is null or has null data pointer");
@@ -334,7 +320,6 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
   if (input->device() != Device::CUDA) {
     throw std::runtime_error("Input tensor must be on CUDA device");
   }
-
   const size_t seq_len = input->numel();
   size_t offset = 0;
   if (typed_kv_cache) {
@@ -350,7 +335,6 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
 
   // 3. 执行gather操作
   cuda_OP::gather(&residual, input, &params_.at("embedding_table"));
-  // debugPrintTensor(residual, "CUDA residual after gather");
 
   const size_t n_groups = n_q_h_ / n_kv_h_;
 
@@ -359,7 +343,6 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
     // (2) RMSNorm（注意力前）
     cuda_OP::rms_norm(&hidden_states, &residual,
                       &params_.at("rms_att_w" + std::to_string(layer)), eps_);
-    // debugPrintTensor(hidden_states, "CUDA hidden_states after RMSNorm(att)");
 
     // 并行计算 Q、K、V
     Tensor<float>& wq = params_.at("wq" + std::to_string(layer));
@@ -374,29 +357,28 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
       }
     }
 
-    Tensor<float> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0]);
-    Tensor<float> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1]);
-    Tensor<float> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2]);
+    // 预先分配输出张量，避免内部重复分配
+    // Q: [seq_len, n_q_h_ * dqkv_]
+    Tensor<float> q_buf({seq_len, n_q_h_ * dqkv_}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, wq, &q_buf, streams[0]);
+
+    // K,V: [seq_len, n_kv_h_ * dqkv_]
+    Tensor<float> k_buf({seq_len, n_kv_h_ * dqkv_}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, wk, &k_buf, streams[1]);
+
+    Tensor<float> v_buf({seq_len, n_kv_h_ * dqkv_}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, wv, &v_buf, streams[2]);
 
     for (int i = 0; i < 3; i++) {
       cudaStreamSynchronize(streams[i]);
       cudaStreamDestroy(streams[i]);
     }
 
-    // 打印 Q/K/V matmul后的结果
-    // debugPrintTensor(q_buf, "CUDA q_buf after matmul");
-    // debugPrintTensor(k_buf, "CUDA k_buf after matmul");
-    // debugPrintTensor(v_buf, "CUDA v_buf after matmul");
-
     // 4.4 调整形状并应用RoPE
     Tensor<float> q_buf_view = q_buf.view({seq_len, n_q_h_, dqkv_});
     Tensor<float> k_buf_view = k_buf.view({seq_len, n_kv_h_, dqkv_});
     cuda_OP::rope(&q_buf_view, offset, rope_theta_);
-
     cuda_OP::rope(&k_buf_view, offset, rope_theta_);
-
-    // debugPrintTensor(q_buf_view, "CUDA q_buf_view after rope");
-    // debugPrintTensor(k_buf_view, "CUDA k_buf_view after rope");
 
     // 4.5 保存KV Cache
     if (typed_kv_cache) {
@@ -404,13 +386,10 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
       for (size_t i = 0; i < seq_len; i++) {
         Tensor<float> k_i({1, row_size}, Device::CUDA);
         Tensor<float> v_i({1, row_size}, Device::CUDA);
-
         cudaMemcpy(k_i.data_ptr(), k_buf.data_ptr() + i * row_size,
                    row_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
         cudaMemcpy(v_i.data_ptr(), v_buf.data_ptr() + i * row_size,
                    row_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
         typed_kv_cache->k_cache(layer, offset + i) = std::move(k_i);
         typed_kv_cache->v_cache(layer, offset + i) = std::move(v_i);
       }
@@ -418,38 +397,29 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
 
     // 4.6 准备注意力计算
     Tensor<float> Q_3d = q_buf_view;
-    // debugPrintTensor(Q_3d, "Q_3d");
     Tensor<float> total_K, total_V;
     size_t total_seq_len = seq_len;
-
     if (offset != 0) {
       size_t cached_len = offset;
       total_seq_len = cached_len + seq_len;
       size_t row_size = n_kv_h_ * dqkv_;
-
       total_K = Tensor<float>({total_seq_len, n_kv_h_, dqkv_}, Device::CUDA);
       total_V = Tensor<float>({total_seq_len, n_kv_h_, dqkv_}, Device::CUDA);
-
       // 拼接缓存 K、V
       for (size_t pos = 0; pos < cached_len; pos++) {
         Tensor<float>& cached_k = typed_kv_cache->k_cache(layer, pos);
         Tensor<float>& cached_v = typed_kv_cache->v_cache(layer, pos);
-
         cudaMemcpy(total_K.data_ptr() + pos * row_size, cached_k.data_ptr(),
                    row_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
         cudaMemcpy(total_V.data_ptr() + pos * row_size, cached_v.data_ptr(),
                    row_size * sizeof(float), cudaMemcpyDeviceToDevice);
       }
-
       // 复制当前 K、V
       cudaMemcpy(total_K.data_ptr() + offset * row_size, k_buf.data_ptr(),
                  seq_len * row_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
       Tensor<float> v_buf_view = v_buf.view({seq_len, n_kv_h_, dqkv_});
       cudaMemcpy(total_V.data_ptr() + offset * row_size, v_buf_view.data_ptr(),
                  seq_len * row_size * sizeof(float), cudaMemcpyDeviceToDevice);
-
     } else {
       total_K = k_buf.view({seq_len, n_kv_h_, dqkv_});
       total_V = v_buf.view({seq_len, n_kv_h_, dqkv_});
@@ -458,93 +428,70 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
     // 4.8 计算注意力分数 -> softmax -> 注意力输出
     Tensor<float> att_scores({seq_len, n_q_h_, total_seq_len}, Device::CUDA);
     cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores, dqkv_);
-    // debugPrintTensor(att_scores, "compute_attention_scores_prefill");
     cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
-    // debugPrintTensor(att_scores, "softmax");
     Tensor<float> att_heads({seq_len, n_q_h_, dqkv_}, Device::CUDA);
     cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads, n_q_h_,
                                         dqkv_, total_seq_len, n_kv_h_);
-    // debugPrintTensor(att_heads, "compute_att_output_prefill");
 
+    // 将注意力输出投影回原始维度
+    Tensor<float> att_heads_reshaped =
+        att_heads.view({seq_len, n_q_h_ * dqkv_});
     Tensor<float>& wo = params_.at("wo" + std::to_string(layer));
-    Tensor<float> att_proj =
-        cuda_OP::matmul(att_heads.view({seq_len, n_q_h_ * dqkv_}), wo);
-
+    Tensor<float> att_proj({seq_len, d_}, Device::CUDA);
+    cuda_OP::matmul(att_heads_reshaped, wo, &att_proj);
     residual = residual + att_proj;
 
     // (3) FFN 前的 RMSNorm
     cuda_OP::rms_norm(&hidden_states, &residual,
                       &params_.at("rms_ffn_w" + std::to_string(layer)), eps_);
-    // debugPrintTensor(hidden_states, "CUDA hidden_states after RMSNorm(ffn)");
 
-    // FFN
+    // FFN部分
     Tensor<float>& w_gate = params_.at("w_gate" + std::to_string(layer));
     Tensor<float>& w_up = params_.at("w_up" + std::to_string(layer));
     Tensor<float>& w_down = params_.at("w_down" + std::to_string(layer));
 
-    Tensor<float> gate_buf = cuda_OP::matmul(hidden_states, w_gate);
-    Tensor<float> up_buf = cuda_OP::matmul(hidden_states, w_up);
+    Tensor<float> gate_buf({seq_len, w_gate.sizes()[1]}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, w_gate, &gate_buf);
+    Tensor<float> up_buf({seq_len, w_up.sizes()[1]}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, w_up, &up_buf);
 
     cuda_OP::silu(&gate_buf, &gate_buf);
     cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);
-
-    Tensor<float> ffn_out = cuda_OP::matmul(gate_buf, w_down);
+    Tensor<float> ffn_out({seq_len, w_down.sizes()[1]}, Device::CUDA);
+    cuda_OP::matmul(gate_buf, w_down, &ffn_out);
     residual = residual + ffn_out;
-    // debugPrintTensor(residual, "CUDA residual after FFN");
   }
 
   // 5. 最终 RMSNorm + lm_head
   Tensor<float> final_h({seq_len, d_}, Device::CUDA);
   cuda_OP::rms_norm(&final_h, &residual, &params_.at("rms_out_w"), eps_);
-  // debugPrintTensor(final_h, "CUDA final_h after final RMSNorm");
-
   Tensor<float>& lm_head = params_.at("lm_head");
   size_t vocab_size = lm_head.sizes()[1];
   Tensor<float> logits({seq_len, vocab_size}, Device::CUDA);
-  logits = cuda_OP::matmul(final_h, lm_head);
+  cuda_OP::matmul(final_h, lm_head, &logits);
+
   return logits.cpu();
 }
 
-// 实现BaseModel的prefill接口
 Tensor<float> LlamaModel::prefill(const Tensor<uint32_t>* input,
                                   ThreadPool& thread_pool,
                                   KVCacheBase* kv_cache) {
-  // 对输入检查
   if (!input) {
     throw std::invalid_argument("Input tensor cannot be null");
   }
-  // 打印设备
-  // std::cout << "[prefill] Input tensor device: "
-  //           << (input->device() == Device::CUDA ? "CUDA" : "CPU") <<
-  //           std::endl;
-  // 首先转换为正确的KVCache类型
-  // std::cout << "[prefill] KVCache type: " << kv_cache->get_n_layers() << " x
-  // "
-  //           << kv_cache->get_max_seq_len() << std::endl;
   auto typed_kv_cache = dynamic_cast<KVCache<float>*>(kv_cache);
   if (!typed_kv_cache) {
     throw std::runtime_error(
         "Invalid KVCache type for LlamaModel::prefill_cuda");
   }
-  // std::cout << "[prefill] KVCache type: " << typed_kv_cache->get_n_layers()
-  //           << " x " << typed_kv_cache->get_max_seq_len() << std::endl;
-  // std::cout << "[LlamaModel::prefill] 进入prefill方法" << std::endl;
-  // std::cout << "[LlamaModel::prefill] 模型设备: "
-  //           << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
-  // std::cout << "[LlamaModel::prefill] 输入张量设备: "
-  //           << (input->device() == Device::CUDA ? "CUDA" : "CPU") <<
-  //           std::endl;
-
   try {
     if (device_ == Device::CUDA) {
-      // std::cout << "[LlamaModel::prefill] 准备调用prefill_cuda" << std::endl;
       return prefill_cuda(input, typed_kv_cache);
     } else {
-      // std::cout << "[LlamaModel::prefill] 准备调用prefill_cpu" << std::endl;
       return prefill_cpu(input, typed_kv_cache, thread_pool);
     }
   } catch (const std::exception& e) {
-    std::cerr << "[LlamaModel::prefill] 异常: " << e.what() << std::endl;
+    std::cerr << "[LlamaModel::prefill] Exception: " << e.what() << std::endl;
     throw;
   }
 }

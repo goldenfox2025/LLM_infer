@@ -115,18 +115,23 @@ def load_tokenizer(model_path: str, model_type: str):
 # 回调函数：累积 token 并输出文本差量及速度信息
 # -------------------------------
 def create_callback(tokenizer, q: queue.Queue, model_type: str):
-    """创建用于处理生成token的回调函数"""
+    """创建用于处理生成 token 的回调函数，使用单调时钟计算时间"""
     accumulated_tokens = []
     last_output = ""  # 记录上一次完整解码后的文本
+    start_time = None  # 第一个 token 到来时初始化
     last_token_time = None  # 用于计算 token 生成速度
-    start_time = time.time()  # 记录开始时间
-    total_tokens = 0  # 记录生成的总 token 数
+    total_tokens = 0  # 记录生成的 token 总数
 
     def token_callback(token):
         nonlocal last_output, last_token_time, total_tokens, start_time
 
-        current_time = time.time()
-        speed = None
+        current_time = time.monotonic()
+        # 第一个 token 到来时初始化 start_time
+        if start_time is None:
+            start_time = current_time
+
+        # 计算瞬时 token 生成速度
+        speed = 0.0
         if last_token_time is not None:
             delta = current_time - last_token_time
             speed = 1.0 / delta if delta > 0 else 0.0
@@ -134,37 +139,34 @@ def create_callback(tokenizer, q: queue.Queue, model_type: str):
 
         accumulated_tokens.append(token)
         total_tokens += 1
-        
-        # 根据模型类型选择解码方式
-        if model_type.startswith("qwen"):
-            new_text = tokenizer.decode(accumulated_tokens)
-        else:  # llama
-            new_text = tokenizer.decode(accumulated_tokens)
-            
+
+        # 解码 token 得到新文本
+        new_text = tokenizer.decode(accumulated_tokens)
         diff = new_text[len(last_output):]
         last_output = new_text
-        
+
+        total_time = current_time - start_time
+        avg_speed = total_tokens / total_time if total_time > 0 else 0.0
+
         if diff:
-            total_time = current_time - start_time
-            avg_speed = total_tokens / total_time if total_time > 0 else 0.0
-            # 将差量、速度等信息发送到队列
             q.put(json.dumps({
                 "diff": diff,
-                "speed": speed if speed is not None else 0.0,
+                "speed": speed,
                 "total_time": total_time,
                 "total_tokens": total_tokens,
                 "avg_speed": avg_speed
             }))
-    
+
     return token_callback
+
 
 # -------------------------------
 # 终端聊天实现
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen 模型聊天')
-    parser.add_argument('--model_path', type=str, default="../models/tinyllama", help='模型路径')
-    parser.add_argument('--model_type', type=str, default="llama", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
+    parser.add_argument('--model_path', type=str, default="../models/Qwen2.5-1.5B-Instruct", help='模型路径')
+    parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=2048, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=0.7, help='生成温度')
