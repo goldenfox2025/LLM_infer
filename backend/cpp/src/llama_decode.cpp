@@ -374,8 +374,6 @@ Tensor<float> LlamaModel::forward_cpu(const Tensor<uint32_t>* input,
 
 Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
                                        KVCache<float>* typed_kv_cache) {
-  // 首先转换为正确的KVCache类型
-
   const size_t seq_len = input->numel();
   const size_t n_groups = n_q_h_ / n_kv_h_;
   const size_t current_pos =
@@ -384,32 +382,13 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
   Tensor<float> residual({seq_len, d_}, Device::CUDA);
   Tensor<float> hidden_states({seq_len, d_}, Device::CUDA);
 
-  // Print input tensor details
-  // debugPrintTensor(*input, "Input tensor");
-
+  // 执行embedding gather操作
   cuda_OP::gather(&residual, input, &params_.at("embedding_table"));
 
-  // Debug print residual after embedding
-  // debugPrintTensor(residual, "Residual after embedding");
-
   for (size_t layer = 0; layer < n_layers_; layer++) {
-    // debugPrintTensor(residual, "Residual before RMSNorm (att) - layer " +
-    //  std::to_string(layer));
-
-    // 打印 RMSNorm 权重 tensor 的前10个元素
-    // debugPrintTensor(params_.at("rms_att_w" +
-    // std::to_string(layer)),
-    //  "RMSNorm weight (att) - layer " + std::to_string(layer));
-
-    // 调用 CUDA 版本的 RMSNorm
+    // RMSNorm (注意力前)
     cuda_OP::rms_norm(&hidden_states, &residual,
                       &params_.at("rms_att_w" + std::to_string(layer)), eps_);
-
-    // 打印 RMSNorm 后的输出 hidden_states 的前10个元素
-    // debugPrintTensor(
-    // hidden_states,
-    // "Hidden states after RMSNorm (att) - layer " +
-    //  std::to_string(layer));
 
     Tensor<float>& wq = params_.at("wq" + std::to_string(layer));
     Tensor<float>& wk = params_.at("wk" + std::to_string(layer));
@@ -420,6 +399,7 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
       throw std::runtime_error("QKV weights must be on CUDA device");
     }
 
+    // 创建3个CUDA流用于并行计算 Q, K, V
     cudaStream_t streams[3];
     for (int i = 0; i < 3; i++) {
       cudaError_t err = cudaStreamCreate(&streams[i]);
@@ -428,11 +408,16 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
       }
     }
 
-    // Asynchronous kernel calls, use different streams for
-    // parallel execution
-    Tensor<float> q_buf = cuda_OP::matmul(hidden_states, wq, streams[0]);
-    Tensor<float> k_buf = cuda_OP::matmul(hidden_states, wk, streams[1]);
-    Tensor<float> v_buf = cuda_OP::matmul(hidden_states, wv, streams[2]);
+    // 预先分配输出张量：Q 的shape为 [seq_len, n_q_h_ * dqkv_]
+    Tensor<float> q_buf({seq_len, n_q_h_ * dqkv_}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, wq, &q_buf, streams[0]);
+
+    // K, V 的shape为 [seq_len, n_kv_h_ * dqkv_]
+    Tensor<float> k_buf({seq_len, n_kv_h_ * dqkv_}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, wk, &k_buf, streams[1]);
+
+    Tensor<float> v_buf({seq_len, n_kv_h_ * dqkv_}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, wv, &v_buf, streams[2]);
 
     for (int i = 0; i < 3; i++) {
       cudaError_t err = cudaStreamSynchronize(streams[i]);
@@ -442,19 +427,14 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
       cudaStreamDestroy(streams[i]);
     }
 
-    // Debug print QKV tensors
-    // debugPrintTensor(q_buf, "Q buffer - layer " +
-    // std::to_string(layer)); debugPrintTensor(k_buf, "K
-    // buffer - layer " + std::to_string(layer));
-    // debugPrintTensor(v_buf, "V buffer - layer " +
-    // std::to_string(layer));
-
+    // 调整形状，形成3D视图
     Tensor<float> q_buf_view = q_buf.view({seq_len, n_q_h_, dqkv_});
     Tensor<float> k_buf_view = k_buf.view({seq_len, n_kv_h_, dqkv_});
     Tensor<float> v_buf_view = v_buf.view({seq_len, n_kv_h_, dqkv_});
     cuda_OP::rope(&q_buf_view, current_pos, rope_theta_);
     cuda_OP::rope(&k_buf_view, current_pos, rope_theta_);
 
+    // 保存KV Cache（如果存在）
     if (typed_kv_cache) {
       size_t row_size = n_kv_h_ * dqkv_;
       for (size_t i = 0; i < seq_len; i++) {
@@ -467,25 +447,15 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
         if (err != cudaSuccess) {
           throw std::runtime_error("KV Cache copy failed");
         }
-
         err = cudaMemcpy(v_i.data_ptr(), v_buf_view.data_ptr() + i * row_size,
                          row_size * sizeof(float), cudaMemcpyDeviceToDevice);
         if (err != cudaSuccess) {
           throw std::runtime_error("KV Cache copy failed");
         }
-
         typed_kv_cache->k_cache(layer, current_pos + i) = std::move(k_i);
         typed_kv_cache->v_cache(layer, current_pos + i) = std::move(v_i);
       }
     }
-
-    // Debug print tensors after RoPE
-    // debugPrintTensor(q_buf_view, "Q buffer view after RoPE -
-    // layer " +
-    //  std::to_string(layer));
-    // debugPrintTensor(k_buf_view, "K buffer
-    // view after RoPE - layer " +
-    //  std::to_string(layer));
 
     Tensor<float> Q_3d = q_buf_view;
     Tensor<float> total_K, total_V;
@@ -509,7 +479,6 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
         if (err != cudaSuccess) {
           throw std::runtime_error("Cache copy failed");
         }
-
         err =
             cudaMemcpy(total_V.data_ptr() + pos * row_size, cached_v.data_ptr(),
                        row_size * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -517,14 +486,13 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
           throw std::runtime_error("Cache copy failed");
         }
       }
-
       cudaError_t err = cudaMemcpy(
           total_K.data_ptr() + cached_len * row_size, k_buf_view.data_ptr(),
           seq_len * row_size * sizeof(float), cudaMemcpyDeviceToDevice);
       if (err != cudaSuccess) {
+       
         throw std::runtime_error("Current K copy failed");
       }
-
       err = cudaMemcpy(
           total_V.data_ptr() + cached_len * row_size, v_buf_view.data_ptr(),
           seq_len * row_size * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -536,70 +504,53 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
       total_V = v_buf_view;
     }
 
+    // 计算注意力分数 -> softmax -> 注意力输出
     Tensor<float> att_scores({n_q_h_, total_seq_len}, Device::CUDA);
     cuda_OP::compute_attention_scores(Q_3d, total_K, n_q_h_, dqkv_, att_scores,
                                       n_kv_h_);
-
-    cuda_OP::softmax(&att_scores, &att_scores,
-                     /*dim=*/1, false, current_pos);
-
-    // Debug print attention scores
-    // debugPrintTensor(att_scores,
-    //  "Attention scores - layer " +
-    //  std::to_string(layer));
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false, current_pos);
 
     Tensor<float> att_heads({n_q_h_, dqkv_}, Device::CUDA);
     cuda_OP::compute_att_output(att_scores, total_V, n_q_h_, dqkv_, att_heads,
                                 n_kv_h_);
-    // debugPrintTensor(att_heads, "att_heads -
-    // layer " + std::to_string(layer));
 
-    // Tensor<float> att_out({1, d_},
-    // Device::CUDA);
+    // 将注意力输出投影回原始维度
     Tensor<float>& wo = params_.at("wo" + std::to_string(layer));
-
-    Tensor<float> att_proj =
-        cuda_OP::matmul(att_heads.view({1, n_q_h_ * dqkv_}), wo);
-
-    // residual = residual + att_proj;
-
-    // debugPrintTensor(att_proj, "att_out -
-    // layer " + std::to_string(layer));
-    // debugPrintTensor(residual, "residual -
-    // layer " + std::to_string(layer));
+    // 预先分配 att_proj 输出张量，形状与预期相同，这里假设结果形状为 [1, d_]
+    Tensor<float> att_proj({1, d_}, Device::CUDA);
+    cuda_OP::matmul(att_heads.view({1, n_q_h_ * dqkv_}), wo, &att_proj);
     residual = residual + att_proj;
-    // (3) FFN 前的 RMSNorm
+
+    // FFN 前的 RMSNorm
     cuda_OP::rms_norm(&hidden_states, &residual,
                       &params_.at("rms_ffn_w" + std::to_string(layer)), eps_);
-    // //debugPrintTensor(hidden_states, "CUDA
-    // hidden_states after RMSNorm(ffn)");
 
-    // FFN
+    // FFN部分
     Tensor<float>& w_gate = params_.at("w_gate" + std::to_string(layer));
     Tensor<float>& w_up = params_.at("w_up" + std::to_string(layer));
     Tensor<float>& w_down = params_.at("w_down" + std::to_string(layer));
 
-    Tensor<float> gate_buf = cuda_OP::matmul(hidden_states, w_gate);
-    Tensor<float> up_buf = cuda_OP::matmul(hidden_states, w_up);
+    Tensor<float> gate_buf({seq_len, w_gate.sizes()[1]}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, w_gate, &gate_buf);
+
+    Tensor<float> up_buf({seq_len, w_up.sizes()[1]}, Device::CUDA);
+    cuda_OP::matmul(hidden_states, w_up, &up_buf);
 
     cuda_OP::silu(&gate_buf, &gate_buf);
     cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);
 
-    Tensor<float> ffn_out = cuda_OP::matmul(gate_buf, w_down);
+    Tensor<float> ffn_out({seq_len, w_down.sizes()[1]}, Device::CUDA);
+    cuda_OP::matmul(gate_buf, w_down, &ffn_out);
     residual = residual + ffn_out;
-    // //debugPrintTensor(residual, "CUDA
-    // residual after FFN");
   }
 
-  // 5. 最终 RMSNorm + lm_head
+  // 最终 RMSNorm 和 lm_head
   Tensor<float> final_h({seq_len, d_}, Device::CUDA);
   cuda_OP::rms_norm(&final_h, &residual, &params_.at("rms_out_w"), eps_);
-  // //debugPrintTensor(final_h, "CUDA final_h after final RMSNorm");
-
   Tensor<float>& lm_head = params_.at("lm_head");
   size_t vocab_size = lm_head.sizes()[1];
   Tensor<float> logits({seq_len, vocab_size}, Device::CUDA);
-  logits = cuda_OP::matmul(final_h, lm_head);
+  cuda_OP::matmul(final_h, lm_head, &logits);
   return logits.cpu();
 }
 

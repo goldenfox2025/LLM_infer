@@ -5,7 +5,7 @@
 template <typename T>
 class Tensor;
 
-// 非模板基类KVCache接口，用于向上转型
+
 class KVCacheBase {
  public:
   virtual ~KVCacheBase() = default;

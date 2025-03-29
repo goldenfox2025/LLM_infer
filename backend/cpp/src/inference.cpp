@@ -12,6 +12,71 @@
 // ------------------------
 // KVCache 实现
 // ------------------------
+#include <iostream>
+#include <stdexcept>
+
+// 构造函数：分配连续内存并预计算各个位置的视图
+#include <iostream>
+#include <stdexcept>
+template <typename T>
+void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
+                      size_t num_to_print = 10) {
+  std::cout << "[Debug] " << tensor_name << ":\n";
+
+  // 1) Print shape
+  std::cout << "  shape: [";
+  for (auto s : tensor.sizes()) {
+    std::cout << s << " ";
+  }
+  std::cout << "]\n";
+
+  // 2) Print strides
+  std::cout << "  strides: [";
+  for (auto st : tensor.strides()) {
+    std::cout << st << " ";
+  }
+  std::cout << "]\n";
+
+  // 3) Print device
+  std::cout << "  device: ";
+  if (tensor.device() == Device::CPU) {
+    std::cout << "CPU";
+  } else if (tensor.device() == Device::CUDA) {
+    std::cout << "CUDA";
+  } else {
+    std::cout << "UNKNOWN";
+  }
+  std::cout << "\n";
+
+  // 4) Print elements starting from offset 0
+  size_t offset = 0;  // 从开始处打印
+  size_t total_elements = tensor.numel();
+  size_t n_print = std::min(num_to_print, total_elements - offset);
+
+  std::cout << "  elements from offset " << offset << " (" << n_print
+            << " element(s)): ";
+  if (tensor.device() == Device::CPU) {
+    const T* ptr = tensor.data_ptr();
+    for (size_t i = 0; i < n_print; i++) {
+      std::cout << ptr[offset + i] << " ";
+    }
+    std::cout << "\n";
+  } else {
+    // Copy from GPU to CPU, then print
+    std::vector<T> host_buffer(n_print);
+    cudaError_t err = cudaMemcpy(host_buffer.data(), tensor.data_ptr() + offset,
+                                 n_print * sizeof(T), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+      std::cout << "  [Error] cudaMemcpy failed\n";
+      return;
+    }
+    for (size_t i = 0; i < n_print; i++) {
+      std::cout << host_buffer[i] << " ";
+    }
+    std::cout << "\n";
+  }
+}
+// 构造函数：分配连续内存并预先构造所有 slice（保存在一维 vector 中）
 template <typename T>
 KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim,
                     Device device, size_t initial_size)
@@ -19,84 +84,83 @@ KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim,
       max_seq_len_(max_seq_len),
       head_dim_(head_dim),
       current_len_(0),
-      device_(device) {  // 初始化 device_
+      device_(device) {
   std::cout << "[KVCache::KVCache] 初始化 KVCache, n_layers=" << n_layers_
             << ", max_seq_len=" << max_seq_len_ << ", head_dim=" << head_dim_
             << ", device=" << (device_ == Device::CUDA ? "CUDA" : "CPU")
             << std::endl;
 
-  // 分配每一层每个位置的缓存（总共 n_layers * max_seq_len 个 Tensor）
-  k_cache_.resize(n_layers_ * max_seq_len_);
-  v_cache_.resize(n_layers_ * max_seq_len_);
-  for (size_t i = 0; i < n_layers_ * max_seq_len_; i++) {
-    // 初始化一个大小为 head_dim 的数据向量，全部置 0
-    std::vector<T> k_data(head_dim_, static_cast<T>(0.0f));
-    std::vector<T> v_data(head_dim_, static_cast<T>(0.0f));
-    // 使用数据向量构造 Tensor，形状为 [1, head_dim]，并指定设备
-    k_cache_[i] = Tensor<T>(std::move(k_data), {1, head_dim_}, device_);
-    v_cache_[i] = Tensor<T>(std::move(v_data), {1, head_dim_}, device_);
+  // 分配连续内存，形状为 [n_layers, max_seq_len, head_dim]
+  k_cache_contiguous_ =
+      Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_);
+  v_cache_contiguous_ =
+      Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_);
+
+  // （可选）初始化连续内存数据，比如 memset 为 0
+
+  // 分配一维 vector 存储所有 slice
+  k_cache_slices_.resize(n_layers_ * max_seq_len_);
+  v_cache_slices_.resize(n_layers_ * max_seq_len_);
+  for (size_t layer = 0; layer < n_layers_; layer++) {
+    for (size_t pos = 0; pos < max_seq_len_; pos++) {
+      size_t idx = layer * max_seq_len_ + pos;
+      // 利用 slice 方法构造对应的 view，
+      // 对于 k_cache_contiguous_，取范围 [layer, pos, 0] 到 [layer+1, pos+1,
+      // head_dim_]
+      k_cache_slices_[idx] = k_cache_contiguous_.slice(
+          {layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
+      v_cache_slices_[idx] = v_cache_contiguous_.slice(
+          {layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
+    }
   }
-  // 如果指定了初始大小，则设置当前长度
+
+  // 设置初始有效 token 数（如果指定了初始大小）
   if (initial_size > 0) {
     if (initial_size > max_seq_len_) {
       throw std::runtime_error("Initial size cannot exceed max_seq_len");
     }
     current_len_ = initial_size;
-    // std::cout << "[KVCache::KVCache] 设置初始 current_len: " << current_len_
-    //           << std::endl;
   }
 }
 
 template <typename T>
 void KVCache<T>::resize(size_t new_size) {
-  // std::cout << "[KVCache::resize] 请求 resize from " << current_len_ << " to
-  // "
-  //           << new_size << std::endl;
   if (new_size > max_seq_len_) {
     throw std::runtime_error("KVCache: Attempted to resize beyond max_seq_len");
   }
   if (new_size <= current_len_) {
-    // std::cout << "[KVCache::resize] new_size <= current_len, 无需调整"
-    //           << std::endl;
     return;
-    // throw std::runtime_error(
-    //     "KVCache: New size must be larger than current size");
   }
   current_len_ = new_size;
-  // std::cout << "[KVCache::resize] 成功调整 current_len 为 " << current_len_
-  //           << std::endl;
 }
 
 template <typename T>
 void KVCache<T>::clear() {
-  // std::cout << "[KVCache::clear] 清空 KVCache" << std::endl;
   current_len_ = 0;
 }
-
 template <typename T>
 Tensor<T>& KVCache<T>::k_cache(size_t layer, size_t pos) {
-  // std::cout << "[KVCache::k_cache] 访问 layer=" << layer << ", pos=" << pos
-  //           << std::endl;
   if (layer >= n_layers_) {
     throw std::runtime_error("KVCache: Layer index out of range");
   }
   if (pos >= max_seq_len_) {
     throw std::runtime_error("KVCache: Position index out of range");
   }
-  return k_cache_[layer * max_seq_len_ + pos];
+  size_t idx = layer * max_seq_len_ + pos;
+  return k_cache_slices_[idx];
 }
 
 template <typename T>
 Tensor<T>& KVCache<T>::v_cache(size_t layer, size_t pos) {
-  // std::cout << "[KVCache::v_cache] 访问 layer=" << layer << ", pos=" << pos
-  //           << std::endl;
   if (layer >= n_layers_) {
     throw std::runtime_error("KVCache: Layer index out of range");
   }
   if (pos >= max_seq_len_) {
     throw std::runtime_error("KVCache: Position index out of range");
   }
-  return v_cache_[layer * max_seq_len_ + pos];
+  size_t idx = layer * max_seq_len_ + pos;
+
+  return v_cache_slices_[idx];
 }
 
 template <typename T>
@@ -104,11 +168,19 @@ KVCache<T>& KVCache<T>::cuda() {
   if (device_ == Device::CUDA) return *this;
 
   device_ = Device::CUDA;
-  for (auto& t : k_cache_) {
-    t = t.cuda();
-  }
-  for (auto& t : v_cache_) {
-    t = t.cuda();
+  // 将连续内存移动到 CUDA 设备
+  k_cache_contiguous_ = k_cache_contiguous_.cuda();
+  v_cache_contiguous_ = v_cache_contiguous_.cuda();
+
+  // 重新构造所有 slice（由于连续内存的 data pointer 更新）
+  for (size_t layer = 0; layer < n_layers_; layer++) {
+    for (size_t pos = 0; pos < max_seq_len_; pos++) {
+      size_t idx = layer * max_seq_len_ + pos;
+      k_cache_slices_[idx] = k_cache_contiguous_.slice(
+          {layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
+      v_cache_slices_[idx] = v_cache_contiguous_.slice(
+          {layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
+    }
   }
   return *this;
 }
@@ -118,13 +190,34 @@ KVCache<T>& KVCache<T>::cpu() {
   if (device_ == Device::CPU) return *this;
 
   device_ = Device::CPU;
-  for (auto& t : k_cache_) {
-    t = t.cpu();
-  }
-  for (auto& t : v_cache_) {
-    t = t.cpu();
+  // 将连续内存移回 CPU
+  k_cache_contiguous_ = k_cache_contiguous_.cpu();
+  v_cache_contiguous_ = v_cache_contiguous_.cpu();
+
+  // 重新构造所有 slice
+  for (size_t layer = 0; layer < n_layers_; layer++) {
+    for (size_t pos = 0; pos < max_seq_len_; pos++) {
+      size_t idx = layer * max_seq_len_ + pos;
+      k_cache_slices_[idx] = k_cache_contiguous_.slice(
+          {layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
+      v_cache_slices_[idx] = v_cache_contiguous_.slice(
+          {layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
+    }
   }
   return *this;
+}
+
+template <typename T>
+std::pair<const Tensor<T>, const Tensor<T>> KVCache<T>::get_contiguous_tensor(
+    size_t layer) const {
+  Tensor<T> K = k_cache_contiguous_
+                    .slice({layer, 0, 0}, {layer + 1, current_len_, head_dim_})
+                    .squeeze(0);
+  Tensor<T> V = v_cache_contiguous_
+                    .slice({layer, 0, 0}, {layer + 1, current_len_, head_dim_})
+                    .squeeze(0);
+
+  return {K, V};
 }
 
 // 显式实例化模板类

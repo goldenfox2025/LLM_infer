@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include <cuda_runtime.h>
 
 #include <stdexcept>
@@ -40,9 +39,8 @@ void rms_norm(Tensor<T>* output, const Tensor<T>* input,
  * @return 输出矩阵C [M, N]
  */
 template <typename T>
-Tensor<T> matmul(const Tensor<T>& A, const Tensor<T>& B, 
-                cudaStream_t stream = nullptr, 
-                const Tensor<T>* bias = nullptr);
+void matmul(const Tensor<T>& A, const Tensor<T>& B, Tensor<T>* C,
+            cudaStream_t stream = nullptr, const Tensor<T>* bias = nullptr);
 
 // rope 算子，用于位置编码
 template <typename T>
@@ -66,10 +64,6 @@ template <typename T>
 void add(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
 
 // Layer normalization算子 - 沿最后一个维度进行归一化
-template <typename T>
-void layer_norm(Tensor<T>* output, const Tensor<T>* input, 
-               const Tensor<T>* weight, const Tensor<T>* bias,
-               float eps = 1e-5);
 
 // 计算注意力分数（多头注意力机制相关算子）
 template <typename T>
@@ -94,7 +88,5 @@ void compute_att_output_prefill(const Tensor<T>& att_probs, const Tensor<T>& V,
                                 Tensor<T>& att_output, size_t n_q_h,
                                 size_t dqkv, size_t total_seq_len,
                                 size_t n_kv_h);
-
-
 
 }  // namespace cuda_OP

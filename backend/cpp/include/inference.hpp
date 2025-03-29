@@ -16,15 +16,12 @@ class BaseModel;
 template <typename T>
 class InferenceEngine;
 
-// KVCache：用于存储每一层每个 token 的 Key 和 Value 张量
-
 template <typename T>
 class KVCache : public KVCacheBase {
  public:
-  // n_layers：模型层数，max_seq_len：最大序列长度，
-  // head_dim：每个缓存张量的元素数（通常为 n_kv_heads * dqkv）
-  // initial_size：初始缓存 token 数（可选）
-  // device: 指定 KVCache 所在的设备 (CPU or CUDA)
+  // n_layers：模型层数，max_seq_len：最大序列长度，head_dim：每个缓存张量的元素数（通常为
+  // n_kv_heads * dqkv） initial_size：初始缓存 token 数（可选） device: 指定
+  // KVCache 所在的设备 (CPU or CUDA)
   KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim,
           Device device = Device::CPU, size_t initial_size = 0);
 
@@ -47,18 +44,29 @@ class KVCache : public KVCacheBase {
   KVCache<T>& cpu();
   Device device() const override { return device_; }
 
-  // 实现KVCacheBase中的获取属性方法
+  // 实现 KVCacheBase 中的获取属性方法
   size_t get_n_layers() const override { return n_layers_; }
   size_t get_head_dim() const override { return head_dim_; }
   size_t get_max_seq_len() const override { return max_seq_len_; }
 
+  // 新增方法：返回连续存储的 k 和 v 的起始指针
+  std::pair<const Tensor<T>, const Tensor<T>> get_contiguous_tensor(
+      size_t layer) const;
+
  private:
-  std::vector<Tensor<T>> k_cache_;
-  std::vector<Tensor<T>> v_cache_;
+  // 使用连续内存存储所有层的 KV，形状为 [n_layers, max_seq_len, head_dim]
+  Tensor<T> k_cache_contiguous_;
+  Tensor<T> v_cache_contiguous_;
+
+  // 存储所有 slice 的一维 vector，大小为 n_layers * max_seq_len，
+  // 每个 slice 都是从对应连续内存中切出的一部分。
+  std::vector<Tensor<T>> k_cache_slices_;
+  std::vector<Tensor<T>> v_cache_slices_;
+
   size_t n_layers_;
   size_t head_dim_;
   size_t current_len_;
-  Device device_;  // Track device for KVCache
+  Device device_;  // 当前设备
 };
 
 class infer_base {
