@@ -295,12 +295,13 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       total_V = v_buf_view;
     }
 
-    // 计算注意力分数
     Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
+
     cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_, head_dim_,
                                       att_scores, n_kv_heads_);
     // debugPrintTensor(att_scores,
-    //                  "attention scores (layer " + std::to_string(i) + ")");
+    //                  "attention scores (layer " + std::to_string(i) +
+    // ")");
 
     // Softmax处理注意力分数
     cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false, offset);
@@ -309,22 +310,26 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
     cuda_OP::compute_att_output(att_scores, total_V, n_heads_, head_dim_,
                                 att_heads, n_kv_heads_);
+    debugPrintTensor(att_heads,
+                     "attention heads (layer " + std::to_string(i) + ")");
+    Tensor<T> att_heads_({n_heads_, head_dim_}, Device::CUDA);
+    cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads_);
 
+    debugPrintTensor(att_heads_,
+                     "flash_attention heads (layer " + std::to_string(i) + ")");
     // 投影回原始维度
-    Tensor<T> att_heads_reshaped = att_heads.view({1, n_heads_ * head_dim_});
+    Tensor<T> att_heads_reshaped = att_heads_.view({1, n_heads_ * head_dim_});
     Tensor<T> att_proj({1, hidden_size_}, Device::CUDA);
     cuda_OP::matmul(att_heads_reshaped, wo, &att_proj, nullptr, o_bias);
 
     // 残差连接
     residual = residual + att_proj;
 
-    // 3. Post Attention LayerNorm (RMSNorm)
     auto& ffn_norm_weight =
         params_.at(layer_prefix + "post_attention_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
                       rms_norm_eps_);
 
-    // 4. MLP (Feed Forward Network)
     auto& gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
     auto& up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
     auto& down_weight = params_.at(layer_prefix + "mlp.down_proj.weight");
