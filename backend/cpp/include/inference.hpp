@@ -5,7 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
-
+#include <chrono>
 #include "kvcache_base.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"

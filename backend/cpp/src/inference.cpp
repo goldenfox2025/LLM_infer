@@ -357,8 +357,17 @@ void InferenceEngine<T>::generate_with_callback(
     //   callback(-1);  // 传递 -1 表示超出
     //   break;
     // }
+    // auto start = std::chrono::high_resolution_clock::now();
+
     next_token =
         generate_next_token(thread_pool_, output, temperature, top_p, top_k);
+
+    // 在生成 token 后记录结束时间
+    // auto end = std::chrono::high_resolution_clock::now();
+    // std::chrono::duration<double, std::milli> token_time = end - start;
+    // std::cout << "生成 token 耗时: " << token_time.count() << " 毫秒"
+    //           << std::endl;
+
     output.push_back(next_token);
     if (next_token == model_->get_eos_token_id()) {
       break;
