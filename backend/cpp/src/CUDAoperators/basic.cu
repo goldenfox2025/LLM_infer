@@ -23,13 +23,78 @@ void checkCudaError(cudaError_t error) {
   }
 }
 
-// ==================================================
-// 模板化内核及包装函数
-// ==================================================
-
 // --------------------------------------------------
 // RMSNorm 内核与包装函数（模板化）
 // --------------------------------------------------
+
+__device__ inline float warp_reduce_sum(float val) {
+  // 注意：__activemask() 会返回当前活跃线程的掩码
+  for (int offset = 32 / 2; offset > 0; offset /= 2) {
+    val += __shfl_down_sync(__activemask(), val, offset);
+  }
+  return val;
+}
+
+// v1版本
+template <typename T>
+__global__ void rms_norm_kernel_v1(const T *input, T *output, const T *weight,
+                                   float eps, size_t row_size) {
+  // 每个 block 处理一行数据
+  int row = blockIdx.x;
+  const T *in_row = input + row * row_size;
+  T *out_row = output + row * row_size;
+
+  int tid = threadIdx.x;
+  int nthreads = blockDim.x;
+
+  float local_sum = 0.0f;
+  for (size_t i = tid; i < row_size; i += nthreads) {
+    float val = static_cast<float>(in_row[i]);
+    local_sum += val * val;
+  }
+
+  local_sum = warp_reduce_sum(local_sum);
+
+  // 每个 warp 的第一个线程将归约结果写入共享内存
+  // 最多支持 32 个 warp
+  __shared__ float shared[32];
+  int lane = tid % 32;
+  int warp_id = tid / 32;
+  if (lane == 0) {
+    shared[warp_id] = local_sum;
+  }
+  __syncthreads();
+
+  float block_sum = 0.0f;
+  int num_warps = (nthreads + 32 - 1) / 32;
+  if (warp_id == 0) {
+    float warp_partial_sum = 0.0f;
+    if (tid < num_warps) {
+      warp_partial_sum = shared[lane];
+    }
+    block_sum = warp_reduce_sum(warp_partial_sum);
+  }
+
+  // 将最终归约结果通过共享内存广播到所有线程
+  // 使用共享内存的第一个元素来存储最终结果
+  if (tid == 0) {
+    shared[0] = block_sum;
+  }
+  __syncthreads();
+
+  float final_sum = shared[0];
+
+  float rms = sqrtf(final_sum / row_size + eps);
+
+  // 归一化，每个线程负责处理多个元素
+  for (size_t i = tid; i < row_size; i += nthreads) {
+    float val = static_cast<float>(in_row[i]);
+    float w = static_cast<float>(weight[i]);
+    out_row[i] = static_cast<T>((val / rms) * w);
+  }
+}
+
+// 无印版本
 template <typename T>
 __global__ void rms_norm_kernel(const T *input, T *output, const T *weight,
                                 float eps, size_t row_size) {
@@ -55,8 +120,10 @@ void rms_norm(Tensor<T> *output, const Tensor<T> *input,
   // input/output shape 均为 [seq_len, d]
   size_t seq_len = input->sizes()[0];
   size_t d = input->sizes()[1];
-  rms_norm_kernel<<<seq_len, 1>>>(input->data_ptr(), output->data_ptr(),
-                                  weight->data_ptr(), eps, d);
+  int threads = 64;
+  // 无印版本仅支持单线程
+  rms_norm_kernel_v1<<<seq_len, threads>>>(
+      input->data_ptr(), output->data_ptr(), weight->data_ptr(), eps, d);
   checkCudaError(cudaGetLastError());
   checkCudaError(cudaDeviceSynchronize());
 }

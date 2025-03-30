@@ -40,7 +40,8 @@ void rms_norm(Tensor<T>* output, const Tensor<T>* input,
  */
 template <typename T>
 void matmul(const Tensor<T>& A, const Tensor<T>& B, Tensor<T>* C,
-            cudaStream_t stream = nullptr, const Tensor<T>* bias = nullptr);
+            cudaStream_t stream = nullptr, const Tensor<T>* bias = nullptr,
+            bool use_cublas = true);
 
 // rope 算子，用于位置编码
 template <typename T>
@@ -61,7 +62,7 @@ void multiply(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
 
 // 逐元素加法算子
 template <typename T>
-void add(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
+void add(Tensor<T>* output, Tensor<T>* A, const Tensor<T>* B);
 
 // Layer normalization算子 - 沿最后一个维度进行归一化
 
@@ -80,7 +81,7 @@ void compute_att_output(const Tensor<T>& att_probs, const Tensor<T>& V,
 // flahattention实现
 template <typename T>
 void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
-                   Tensor<T>& att_output);
+                     Tensor<T>& att_output);
 
 // prefill 版本：计算注意力分数
 template <typename T>
