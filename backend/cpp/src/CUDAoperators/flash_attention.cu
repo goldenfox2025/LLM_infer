@@ -1,6 +1,7 @@
 #include <cublas_v2.h>
 #include <cuda_bf16.h>  // 提供 __nv_bfloat16 定义
 #include <cuda_runtime.h>
+#include <float.h>
 #include <math.h>
 
 #include <algorithm>  // min
@@ -12,15 +13,19 @@
 
 #include "cudaOP.cuh"  // 假设此头文件定义了 Tensor<T> 等接口
 
+// 预先确定的参数（根据实际情况调整）
+#define DQKV_VALUE 128
+#define B_C_VALUE 8
+
 // ----------------------------------------------
 // bf16 与 float 转换函数
 // ----------------------------------------------
 __device__ inline float bf16_to_float(__nv_bfloat16 x) {
   unsigned short raw;
-  memcpy(&raw, &x, sizeof(raw));  // 将 x 的 16 bits 拷贝到 raw
+  memcpy(&raw, &x, sizeof(raw));
   unsigned int bits = (static_cast<unsigned int>(raw) << 16);
   float f;
-  memcpy(&f, &bits, sizeof(f));  // 转换成 float
+  memcpy(&f, &bits, sizeof(f));
   return f;
 }
 
@@ -51,9 +56,9 @@ __device__ inline double my_exp<double>(double x) {
 
 template <>
 __device__ inline __nv_bfloat16 my_exp<__nv_bfloat16>(__nv_bfloat16 x) {
-  float fx = bf16_to_float(x);  // 转为 float 计算
+  float fx = bf16_to_float(x);
   float ef = expf(fx);
-  return float_to_bf16(ef);  // 转回 bf16
+  return float_to_bf16(ef);
 }
 
 // ----------------------------------------------
@@ -79,11 +84,8 @@ __device__ inline __nv_bfloat16 my_fmax<__nv_bfloat16>(__nv_bfloat16 a,
 namespace cuda_OP {
 
 // --------------------------------------------------
-// flash_attention_kernel_v1 内核
+// flash_attention_kernel_v1 内核（静态共享内存版本）
 // --------------------------------------------------
-#include <float.h>
-#include <math.h>
-
 template <typename T>
 __global__ void flash_attention_kernel_v1(T* q, const T* k, const T* v,
                                           T* att_output, int n_q_h,
@@ -91,29 +93,41 @@ __global__ void flash_attention_kernel_v1(T* q, const T* k, const T* v,
                                           int dqkv, int B_c, int B_r,
                                           int n_groups, int T_r, int T_c,
                                           T softmax_scale) {
-  // --------------------------
-  // 共享内存布局说明
-  // --------------------------
-  extern __shared__ unsigned char s_raw[];
-  T* s_shared = reinterpret_cast<T*>(s_raw);
-
-  T* qi = s_shared;                // [dqkv] —— Query向量
-  T* kj = qi + dqkv;               // [B_c * dqkv] —— 分块内Key
-  T* vj = kj + B_c * dqkv;         // [B_c * dqkv] —— 分块内Value
-  T* score_buf = vj + B_c * dqkv;  // [B_c] —— 存放每个Token的分数
-  T* s_tmp = score_buf + B_c;  // [blockDim.x * blockDim.y] —— 临时归约缓存
-  T* lm = s_tmp +
-          blockDim.x *
-              blockDim.y;  // 用于存放全局 softmax 参数：局部最大值及归一化因子
+  // 检查预设参数是否一致
+  if (dqkv != DQKV_VALUE || B_c != B_C_VALUE) return;
 
   // --------------------------
-  // 线程和Block内变量
+  // 静态共享内存分区
   // --------------------------
-  const int d_tid = threadIdx.x;    // 特征维度内线程ID
-  const int B_c_tid = threadIdx.y;  // 分块内Token线程ID
+  // 每个 head 内的 query 向量：dqkv
+  __shared__ T s_qi[DQKV_VALUE];
+  // 当前 chunk 内的 key：B_c * dqkv
+  __shared__ T s_kj[B_C_VALUE * DQKV_VALUE];
+  // 当前 chunk 内的 value：B_c * dqkv
+  __shared__ T s_vj[B_C_VALUE * DQKV_VALUE];
+  // 当前 chunk 内每个 token 对应的得分：B_c
+  __shared__ T s_score_buf[B_C_VALUE];
+  // 临时归约缓存：固定大小 dqkv * B_c
+  __shared__ T s_tmp[DQKV_VALUE * B_C_VALUE];
+  // 用于存储全局 softmax 参数（后续用于累积全局归一化因子）
+  // s_lm[B_c]   —— 存储全局最大值 m_global
+  // s_lm[B_c+1] —— 存储全局归一化因子 global_l
+  __shared__ T s_lm[B_C_VALUE + 2];
+
+  // 为避免共享内存重用带来的数值干扰，新开辟两个独立区域用于归约计算：
+  // s_max_local: 用于并行归约计算当前 chunk 的最大得分 cur_m
+  // s_exp_local: 用于并行归约计算指数和 cur_l
+  __shared__ T s_max_local[B_C_VALUE];
+  __shared__ T s_exp_local[B_C_VALUE];
+
+  // --------------------------
+  // 线程和 Block 内变量
+  // --------------------------
+  const int d_tid = threadIdx.x;  // 特征维度内线程ID, 范围[0, dqkv)
+  const int B_c_tid = threadIdx.y;  // 当前 chunk 内 token 线程ID, 范围[0, B_c)
   const int head_id = blockIdx.x;
   const int q_offset = head_id * dqkv;
-  const int kv_head = head_id / n_groups;  // KV的head索引
+  const int kv_head = head_id / n_groups;  // KV head 索引
 
   // --------------------------
   // 初始化输出，所有线程协作（避免写竞争）
@@ -124,37 +138,37 @@ __global__ void flash_attention_kernel_v1(T* q, const T* k, const T* v,
   __syncthreads();
 
   // --------------------------
-  // 加载当前head的Query向量（仅B_c_tid==0的线程负责加载）
+  // 加载当前 head 的 Query 向量（仅 B_c_tid==0 的线程负责加载）
   // --------------------------
   if (B_c_tid == 0) {
     for (int x = d_tid; x < dqkv; x += blockDim.x) {
-      qi[x] = q[q_offset + x];
+      s_qi[x] = q[q_offset + x];
     }
   }
   __syncthreads();
 
-  // lm中的两个位置用于存储全局softmax参数：
-  // lm[B_c]   —— 全局最大值
-  // lm[B_c+1] —— 全局归一化因子（累积指数和）
-  T& m_global = lm[B_c];
-  T& global_l = lm[B_c + 1];
+  // s_lm 用于存储全局 softmax 参数：
+  // s_lm[B_c]   —— 全局最大值
+  // s_lm[B_c+1] —— 全局归一化因子（累积指数和）
+  T& m_global = s_lm[B_c];
+  T& global_l = s_lm[B_c + 1];
 
   // --------------------------
-  // 遍历每个KV块（chunk）
+  // 遍历每个 KV 块（chunk）
   // --------------------------
   for (int j = 0; j < T_c; ++j) {
     int token_index = j * B_c + B_c_tid;
     bool valid = token_index < cache_length;
 
-    // 1. 加载当前分块的Key和Value：无效位置填0
+    // 1. 加载当前分块的 Key 和 Value：无效位置填 0
     for (int x = d_tid; x < dqkv; x += blockDim.x) {
       if (valid) {
         int k_index = (token_index * n_kv_h + kv_head) * dqkv + x;
-        kj[B_c_tid * dqkv + x] = k[k_index];
-        vj[B_c_tid * dqkv + x] = v[k_index];
+        s_kj[B_c_tid * dqkv + x] = k[k_index];
+        s_vj[B_c_tid * dqkv + x] = v[k_index];
       } else {
-        kj[B_c_tid * dqkv + x] = T(0);
-        vj[B_c_tid * dqkv + x] = T(0);
+        s_kj[B_c_tid * dqkv + x] = T(0);
+        s_vj[B_c_tid * dqkv + x] = T(0);
       }
     }
     __syncthreads();
@@ -163,9 +177,9 @@ __global__ void flash_attention_kernel_v1(T* q, const T* k, const T* v,
     T score = T(0);
     if (valid) {
       for (int x = d_tid; x < dqkv; x += blockDim.x) {
-        score += qi[x] * kj[B_c_tid * dqkv + x];
+        score += s_qi[x] * s_kj[B_c_tid * dqkv + x];
       }
-      // 将每个线程计算的局部得分归约到同一Token
+      // 将每个线程计算的局部得分归约到同一 Token 上
       int index = B_c_tid * dqkv + d_tid;
       s_tmp[index] = score;
       __syncthreads();
@@ -176,32 +190,74 @@ __global__ void flash_attention_kernel_v1(T* q, const T* k, const T* v,
         __syncthreads();
       }
       if (d_tid == 0) {
-        // 应用softmax缩放因子
-        score_buf[B_c_tid] = s_tmp[B_c_tid * blockDim.x] * softmax_scale;
+        // 应用 softmax 缩放因子
+        s_score_buf[B_c_tid] = s_tmp[B_c_tid * dqkv] * softmax_scale;
+        // 同时将 s_score_buf 的值复制到 s_lm 前 B_c 个位置（原来做归约用）
+        s_lm[B_c_tid] = s_tmp[B_c_tid * dqkv] * softmax_scale;
       }
     } else if (d_tid == 0) {
-      score_buf[B_c_tid] = -FLT_MAX;  // 无效Token分数设为最小值
+      s_score_buf[B_c_tid] = T(-FLT_MAX + 1);  // 无效 token 得分设为很小值
+      s_lm[B_c_tid] = T(-FLT_MAX + 1);
     }
     __syncthreads();
 
-    // 3. 计算当前分块的Softmax归一化参数
-    T cur_m = score_buf[0];
-    for (int i = 1; i < B_c; ++i) {
-      cur_m = my_fmax(cur_m, score_buf[i]);
+    // 3. 计算当前分块的 Softmax 归一化参数
+    // 当前块有效 token 数量
+    const int chunk_start = j * B_c;
+    const int current_chunk_size = min(B_c, cache_length - chunk_start);
+
+    // ---------------------
+    // 3.1 并行归约计算最大值 cur_m
+    // ---------------------
+    if (d_tid == 0) {
+      // 将 s_score_buf 中的值复制到 s_max_local
+      s_max_local[B_c_tid] = s_score_buf[B_c_tid];
     }
+    __syncthreads();
+    for (int stride = B_c / 2; stride > 0; stride >>= 1) {
+      if (d_tid == 0 && B_c_tid < stride) {
+        s_max_local[B_c_tid] =
+            my_fmax(s_max_local[B_c_tid], s_max_local[B_c_tid + stride]);
+      }
+      __syncthreads();
+    }
+    T cur_m = s_max_local[0];
+    __syncthreads();
+
+    // ---------------------
+    // 3.2 并行归约计算归一化因子 cur_l（指数和）
+    if (d_tid == 0) {
+      // 将每个 token 的指数值计算出来，存入 s_exp_local
+      s_exp_local[B_c_tid] = my_exp(s_score_buf[B_c_tid] - cur_m);
+    }
+    __syncthreads();
+    for (int stride = B_c / 2; stride > 0; stride >>= 1) {
+      if (d_tid == 0 && B_c_tid < stride) {
+        s_exp_local[B_c_tid] += s_exp_local[B_c_tid + stride];
+      }
+      __syncthreads();
+    }
+    T cur_l = s_exp_local[0];
+    __syncthreads();
+
+    // 如果不希望使用并行归约求和，也可以采用顺序遍历的方式（效果相同，但并行性较差）
+    /*
     T cur_l = T(0);
     for (int i = 0; i < B_c; ++i) {
-      cur_l += my_exp(score_buf[i] - cur_m);
+      cur_l += my_exp(s_score_buf[i] - cur_m);
     }
+    __syncthreads();
+    */
 
     // 4. 计算当前分块的部分输出 partial_out
     T partial_out = T(0);
     for (int i = 0; i < B_c; ++i) {
-      T weight = my_exp(score_buf[i] - cur_m) / cur_l;
-      partial_out += weight * vj[i * dqkv + d_tid];
+      T k_val = s_score_buf[i];
+      T weight = my_exp(k_val - cur_m) / cur_l;
+      partial_out += weight * s_vj[i * dqkv + d_tid];
     }
 
-    // 5. 更新全局softmax归一化参数与输出（采用递归归一化方法）
+    // 5. 更新全局 softmax 参数与输出（采用递归归一化方法）
     if (j == 0) {
       // 第一个分块：直接写入输出
       if (B_c_tid == 0) {
@@ -237,11 +293,15 @@ __global__ void flash_attention_kernel_v1(T* q, const T* k, const T* v,
 }
 
 // -------------------------------
-// host 端调用：设置 grid/block、共享内存大小，并发起 kernel 调用
+// host 端调用：设置 grid/block、使用静态共享内存（因此 shmem_bytes
+// 设为0），并发起 kernel 调用
 template <typename T>
 void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
                      Tensor<T>& att_output) {
   int dqkv = K.sizes()[2];  // 每个 head 内维度
+  if (dqkv != DQKV_VALUE) {
+    throw std::runtime_error("dqkv 不匹配预定义的值");
+  }
   float softmax_scale = 1.0f / sqrtf(static_cast<float>(dqkv));
   int n_q_h = Q.sizes()[1];         // query head 数
   int cache_length = K.sizes()[0];  // 总的 kv token 数
@@ -252,33 +312,18 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
   int B_r = 1;
   int T_r = 1;
 
-  // 每个 chunk 读取的 kv token 数，例如 B_c = 4
-  int B_c = 8;
+  // 每个 chunk 读取的 kv token 数（预设为偶数 B_C_VALUE）
+  int B_c = B_C_VALUE;
   int T_c = (cache_length + B_c - 1) / B_c;
 
   // 每个 block 处理一个 query head
   dim3 grid(n_q_h);
-  int threads_x = dqkv;
-  int threads_y = B_c;
+  int threads_x = dqkv;  // dqkv = DQKV_VALUE
+  int threads_y = B_c;   // B_c = B_C_VALUE
   dim3 block(threads_x, threads_y);
 
-  // 共享内存大小：
-  // qi:         dqkv
-  // kj:         B_c * dqkv
-  // vj:         B_c * dqkv
-  // score_buf:  cache_length
-  // s_tmp:      threads_x * threads_y
-  // 共享内存大小修正
-  size_t shmem_bytes = (dqkv +                     // qi
-                        B_c * dqkv +               // kj
-                        B_c * dqkv +               // vj
-                        B_r * B_c +                // score_buf
-                        (threads_x * threads_y) +  // s_tmp
-                        B_c + 2  // lm: 全局最大值 + 累积和
-                        ) *
-                       sizeof(T);
-
-  flash_attention_kernel_v1<T><<<grid, block, shmem_bytes>>>(
+  // 使用静态共享内存，故 shmem_bytes = 0
+  flash_attention_kernel_v1<T><<<grid, block, 0>>>(
       Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
       cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
       static_cast<T>(softmax_scale));
