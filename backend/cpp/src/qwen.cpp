@@ -295,6 +295,9 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       total_V = v_buf_view;
     }
 
+    Tensor<T> att_heads_({n_heads_, head_dim_}, Device::CUDA);
+    cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads_);
+
     // Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
 
     // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_, head_dim_,
@@ -312,11 +315,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     //                             att_heads, n_kv_heads_);
     // debugPrintTensor(att_heads,
     //                  "attention heads (layer " + std::to_string(i) + ")");
-    Tensor<T> att_heads_({n_heads_, head_dim_}, Device::CUDA);
-    cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads_);
 
     // debugPrintTensor(att_heads_,
-    //                  "flash_attention heads (layer " + std::to_string(i) + ")");
+    //                  "flash_attention heads (layer " + std::to_string(i) +
+    //                  ")");
     // 投影回原始维度
     Tensor<T> att_heads_reshaped = att_heads_.view({1, n_heads_ * head_dim_});
     Tensor<T> att_proj({1, hidden_size_}, Device::CUDA);

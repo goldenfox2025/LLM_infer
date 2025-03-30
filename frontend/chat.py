@@ -166,7 +166,7 @@ def create_callback(tokenizer, q: queue.Queue, model_type: str):
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen 模型聊天')
     parser.add_argument('--model_path', type=str, default="../models/Qwen2.5-1.5B-Instruct", help='模型路径')
-    parser.add_argument('--model_type', type=str, default="qwen", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
+    parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=2048, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=0.7, help='生成温度')
