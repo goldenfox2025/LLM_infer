@@ -490,7 +490,6 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
           total_K.data_ptr() + cached_len * row_size, k_buf_view.data_ptr(),
           seq_len * row_size * sizeof(float), cudaMemcpyDeviceToDevice);
       if (err != cudaSuccess) {
-       
         throw std::runtime_error("Current K copy failed");
       }
       err = cudaMemcpy(
@@ -554,9 +553,10 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
   return logits.cpu();
 }
 
-Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
-                                  ThreadPool& thread_pool,
-                                  KVCacheBase* kv_cache) {
+uint32_t LlamaModel::forward(const Tensor<uint32_t>* input,
+                             ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                             size_t top_k, float temperature, float top_p,
+                             curandState* d_states) {
   // 对输入检查
   if (!input) {
     throw std::invalid_argument("Input tensor cannot be null");
@@ -571,10 +571,13 @@ Tensor<float> LlamaModel::forward(const Tensor<uint32_t>* input,
   if (!typed_kv_cache) {
     throw std::runtime_error("Invalid KVCache type for LlamaModel");
   }
-
   if (device_ == Device::CUDA) {
-    return forward_cuda(input, typed_kv_cache);
+    Tensor<float> logits = forward_cpu(input, thread_pool, typed_kv_cache);
+    uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
+    return next_token;
   } else {
-    return forward_cpu(input, thread_pool, typed_kv_cache);
+    Tensor<float> logits = forward_cpu(input, thread_pool, typed_kv_cache);
+    uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
+    return next_token;
   }
 }

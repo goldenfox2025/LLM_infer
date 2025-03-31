@@ -89,6 +89,24 @@ QwenModel<T>::QwenModel(
 
   // Qwen 模型仅支持 CUDA 运行
   device_ = Device::CUDA;
+
+  for (int i = 0; i < 3; ++i) {
+    cudaError_t err = cudaStreamCreate(&compute_streams_[i]);
+    if (err != cudaSuccess) {
+      // 处理错误，可能需要清理已创建的流
+      throw std::runtime_error("Failed to create CUDA stream in constructor");
+    }
+  }
+}
+
+template <typename T>
+QwenModel<T>::~QwenModel() {
+  // 在析构函数中销毁流
+  for (cudaStream_t stream : compute_streams_) {
+    if (stream) {
+      cudaStreamDestroy(stream);
+    }
+  }
 }
 
 // -------------------------------
@@ -191,32 +209,35 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     } catch (const std::out_of_range&) {
     }
 
-    // 创建CUDA流以并行计算Q, K, V
-    cudaStream_t streams[3];
-    for (int j = 0; j < 3; j++) {
-      cudaError_t err = cudaStreamCreate(&streams[j]);
-      if (err != cudaSuccess) {
-        throw std::runtime_error("Failed to create CUDA stream");
-      }
-    }
+    // // 创建CUDA流以并行计算Q, K, V
+    // cudaStream_t streams[3];
+    // for (int j = 0; j < 3; j++) {
+    //   cudaError_t err = cudaStreamCreate(&streams[j]);
+    //   if (err != cudaSuccess) {
+    //     throw std::runtime_error("Failed to create CUDA stream");
+    //   }
+    // }
 
     // 预先分配输出张量并计算Q, K, V投影
     // Q的输出shape为 [seq_len, n_heads_ * head_dim_]
     Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wq, &q_buf, streams[0], q_bias);
+    cuda_OP::matmul(hidden_states, wq, &q_buf, compute_streams_[0], q_bias);
 
     // K、V的输出shape为 [seq_len, n_kv_heads_ * head_dim_]
     Tensor<T> k_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wk, &k_buf, streams[1], k_bias);
+    cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
 
     Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wv, &v_buf, streams[2], v_bias);
+    cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
 
-    // 同步CUDA流并销毁
-    for (int j = 0; j < 3; j++) {
-      cudaStreamSynchronize(streams[j]);
-      cudaStreamDestroy(streams[j]);
+    for (int j = 0; j < 3; ++j) {
+      cudaStreamSynchronize(compute_streams_[j]);
     }
+    // // 同步CUDA流并销毁
+    // for (int j = 0; j < 3; j++) {
+    //   cudaStreamSynchronize(streams[j]);
+    //   cudaStreamDestroy(streams[j]);
+    // }
 
     // 重塑张量，准备应用RoPE
     Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
@@ -390,6 +411,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
 
   // 返回最后一个token的logits
+
+
   return logits;
 }
 
@@ -430,13 +453,13 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
   for (size_t i = 0; i < n_layers_; i++) {
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
 
-    // 1. Input LayerNorm (RMSNorm)
+    
     auto& attention_norm_weight =
         params_.at(layer_prefix + "input_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
                       rms_norm_eps_);
 
-    // 2. Self-Attention
+  
     auto& wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
     auto& wk = params_.at(layer_prefix + "self_attn.k_proj.weight");
     auto& wv = params_.at(layer_prefix + "self_attn.v_proj.weight");
@@ -469,29 +492,33 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     }
 
     // 创建CUDA流以并行计算Q, K, V
-    cudaStream_t streams[3];
-    for (int j = 0; j < 3; j++) {
-      cudaError_t err = cudaStreamCreate(&streams[j]);
-      if (err != cudaSuccess) {
-        throw std::runtime_error("Failed to create CUDA stream");
-      }
-    }
+    // cudaStream_t streams[3];
+    // for (int j = 0; j < 3; j++) {
+    //   cudaError_t err = cudaStreamCreate(&streams[j]);
+    //   if (err != cudaSuccess) {
+    //     throw std::runtime_error("Failed to create CUDA stream");
+    //   }
+    // }
 
     // 为避免在matmul中每次分配新内存，提前分配输出张量，然后传入其地址
     Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wq, &q_buf, streams[0], q_bias);
+    cuda_OP::matmul(hidden_states, wq, &q_buf, compute_streams_[0], q_bias);
 
     Tensor<T> k_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wk, &k_buf, streams[1], k_bias);
+    cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
 
     Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wv, &v_buf, streams[2], v_bias);
+    cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
+
+    for (int j = 0; j < 3; ++j) {
+      cudaStreamSynchronize(compute_streams_[j]);
+    }
 
     // 同步并销毁流
-    for (int j = 0; j < 3; j++) {
-      cudaStreamSynchronize(streams[j]);
-      cudaStreamDestroy(streams[j]);
-    }
+    // for (int j = 0; j < 3; j++) {
+    //   cudaStreamSynchronize(streams[j]);
+    //   cudaStreamDestroy(streams[j]);
+    // }
 
     // 重塑张量，准备应用RoPE
     const size_t head_size = hidden_size_ / n_heads_;

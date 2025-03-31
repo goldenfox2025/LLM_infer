@@ -1,11 +1,12 @@
 #pragma once
 #include <cuda_bf16.h>
+#include <curand_kernel.h>  // 用于设备端随机数生成
 
 #include <functional>
 #include <memory>
 #include <stdexcept>
 #include <vector>
-#include <chrono>
+
 #include "kvcache_base.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
@@ -111,4 +112,5 @@ class InferenceEngine : public infer_base {
   std::shared_ptr<BaseModel> model_;
   KVCache<T> kv_cache_;
   Device device_;
+  curandState* d_states;
 };

@@ -1,19 +1,19 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <curand_kernel.h>  // 用于设备端随机数生成
 
 #include <stdexcept>
 #include <vector>
 
 #include "inference.hpp"
 #include "tensor.hpp"
-
 namespace cuda_OP {
 
 // 定义支持的数据类型别名
 
 using nvbf16 = __nv_bfloat16;
-
+void init_curand(curandState* d_states, unsigned long long seed, int offset);
 // 工具函数声明
 void checkCudaError(cudaError_t err);
 void print_cuda_memory_usage(const char* location);
@@ -50,7 +50,7 @@ void rope(Tensor<T>* tensor, size_t current_pos, float theta);
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T>* output, const Tensor<T>* input, int dim,
-             bool mask = true, int offset = 0);
+             bool mask = true, int offset = 0, float temperature = -1.0f);
 
 // silu 激活函数算子
 template <typename T>
@@ -64,7 +64,9 @@ void multiply(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
 template <typename T>
 void add(Tensor<T>* output, Tensor<T>* A, const Tensor<T>* B);
 
-// Layer normalization算子 - 沿最后一个维度进行归一化
+template <typename T>
+uint32_t sample(Tensor<T>&& input, float temperature, float top_p, size_t top_k,
+                curandState* d_states);
 
 // 计算注意力分数（多头注意力机制相关算子）
 template <typename T>

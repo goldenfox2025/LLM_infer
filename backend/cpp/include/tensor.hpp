@@ -28,7 +28,6 @@ class Tensor {
  private:
   // 静态内存池：所有 GPU 内存分配都使用这个内存池（目前内部仍是简单调用
   // cudaMalloc/cudaFree）
-  inline static CudaMemoryPool pool;
 
   // 检查 CUDA 错误的静态内联函数（可在 const 成员中调用）
   static inline void checkCudaError(cudaError_t error) {
@@ -89,9 +88,10 @@ class Tensor {
     } else if (device_ == Device::CUDA) {
       data_.reset();
       // 通过内存池申请 GPU 内存
-      T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
-      gpu_data_ = std::shared_ptr<T>(gpu_ptr,
-                                     [](T* ptr) { Tensor<T>::pool.free(ptr); });
+      T* gpu_ptr = static_cast<T*>(
+          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
+      gpu_data_ = std::shared_ptr<T>(
+          gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
       throw std::runtime_error("Invalid device specified");
     }
@@ -131,11 +131,12 @@ class Tensor {
     } else if (device_ == Device::CUDA) {
       // GPU 模式：通过内存池申请 GPU 内存并拷贝数据
       data_.reset();
-      T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
+      T* gpu_ptr = static_cast<T*>(
+          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
       checkCudaError(cudaMemcpy(gpu_ptr, data.data(), length_ * sizeof(T),
                                 cudaMemcpyHostToDevice));
-      gpu_data_ = std::shared_ptr<T>(gpu_ptr,
-                                     [](T* ptr) { Tensor<T>::pool.free(ptr); });
+      gpu_data_ = std::shared_ptr<T>(
+          gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
       throw std::runtime_error("Invalid device specified");
     }
@@ -171,9 +172,10 @@ class Tensor {
       gpu_data_.reset();
     } else if (device_ == Device::CUDA) {
       data_.reset();
-      T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
-      gpu_data_ = std::shared_ptr<T>(gpu_ptr,
-                                     [](T* ptr) { Tensor<T>::pool.free(ptr); });
+      T* gpu_ptr = static_cast<T*>(
+          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
+      gpu_data_ = std::shared_ptr<T>(
+          gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
       throw std::runtime_error("Invalid device specified");
     }
@@ -334,6 +336,42 @@ class Tensor {
     return result;
   }
 
+  Tensor<T>& slice_inplace(const std::vector<size_t>& start,
+                           const std::vector<size_t>& end) & {
+    if (start.size() != shape_.size() || end.size() != shape_.size()) {
+      throw std::runtime_error(
+          "slice: start and end must have same dimensions as tensor");
+    }
+    std::vector<size_t> new_shape(shape_.size());
+    for (size_t i = 0; i < shape_.size(); i++) {
+      if (start[i] >= shape_[i] || end[i] > shape_[i] || start[i] >= end[i]) {
+        throw std::runtime_error("slice: invalid start or end indices");
+      }
+      new_shape[i] = end[i] - start[i];
+    }
+    size_t new_offset = offset_;
+    for (size_t i = 0; i < shape_.size(); i++) {
+      new_offset += start[i] * strides_[i];
+    }
+    size_t new_length = 1;
+    for (size_t dim : new_shape) {
+      new_length *= dim;
+    }
+    this->shape_ = new_shape;
+    this->strides_ = strides_;
+    this->offset_ = new_offset;
+    this->length_ = new_length;
+    this->device_ = device_;
+    if (device_ == Device::CPU) {
+      this->data_ = data_;
+      this->gpu_data_.reset();
+    } else {
+      this->data_.reset();
+      this->gpu_data_ = gpu_data_;
+    }
+    return *this;
+  }
+
   // slice：提取张量的一部分，仍共享底层数据
   Tensor<T> slice(const std::vector<size_t>& start,
                   const std::vector<size_t>& end) const {
@@ -420,12 +458,13 @@ class Tensor {
   // 转换到 CUDA：将数据从 CPU 拷贝到 GPU，通过内存池申请 GPU 内存
   Tensor<T>& cuda() {
     if (device_ == Device::CUDA) return *this;
-    T* gpu_ptr = static_cast<T*>(pool.allocate(length_ * sizeof(T)));
+    T* gpu_ptr = static_cast<T*>(
+        GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
     checkCudaError(cudaMemcpy(gpu_ptr, data_ptr(), length_ * sizeof(T),
                               cudaMemcpyHostToDevice));
     data_.reset();
-    gpu_data_ =
-        std::shared_ptr<T>(gpu_ptr, [](T* ptr) { Tensor<T>::pool.free(ptr); });
+    gpu_data_ = std::shared_ptr<T>(
+        gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     device_ = Device::CUDA;
     return *this;
   }

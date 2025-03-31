@@ -1,9 +1,17 @@
 #pragma once
+#include <cuda_bf16.h>
+#include <curand_kernel.h>  // 用于设备端随机数生成
+
+#include <chrono>
+#include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
-#include "kvcache_base.hpp"  // Include the new header for KVCacheBase
+#include "cudaOP.cuh"
+#include "kvcache_base.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
 
@@ -17,12 +25,14 @@ class BaseModel {
   virtual ~BaseModel() = default;
 
   // Core inference methods that must be implemented by derived classes
-  virtual Tensor<float> forward(const Tensor<uint32_t>* input,
-                                ThreadPool& thread_pool,
-                                KVCacheBase* kv_cache) = 0;
-  virtual Tensor<float> prefill(const Tensor<uint32_t>* input,
-                                ThreadPool& thread_pool,
-                                KVCacheBase* kv_cache) = 0;
+  virtual uint32_t forward(const Tensor<uint32_t>* input,
+                           ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                           size_t top_k, float temperature, float top_p,
+                           curandState* d_states = nullptr) = 0;
+  virtual uint32_t prefill(const Tensor<uint32_t>* input,
+                           ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                           size_t top_k, float temperature, float top_p,
+                           curandState* d_states = nullptr) = 0;
 
   // Common methods for all model types
   virtual bool verify_params() const = 0;

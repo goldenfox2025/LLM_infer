@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "base_model.hpp"
+#include "cudaOP.cuh"
 #include "llama.hpp"
 #include "operators.hpp"
 #include "qwen.hpp"
@@ -16,8 +17,11 @@
 #include <stdexcept>
 
 // 构造函数：分配连续内存并预计算各个位置的视图
+#include <pybind11/stl.h>
+
 #include <iostream>
 #include <stdexcept>
+namespace py = pybind11;
 template <typename T>
 void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
                       size_t num_to_print = 10) {
@@ -236,10 +240,13 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
                 model_->get_head_dim() * model_->get_n_kv_heads(), device),
       thread_pool_(4),
       device_(device) {  // 初始化 device_
+
   // std::cout
   //     << "[InferenceEngine::InferenceEngine] 初始化 InferenceEngine, device="
   //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
   if (device_ == Device::CUDA) {
+    cudaMalloc(&d_states, sizeof(curandState));
+    cuda_OP::init_curand(d_states, 42, 0);
     std::cout
         << "[InferenceEngine::InferenceEngine] Moving InferenceEngine to CUDA"
         << std::endl;
@@ -267,9 +274,16 @@ uint32_t InferenceEngine<T>::generate_next_token(
     std::cerr << "Error resizing KV cache: " << e.what() << std::endl;
     throw;
   }
-
+  uint32_t next_token;
   // 前向计算，传入 KVCache 的地址
-  Tensor<float> logits = model_->forward(&input, thread_pool, &kv_cache_);
+  if (device_ == Device::CUDA) {
+    next_token = model_->forward(&input, thread_pool, &kv_cache_, top_k,
+                                 temperature, top_p, d_states);
+  } else {
+    next_token = model_->forward(&input, thread_pool, &kv_cache_, top_k,
+                                 temperature, top_p);
+  }
+
   // std::cout << "[InferenceEngine::generate_next_token] 前向计算完成"
   //           << std::endl;
 
@@ -285,7 +299,7 @@ uint32_t InferenceEngine<T>::generate_next_token(
   // }
 
   // 根据 logits 采样下一个 token
-  uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
+  // uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
   // std::cout << "[InferenceEngine::generate_next_token] 采样得到 token: "
   //           << next_token << std::endl;
 
@@ -312,42 +326,52 @@ void InferenceEngine<T>::generate_with_callback(
   // std::cout << "[InferenceEngine::generate_with_callback] KVCache 扩容完成"
   // << std::endl;
   // 输入 tensor 也放在正确的设备上
+
   Tensor<uint32_t> input_tensor(std::vector<uint32_t>(input_ids),
                                 {input_ids.size()}, device_);
+
   // std::cout << "[InferenceEngine::generate_with_callback] 输入 tensor "
   //              "放置在正确设备上 "
   //           << std::endl;
   // 调用 prefill，一次性处理全部 input_ids
-  Tensor<float> prefill_logits =
-      model_->prefill(&input_tensor, thread_pool_, &kv_cache_);
+  uint32_t next_token;
+  if (device_ == Device::CPU)
+    next_token = model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k,
+                                 temperature, top_p);
+  else {
+    next_token = model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k,
+                                 temperature, top_p, d_states);
+  }
 
   // debugPrintTensor(prefill_logits, "prefill_logits");
   // std::cout << "[InferenceEngine::prefill] " << std::endl;
 
   // prefill_logits.shape = [seq_len, vocab_size]
-  size_t seq_len = input_ids.size();
-  if (seq_len == 0) {
-    return;
-  }
+  // size_t seq_len = input_ids.size();
+  // if (seq_len == 0) {
+  //   return;
+  // }
 
-  // 从 prefill 的最后一行 logits 中采样第一个生成 token
-  const size_t vocab_size = prefill_logits.sizes()[1];
-  std::vector<float> last_row_data(vocab_size, 0.f);
-  const float* prefill_ptr =
-      prefill_logits.data_ptr() + (seq_len - 1) * vocab_size;
-  std::copy(prefill_ptr, prefill_ptr + vocab_size, last_row_data.begin());
-  Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
-                            Device::CPU);  // 强制使用CPU设备
+  // // 从 prefill 的最后一行 logits 中采样第一个生成 token
+  // const size_t vocab_size = prefill_logits.sizes()[1];
+  // std::vector<float> last_row_data(vocab_size, 0.f);
+  // const float* prefill_ptr =
+  //     prefill_logits.data_ptr() + (seq_len - 1) * vocab_size;
+  // std::copy(prefill_ptr, prefill_ptr + vocab_size, last_row_data.begin());
+  // Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
+  //                           Device::CPU);  // 强制使用CPU设备
 
-  // debugPrintTensor(last_logits, "last_logits");
-  uint32_t next_token = OP::sample(&last_logits, temperature, top_p, top_k);
+  // // debugPrintTensor(last_logits, "last_logits");
+  // uint32_t next_token = OP::sample(&last_logits, temperature, top_p, top_k);
 
   // 通过回调函数将 token 传回给 Python
   if (next_token == model_->get_eos_token_id()) {
     return;
   }
-  callback(next_token);
-
+  {
+    py::gil_scoped_release release;  // 释放 GIL
+    callback(next_token);
+  }
   std::vector<uint32_t> output = input_ids;
   output.push_back(next_token);
 
@@ -372,7 +396,10 @@ void InferenceEngine<T>::generate_with_callback(
     if (next_token == model_->get_eos_token_id()) {
       break;
     }
-    callback(next_token);
+    {
+      py::gil_scoped_release release;  // 释放 GIL
+      callback(next_token);
+    }
   }
 }
 template <typename T>

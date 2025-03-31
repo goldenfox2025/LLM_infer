@@ -30,7 +30,7 @@ except ImportError:
 # -------------------------------
 
 def load_llama_model(model_path: str):
-    """加载Llama模型及配置"""
+    """加载 Llama 模型及配置"""
     model_path = Path(model_path)
     weights = {}
     
@@ -56,7 +56,7 @@ def load_llama_model(model_path: str):
     return config, weights, "llama"
 
 def load_qwen_model(model_path: str, keep_bf16=True):
-    """加载Qwen模型及配置，可选保持BF16精度"""
+    """加载 Qwen 模型及配置，可选保持 BF16 精度"""
     model_path = Path(model_path)
     weights = {}
     
@@ -64,19 +64,17 @@ def load_qwen_model(model_path: str, keep_bf16=True):
     with safe_open(model_path / "model.safetensors", framework="pt") as f:
         for key in f.keys():
             tensor = f.get_tensor(key)
-            # 如果设置了保持bf16并且张量是bf16类型，保持原始格式不转换
+            # 如果设置了保持 bf16 并且张量是 bf16 类型，则保持原始格式
             if tensor.dtype == torch.bfloat16 and keep_bf16:
-                weights[key] = tensor  # 保持bf16格式
+                weights[key] = tensor
                 print(f"Loaded bf16 tensor {key} with shape {tensor.shape}")
             else:
-                # 对于非bf16张量或者未启用keep_bf16选项，转换为float32
                 weights[key] = tensor.to(torch.float32)
                 print(f"Loaded tensor {key} with shape {weights[key].shape}")
     
     # 加载配置文件
     with open(model_path / "config.json", 'r') as f:
         config = json.load(f)
-        # 确保核心配置项存在
         expected_keys = [
             "vocab_size", "hidden_size", "num_hidden_layers", 
             "num_attention_heads", "num_key_value_heads",
@@ -92,7 +90,7 @@ def load_qwen_model(model_path: str, keep_bf16=True):
     return config, weights, model_type
 
 def load_tokenizer(model_path: str, model_type: str):
-    """根据模型类型加载对应的tokenizer"""
+    """根据模型类型加载对应的 tokenizer"""
     model_path = Path(model_path)
     
     if model_type.startswith("qwen"):
@@ -112,53 +110,16 @@ def load_tokenizer(model_path: str, model_type: str):
     return tokenizer
 
 # -------------------------------
-# 回调函数：累积 token 并输出文本差量及速度信息
+# 回调函数：仅返回 token_id（轻量化回调）
 # -------------------------------
-def create_callback(tokenizer, q: queue.Queue, model_type: str):
-    """创建用于处理生成 token 的回调函数，使用单调时钟计算时间"""
-    accumulated_tokens = []
-    last_output = ""  # 记录上一次完整解码后的文本
-    start_time = None  # 第一个 token 到来时初始化
-    last_token_time = None  # 用于计算 token 生成速度
-    total_tokens = 0  # 记录生成的 token 总数
-
-    def token_callback(token):
-        nonlocal last_output, last_token_time, total_tokens, start_time
-
-        current_time = time.monotonic()
-        # 第一个 token 到来时初始化 start_time
-        if start_time is None:
-            start_time = current_time
-
-        # 计算瞬时 token 生成速度
-        speed = 0.0
-        if last_token_time is not None:
-            delta = current_time - last_token_time
-            speed = 1.0 / delta if delta > 0 else 0.0
-        last_token_time = current_time
-
-        accumulated_tokens.append(token)
-        total_tokens += 1
-
-        # 解码 token 得到新文本
-        new_text = tokenizer.decode(accumulated_tokens)
-        diff = new_text[len(last_output):]
-        last_output = new_text
-
-        total_time = current_time - start_time
-        avg_speed = total_tokens / total_time if total_time > 0 else 0.0
-
-        if diff:
-            q.put(json.dumps({
-                "diff": diff,
-                "speed": speed,
-                "total_time": total_time,
-                "total_tokens": total_tokens,
-                "avg_speed": avg_speed
-            }))
-
+def create_callback(q: queue.Queue):
+    """
+    创建用于处理生成 token 的回调函数。
+    该回调函数只将 token_id 放入队列，不进行解码和统计。
+    """
+    def token_callback(token_id):
+        q.put(token_id)
     return token_callback
-
 
 # -------------------------------
 # 终端聊天实现
@@ -170,15 +131,15 @@ def main():
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=2048, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=0.7, help='生成温度')
-    parser.add_argument('--top_p', type=float, default=0.9, help='top-p采样阈值')
-    parser.add_argument('--top_k', type=int, default=50, help='top-k采样阈值')
+    parser.add_argument('--top_p', type=float, default=0.9, help='top-p 采样阈值')
+    parser.add_argument('--top_k', type=int, default=50, help='top-k 采样阈值')
     args = parser.parse_args()
 
-    # 加载模型和tokenizer
+    # 加载模型和 tokenizer
     if args.model_type == "llama":
         config, weights, model_type = load_llama_model(args.model_path)
     elif args.model_type in ["qwen", "qwen_bf16"]:
-        config, weights, model_type = load_qwen_model(args.model_path, keep_bf16=args.model_type == "qwen_bf16")
+        config, weights, model_type = load_qwen_model(args.model_path, keep_bf16=(args.model_type=="qwen_bf16"))
     else:
         print(f"Unsupported model type: {args.model_type}")
         exit(1)
@@ -201,7 +162,7 @@ def main():
     print(f"Num Key Value Heads: {config['num_key_value_heads']}")
     print(f"Head Dimension: {config['hidden_size'] // config['num_attention_heads']}")
 
-    # 导入C++模型桥接接口
+    # 导入 C++ 模型桥接接口
     sys.path.append("/home/LLM_infer/build")
     from model_bridge import init_model, generate_text_stream
 
@@ -223,20 +184,16 @@ def main():
         if not user_message:
             continue
 
-        # 根据模型类型构造对话文本 - 只传输当前消息，不传历史记录（kvcache由本地维护）
+        # 根据模型类型构造对话文本（仅传输当前消息，历史记录由本地维护 kvcache）
         if model_type.startswith("qwen"):
             if first_chat:
-                # 首次对话，包含系统提示词
                 messages = [
                     {"role": "system", "content": args.system_prompt},
                     {"role": "user", "content": user_message}
                 ]
                 first_chat = False
             else:
-                # 后续对话只包含用户消息
-                messages = [
-                    {"role": "user", "content": user_message}
-                ]
+                messages = [{"role": "user", "content": user_message}]
             
             # 使用 apply_chat_template 应用聊天模板
             text = tokenizer.apply_chat_template(
@@ -244,32 +201,26 @@ def main():
                 tokenize=False,
                 add_generation_prompt=True
             )
-            
-            # 对文本进行编码
             model_inputs = tokenizer([text], return_tensors="pt")
             input_ids = model_inputs["input_ids"][0].tolist()
         else:  # llama
             if first_chat:
-                # 首次对话包含系统提示词
                 conversation = f"<|system|>\n{args.system_prompt}</s><|user|>\n\n{user_message}</s>\n<|assistant|>\n"
                 first_chat = False
             else:
-                # 后续对话只包含用户消息
                 conversation = f"{user_message}</s>\n:<|assistant|>\n"
             
-            # 对文本进行编码 - 处理不同类型的tokenizer
-            if isinstance(tokenizer, Tokenizer):  # tokenizers库的Tokenizer
+            if isinstance(tokenizer, Tokenizer):
                 encoded = tokenizer.encode(conversation)
                 input_ids = encoded.ids
-            else:  # transformers库的tokenizer
+            else:
                 model_inputs = tokenizer([conversation], return_tensors="pt")
                 input_ids = model_inputs["input_ids"][0].tolist()
         
-        # 生成回复
+        # 生成回复：使用 minimal callback 只返回 token_id
         q = queue.Queue()
-        callback = create_callback(tokenizer, q, model_type)
+        callback = create_callback(q)
         
-        # 启动生成线程
         def run_generation():
             from model_bridge import generate_text_stream
             generate_text_stream(
@@ -280,44 +231,51 @@ def main():
                 top_p=args.top_p,
                 top_k=args.top_k
             )
-            # 生成结束后，发送特殊标记
-            q.put(None)
+            q.put(None)  # 生成结束标记
         
         thread = threading.Thread(target=run_generation)
         thread.start()
         
         print("Assistant: ", end="", flush=True)
-        assistant_response = ""
-        token_speed = 0.0
-        total_time = 0.0
+        
+        # 在主线程中累积 token_id 并进行解码与统计
+        accumulated_tokens = []
+        last_output = ""
+        start_time = None
+        last_token_time = None
         total_tokens = 0
-        avg_speed = 0.0
-        
-        # 处理生成的回复
+        token_speed = 0.0
+
         while True:
-            msg = q.get()
-            if msg is None:
+            token_id = q.get()
+            if token_id is None:
                 break
-            try:
-                data = json.loads(msg)
-            except Exception as e:
-                continue
-            
-            if "diff" in data:
-                print(data["diff"], end="", flush=True)
-                assistant_response += data["diff"]
-            if "speed" in data:
-                token_speed = data["speed"]
-            if "total_time" in data:
-                total_time = data["total_time"]
-            if "total_tokens" in data:
-                total_tokens = data["total_tokens"]
-            if "avg_speed" in data:
-                avg_speed = data["avg_speed"]
-        
+            current_time = time.monotonic()
+            if start_time is None:
+                start_time = current_time
+            speed = 0.0
+            if last_token_time is not None:
+                delta = current_time - last_token_time
+                speed = 1.0 / delta if delta > 0 else 0.0
+            last_token_time = current_time
+
+            accumulated_tokens.append(token_id)
+            total_tokens += 1
+
+            new_text = tokenizer.decode(accumulated_tokens)
+            diff = new_text[len(last_output):]
+            last_output = new_text
+
+            total_time = current_time - start_time
+            avg_speed = total_tokens / total_time if total_time > 0 else 0.0
+
+            if diff:
+                print(diff, end="", flush=True)
+                # 此处可扩展其他处理，如统计每个 token 的速度（本示例仅打印最终信息）
+                token_speed = speed  # 仅记录最新一个 token 的瞬时速度
+
         print("\n")
-        # 输出生成结束后的 token 速度统计
-        print(f"Token Speed: {token_speed:.2f} tokens/sec")
+        print(f"Token Speed (last token): {token_speed:.2f} tokens/sec")
         print(f"Total Time: {total_time:.2f} seconds")
         print(f"Total Tokens: {total_tokens}")
         print(f"Average Speed: {avg_speed:.2f} tokens/sec\n")

@@ -84,7 +84,7 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
   }
 }
 template void gather<nvbf16>(Tensor<nvbf16>*, const Tensor<uint32_t>*,
-    const Tensor<nvbf16>*);
-    template void gather<float>(Tensor<float>*, const Tensor<uint32_t>*,
-       const Tensor<float>*);
+                             const Tensor<nvbf16>*);
+template void gather<float>(Tensor<float>*, const Tensor<uint32_t>*,
+                            const Tensor<float>*);
 }  // namespace cuda_OP

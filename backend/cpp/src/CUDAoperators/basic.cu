@@ -435,6 +435,21 @@ void compute_att_output_prefill(const Tensor<T> &att_probs, const Tensor<T> &V,
   checkCudaError(cudaDeviceSynchronize());
 }
 
+__global__ void init_curand_state_kernel(curandState *states,
+                                         unsigned long long seed,
+                                         unsigned long long offset) {
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    curand_init(seed, 0, offset, &states[0]);
+  }
+}
+void init_curand(curandState *d_states, unsigned long long seed, int offset) {
+  int blocks = 1;
+  int threads = 1;
+  init_curand_state_kernel<<<blocks, threads>>>(d_states, seed, offset);
+  checkCudaError(cudaGetLastError());
+  checkCudaError(cudaDeviceSynchronize());
+}
+
 template void rope<float>(Tensor<float> *, size_t, float);
 template void rms_norm<float>(Tensor<float> *, const Tensor<float> *,
                               const Tensor<float> *, float);
