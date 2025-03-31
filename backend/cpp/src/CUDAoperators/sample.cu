@@ -4,7 +4,6 @@
 #include <cuda_bf16.h>  // For __nv_bfloat16
 #include <cuda_runtime.h>
 
-#include <cub/block/block_radix_sort.cuh>
 #include <limits>     // 用于 numeric_limits
 #include <stdexcept>  // 用于 runtime_error
 #include <vector>     // 用于 host 端 vector (如果需要)
@@ -26,82 +25,86 @@
   } while (0)
 
 namespace cuda_OP {
+#include <curand_kernel.h>
+#include <float.h>  // for FLT_MAX
 
+// 假设 blockDim.x 为 1024
 template <typename T_prob = float>
-__global__ void sample_basic_kernel(size_t top_k,
-                                    float top_p,  // top_p 暂未使用
-                                    const T_prob* __restrict__ probabilities,
-                                    uint32_t* __restrict__ d_sampled_index,
-                                    curandState* __restrict__ states,
-                                    size_t vocab_size) {
-  // 仅线程 0 执行采样逻辑
+__global__ void sample_basic_kernel(
+    size_t top_k,  // 需要选取的 TopK 数量
+    float top_p,   // 暂未使用
+    T_prob*
+        probabilities,  // 原始概率数组（必须可写，因为我们需要清除已经选出的值）
+    uint32_t* d_sampled_index,  // 输出数组，存放 TopK
+                                // 候选的索引（数组长度至少为 top_k）
+    curandState* states,  // 随机状态（这里只使用 states[0]）
+    size_t vocab_size     // 词表大小
+) {
+  const int THREADS = blockDim.x;  // 1024
+  int tid = threadIdx.x;
 
+  // 初始化局部随机状态
   curandState localState = states[0];
 
-  // 安全检查：top_k 为 0 或大于词表大小时调整
+  // 安全检查：若 top_k 为 0，则直接返回
   if (top_k == 0) {
-    *d_sampled_index = 0;
+    if (tid == 0) {
+      d_sampled_index[0] = 0;
+    }
     return;
   }
+  // 如果 top_k 超过词表大小，则置为词表大小
   if (top_k > vocab_size) {
     top_k = vocab_size;
   }
 
-  // 用固定大小的数组保存 top-k 候选（假设 top_k <= 2048）
-  const int MAX_TOPK = 2048;
-  T_prob top_probs[MAX_TOPK];
-  uint32_t top_indices[MAX_TOPK];
-  int count = 0;
+  // 循环迭代，每轮找出一个最大值
+  for (int candidate = 0; candidate < top_k; candidate++) {
+    // 每个线程扫描全局数组，计算自己负责区间内的局部最大值及其索引
+    T_prob local_max = -FLT_MAX;
+    int local_idx = -1;
+    for (int i = tid; i < vocab_size; i += THREADS) {
+      T_prob prob = probabilities[i];
+      if (prob > local_max) {
+        local_max = prob;
+        local_idx = i;
+      }
+    }
 
-  // 遍历整个词表，选出概率最高的 top_k 候选项
-  for (int i = 0; i < vocab_size; i++) {
-    T_prob prob = probabilities[i];
-    if (count < top_k) {
-      // 前 top_k 个直接填入候选数组
-      top_probs[count] = prob;
-      top_indices[count] = i;
-      count++;
-    } else {
-      // 在已有候选中寻找最小概率的候选
-      int min_idx = 0;
-      for (int j = 1; j < top_k; j++) {
-        if (top_probs[j] < top_probs[min_idx]) {
-          min_idx = j;
+    // 使用共享内存做线程块归约
+    __shared__ T_prob sdata[1024];  // 存放局部最大值
+    __shared__ int sindex[1024];    // 存放对应索引
+    sdata[tid] = local_max;
+    sindex[tid] = local_idx;
+    __syncthreads();
+
+    // 归约：采用二分法将 1024 个线程的结果归约成一个全局最大值
+    for (int s = THREADS / 2; s > 0; s >>= 1) {
+      if (tid < s) {
+        if (sdata[tid] < sdata[tid + s]) {
+          sdata[tid] = sdata[tid + s];
+          sindex[tid] = sindex[tid + s];
         }
       }
-      // 如果当前概率大于候选中最小的，则替换之
-      if (prob > top_probs[min_idx]) {
-        top_probs[min_idx] = prob;
-        top_indices[min_idx] = i;
-      }
+      __syncthreads();
     }
-  }
 
-  // 计算 top-k 候选的概率总和
-  T_prob total_prob = 0;
-  for (int i = 0; i < top_k; i++) {
-    total_prob += top_probs[i];
-  }
-
-  // // 生成一个随机数，并映射到 [0, total_prob) 区间
-  T_prob r = static_cast<T_prob>(curand_uniform(&localState)) * total_prob;
-
-  // 根据 r 进行累积采样，找到落在随机阈值中的候选项
-  T_prob cumulative = 0;
-  uint32_t selected = top_indices[0];  // 默认选择第一个候选项
-  for (int i = 0; i < top_k; i++) {
-    cumulative += top_probs[i];
-    if (T_prob(0.2) < cumulative) {
-      selected = top_indices[i];
-      break;
+    // 线程 0 得到本轮全局最大值及其索引
+    if (tid == 0) {
+      int max_idx = sindex[0];
+      // 保存该候选的索引到输出数组中
+      d_sampled_index[candidate] = max_idx;
+      // 清除选中的最大值：置为 -FLT_MAX，保证后续轮次不再选中
+      probabilities[max_idx] = -FLT_MAX;
     }
+    __syncthreads();  // 等待所有线程看到更新后的 probabilities 数组
   }
 
-  // 写回采样结果，并更新随机状态
-  *d_sampled_index = selected;
-  states[0] = localState;
+  // 更新随机状态（本例中未在采样中使用随机数，但若后续需要可保留）
+  if (tid == 0) {
+    states[0] = localState;
+  }
 }
-
 template <typename T>
 uint32_t sample(Tensor<T>&& logits, float temperature, float top_p,
                 size_t top_k, curandState* d_states) {
@@ -139,8 +142,8 @@ uint32_t sample(Tensor<T>&& logits, float temperature, float top_p,
 
   uint32_t* d_sampled_index = static_cast<uint32_t*>(
       GlobalCudaMemoryPool::instance().allocate(sizeof(uint32_t)));
-  sample_basic_kernel<T><<<1, 1>>>(top_k, top_p, d_probabilities.data_ptr(),
-                                   d_sampled_index, d_states, vocab_size);
+  sample_basic_kernel<T><<<1, 1024>>>(top_k, top_p, d_probabilities.data_ptr(),
+                                      d_sampled_index, d_states, vocab_size);
   CUDA_CHECK(cudaGetLastError());
   uint32_t res = 0;
   cudaMemcpy(&res, d_sampled_index, sizeof(uint32_t), cudaMemcpyDeviceToHost);
