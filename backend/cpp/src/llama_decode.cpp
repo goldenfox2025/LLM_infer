@@ -572,7 +572,7 @@ uint32_t LlamaModel::forward(const Tensor<uint32_t>* input,
     throw std::runtime_error("Invalid KVCache type for LlamaModel");
   }
   if (device_ == Device::CUDA) {
-    Tensor<float> logits = forward_cpu(input, thread_pool, typed_kv_cache);
+    Tensor<float> logits = forward_cuda(input, typed_kv_cache);
     uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
     return next_token;
   } else {

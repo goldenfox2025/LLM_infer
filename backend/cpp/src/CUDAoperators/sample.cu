@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>  // For __nv_bfloat16
 #include <cuda_runtime.h>
 
+#include <cub/block/block_radix_sort.cuh>
 #include <limits>     // 用于 numeric_limits
 #include <stdexcept>  // 用于 runtime_error
 #include <vector>     // 用于 host 端 vector (如果需要)
