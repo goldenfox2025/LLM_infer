@@ -16,10 +16,12 @@ class LlamaModel : public BaseModel {
   void print_model_info() const override;
 
   // 前向计算
-  Tensor<float> forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                        KVCacheBase* kv_cache) override;
-  Tensor<float> prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                        KVCacheBase* kv_cache) override;
+  uint32_t forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+                   KVCacheBase* kv_cache, size_t top_k, float temperature,
+                   float top_p, curandState* d_states = nullptr) override;
+  uint32_t prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+                   KVCacheBase* kv_cache, size_t top_k, float temperature,
+                   float top_p, curandState* d_states = nullptr) override;
   Tensor<float> prefill_cpu(const Tensor<uint32_t>* input,
                             KVCache<float>* kv_cache, ThreadPool& thread_pool);
   Tensor<float> prefill_cuda(const Tensor<uint32_t>* input,
@@ -28,10 +30,6 @@ class LlamaModel : public BaseModel {
                             ThreadPool& thread_pool, KVCache<float>* kv_cache);
   Tensor<float> forward_cuda(const Tensor<uint32_t>* input,
                              KVCache<float>* kv_cache);
-
-  std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
-                                 size_t max_length, float temperature = 1.0f,
-                                 float top_p = 0.9f, size_t top_k = 50);
 
   // Getter方法
   size_t get_n_layers() const override { return n_layers_; }

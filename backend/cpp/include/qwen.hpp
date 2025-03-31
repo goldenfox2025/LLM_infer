@@ -6,31 +6,39 @@
 #include <unordered_map>
 
 #include "base_model.hpp"
+#include "cudaOP.cuh"
 #include "inference.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
+constexpr int kNumStreams = 3;
 
-// Base QwenModel implementation with templated precision
 template <typename T>
 class QwenModel : public BaseModel {
  public:
   QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
             const std::unordered_map<std::string, int>& config);
+  ~QwenModel() override;
 
   bool verify_params() const override;
   void print_model_info() const override;
 
   // Implementation of BaseModel interface:
   // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
-  Tensor<float> forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                        KVCacheBase* kv_cache) override {
+  uint32_t forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+                   KVCacheBase* kv_cache, size_t top_k, float temperature,
+                   float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-    return forward_cuda(input, typed_cache).to_float().cpu();
+
+    return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
+                           top_k, d_states);
   }
-  Tensor<float> prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                        KVCacheBase* kv_cache) override {
+  uint32_t prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+                   KVCacheBase* kv_cache, size_t top_k, float temperature,
+                   float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-    return prefill_cuda(input, typed_cache).to_float().cpu();
+
+    return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p,
+                           top_k, d_states);
   }
 
   // Token generation
@@ -68,7 +76,6 @@ class QwenModel : public BaseModel {
   Device device() const override { return device_; }
 
  private:
-  // Basic parameters
   size_t vocab_size_;
   size_t n_layers_;
   size_t n_heads_;
@@ -82,9 +89,10 @@ class QwenModel : public BaseModel {
   float rms_norm_eps_;
   float rope_theta_;
 
-  // Model parameters
   std::unordered_map<std::string, Tensor<T>> params_;
   Device device_;
+
+  std::array<cudaStream_t, kNumStreams> compute_streams_;
 };
 
 // 使用 extern template 声明已在别处定义的模板特化

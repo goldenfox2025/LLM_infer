@@ -177,7 +177,12 @@ void cublas_matmul_wrapper(cublasHandle_t handle, cublasOperation_t transa,
   cudaDataType_t cuda_data_type_A;
   cudaDataType_t cuda_data_type_B;
   cudaDataType_t cuda_data_type_C;
-  cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
+
+  cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
+  // printf("启用 TF32 计算类型\n");
+
+  // cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
+  // printf("使用 FP32 计算类型\n");
 
   // 根据模板类型 InputType 确定 A, B, C 的 CUDA 数据类型
   if constexpr (std::is_same_v<InputType, nv_bfloat16>) {

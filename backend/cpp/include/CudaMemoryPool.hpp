@@ -784,3 +784,11 @@ class CudaMemoryPool {
   // 同步锁
   mutable std::mutex mutex_;
 };
+
+class GlobalCudaMemoryPool {
+ public:
+  static CudaMemoryPool& instance() {
+    static CudaMemoryPool pool;
+    return pool;
+  }
+};

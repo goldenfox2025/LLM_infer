@@ -473,9 +473,10 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
   return logits.cpu();
 }
 
-Tensor<float> LlamaModel::prefill(const Tensor<uint32_t>* input,
-                                  ThreadPool& thread_pool,
-                                  KVCacheBase* kv_cache) {
+uint32_t LlamaModel::prefill(const Tensor<uint32_t>* input,
+                             ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                             size_t top_k, float temperature, float top_p,
+                             curandState* d_states) {
   if (!input) {
     throw std::invalid_argument("Input tensor cannot be null");
   }
@@ -486,9 +487,35 @@ Tensor<float> LlamaModel::prefill(const Tensor<uint32_t>* input,
   }
   try {
     if (device_ == Device::CUDA) {
-      return prefill_cuda(input, typed_kv_cache);
+      Tensor<float> prefill_logits = prefill_cuda(input, typed_kv_cache);
+
+      size_t seq_len = input->numel();
+
+      // 从 prefill 的最后一行 logits 中采样第一个生成 token
+      const size_t vocab_size = prefill_logits.sizes()[1];
+      std::vector<float> last_row_data(vocab_size, 0.f);
+      const float* prefill_ptr =
+          prefill_logits.data_ptr() + (seq_len - 1) * vocab_size;
+      std::copy(prefill_ptr, prefill_ptr + vocab_size, last_row_data.begin());
+      Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
+                                Device::CPU);  // 强制使用CPU设备
+      return OP::sample(&last_logits, temperature, top_p, top_k);
+
     } else {
-      return prefill_cpu(input, typed_kv_cache, thread_pool);
+      Tensor<float> prefill_logits =
+          prefill_cpu(input, typed_kv_cache, thread_pool);
+
+      size_t seq_len = input->numel();
+
+      // 从 prefill 的最后一行 logits 中采样第一个生成 token
+      const size_t vocab_size = prefill_logits.sizes()[1];
+      std::vector<float> last_row_data(vocab_size, 0.f);
+      const float* prefill_ptr =
+          prefill_logits.data_ptr() + (seq_len - 1) * vocab_size;
+      std::copy(prefill_ptr, prefill_ptr + vocab_size, last_row_data.begin());
+      Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
+                                Device::CPU);  // 强制使用CPU设备
+      return OP::sample(&last_logits, temperature, top_p, top_k);
     }
   } catch (const std::exception& e) {
     std::cerr << "[LlamaModel::prefill] Exception: " << e.what() << std::endl;

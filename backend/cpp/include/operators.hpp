@@ -94,24 +94,18 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
         "sample: logits must be a 2D tensor with shape [1, vocab_size]");
   }
   size_t vocab_size = shape[1];
-
   const float* logits_ptr = logits->data_ptr();
   if (logits_ptr == nullptr) {
     std::cerr << "[OP::sample] 错误: logits_ptr 为空!" << std::endl;
     throw std::runtime_error("logits_ptr is null");
   }
-
   std::vector<float> scaled_logits(vocab_size);
-
   for (size_t i = 1; i < vocab_size; i++) {
     scaled_logits[i] = logits_ptr[i] / temperature;
   }
-
   float max_logit =
       *std::max_element(scaled_logits.begin(), scaled_logits.end());
-
   std::vector<float> exp_logits(vocab_size);  // 直接构造指定大小的vector
-
   float sum_exp = 0.0f;
   for (size_t i = 0; i < vocab_size; i++) {
     exp_logits[i] = std::exp(scaled_logits[i] - max_logit);
