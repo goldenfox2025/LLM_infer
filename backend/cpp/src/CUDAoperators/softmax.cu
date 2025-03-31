@@ -12,6 +12,8 @@
 
 #include "cudaOP.cuh"
 
+namespace cuda_OP {
+
 __device__ inline float bf16_to_float(__nv_bfloat16 x) {
   // fallback: 手动把 bfloat16 高 16 位当成 float
   unsigned short raw;
@@ -81,7 +83,6 @@ __device__ inline __nv_bfloat16 my_fmax<__nv_bfloat16>(__nv_bfloat16 a,
   float fm = fmaxf(fa, fb);
   return float_to_bf16(fm);
 }
-namespace cuda_OP {
 
 // -----------------
 // --------------------------------------------------
