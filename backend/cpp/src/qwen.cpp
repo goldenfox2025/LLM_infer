@@ -412,7 +412,6 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
   // 返回最后一个token的logits
 
-
   return logits;
 }
 
@@ -453,13 +452,11 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
   for (size_t i = 0; i < n_layers_; i++) {
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
 
-    
     auto& attention_norm_weight =
         params_.at(layer_prefix + "input_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
                       rms_norm_eps_);
 
-  
     auto& wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
     auto& wk = params_.at(layer_prefix + "self_attn.k_proj.weight");
     auto& wv = params_.at(layer_prefix + "self_attn.v_proj.weight");
@@ -500,7 +497,6 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     //   }
     // }
 
-    // 为避免在matmul中每次分配新内存，提前分配输出张量，然后传入其地址
     Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA);
     cuda_OP::matmul(hidden_states, wq, &q_buf, compute_streams_[0], q_bias);
 
