@@ -44,13 +44,12 @@ struct to_cutlass_type<__nv_bfloat16> {
   using type = cutlass::bfloat16_t;
 };
 
-// 修改后的模板函数
 template <typename ElementA, typename ElementB, typename ElementOutput,
           typename LayoutA, typename LayoutB, typename LayoutOutput,
           typename ElementAccumulator = float,
           typename ElementComputeEpilogue = ElementAccumulator,
           typename MMAOp = cutlass::arch::OpClassTensorOp,
-          typename SmArch = cutlass::arch::Sm75,
+          typename SmArch = cutlass::arch::Sm80,
           typename ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>,
           typename ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>,
           typename ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>,
@@ -72,7 +71,8 @@ cutlass::Status run_cutlass_gemm_raw_templated(
       ElementOutput_t, 128 / cutlass::sizeof_bits<ElementOutput_t>::value,
       ElementAccumulator, ElementComputeEpilogue,
       cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
-
+  // std::cout << "value: " << cutlass::sizeof_bits<ElementOutput_t>::value
+  //           << std::endl;
   // 定义 GEMM 操作类型，使用转换后的类型
   using Gemm = cutlass::gemm::device::Gemm<
       ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
@@ -82,16 +82,14 @@ cutlass::Status run_cutlass_gemm_raw_templated(
   // 构造问题尺寸
   cutlass::gemm::GemmCoord problem_size(m, n, k);
 
-  // 使用原始指针构造 TensorRef。这里假设原始数据的内存布局与转换后的类型兼容，
-  // 因此可以通过 reinterpret_cast 转换指针类型。
   cutlass::TensorRef<ElementA_t, LayoutA> ref_A(
       const_cast<ElementA_t *>(reinterpret_cast<const ElementA_t *>(d_a)),
-      LayoutA(m));
+      LayoutA(k));
   cutlass::TensorRef<ElementB_t, LayoutB> ref_B(
       const_cast<ElementB_t *>(reinterpret_cast<const ElementB_t *>(d_b)),
-      LayoutB(k));
+      LayoutB(n));
   cutlass::TensorRef<ElementOutput_t, LayoutOutput> ref_D(
-      reinterpret_cast<ElementOutput_t *>(d_d), LayoutOutput(m));
+      reinterpret_cast<ElementOutput_t *>(d_d), LayoutOutput(n));
 
   // 构造 Gemm kernel 参数。bias 同样进行类型转换
   typename Gemm::Arguments arguments{
@@ -364,21 +362,20 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
   size_t M = A_shape[0];
   size_t K = A_shape[1];
   size_t N = B_shape[1];
-  if (use_ == 2) {
-    if (bias == nullptr) {
-      throw std::runtime_error("Bias must exist.");
-    }
 
-    float alpha = 1.0f;
+  if (bias == nullptr && use_ == 2) {
+    use_ = 1;
+  }
+
+  if (use_ == 2) {
     cutlass::Status status = run_cutlass_gemm_raw_templated<
-        T,                          // ElementA
-        T,                          // ElementB
-        T,                          // ElementOutput
-        cutlass::layout::RowMajor,  // LayoutA
-        cutlass::layout::RowMajor,  // LayoutB
-        cutlass::layout::RowMajor   // LayoutOutput
-        >(M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(),
-          alpha, 1);
+        T,                             // ElementA
+        T,                             // ElementB
+        T,                             // ElementOutput
+        cutlass::layout::RowMajor,     // LayoutA
+        cutlass::layout::ColumnMajor,  // LayoutB
+        cutlass::layout::RowMajor      // LayoutOutput
+        >(M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr());
 
   } else if (use_ == 1) {
     static cublasHandle_t handle = nullptr;
