@@ -28,7 +28,6 @@
 
 namespace cuda_OP {
 
-
 template <typename T_prob = float>
 __global__ void sample_kernel(
     size_t top_k,  // 需要选择的 TopK 数量
@@ -38,20 +37,11 @@ __global__ void sample_kernel(
     curandState* states,  // 随机状态（这里仅使用 states[0]）
     size_t vocab_size     // 词表大小
 ) {
-  const int THREADS = blockDim.x;  // 这里应为 1024
+  const int THREADS = blockDim.x;
   int tid = threadIdx.x;
-  // 初始化局部随机状态（仅 thread 0 会更新）
   curandState localState = states[0];
   // 安全检查：若 top_k 为 0 或大于词表大小，则调整
-  if (top_k == 0) {
-    if (tid == 0) {
-      *d_sampled_index = 0;
-    }
-    return;
-  }
-  if (top_k > vocab_size) {
-    top_k = vocab_size;
-  }
+
   // 仅线程 0 用于存储每轮选出的候选概率和索引
   const int MAX_TOPK = 1024;
   T_prob top_candidate_probs[MAX_TOPK];
@@ -68,7 +58,6 @@ __global__ void sample_kernel(
         local_idx = i;
       }
     }
-
     // 利用共享内存进行线程块归约，得到全局最大值
     __shared__ T_prob sdata[1024];  // 存放局部最大值
     __shared__ int sindex[1024];    // 存放对应的索引
@@ -127,6 +116,12 @@ uint32_t sample(Tensor<T>&& logits, float temperature, float top_p,
   if (logits.device() != Device::CUDA) {
     throw std::runtime_error(
         "Input tensor for cuda_OP::sample must be on CUDA device");
+  }
+  if (top_k > 1024) {
+    top_k = 1024;
+  }
+  if (top_k < 1) {
+    top_k = 1;
   }
 
   const auto& shape = logits.sizes();
