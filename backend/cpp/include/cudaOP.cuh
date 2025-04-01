@@ -5,6 +5,15 @@
 
 #include <stdexcept>
 #include <vector>
+#define CUTLASS_CHECK(status)                                             \
+  {                                                                       \
+    cutlass::Status error = status;                                       \
+    if (error != cutlass::Status::kSuccess) {                             \
+      std::cerr << "Got cutlass error: " << cutlassGetStatusString(error) \
+                << " at: " << __LINE__ << std::endl;                      \
+      exit(EXIT_FAILURE);                                                 \
+    }                                                                     \
+  }
 
 #include "inference.hpp"
 #include "tensor.hpp"
@@ -41,7 +50,7 @@ void rms_norm(Tensor<T>* output, const Tensor<T>* input,
 template <typename T>
 void matmul(const Tensor<T>& A, const Tensor<T>& B, Tensor<T>* C,
             cudaStream_t stream = nullptr, const Tensor<T>* bias = nullptr,
-            bool use_cublas = true);
+            int use_ = 1);
 
 // rope 算子，用于位置编码
 template <typename T>
