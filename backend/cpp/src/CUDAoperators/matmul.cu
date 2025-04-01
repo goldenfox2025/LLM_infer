@@ -1,4 +1,5 @@
 #include <cublas_v2.h>
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -8,6 +9,14 @@
 #include <vector>
 
 #include "cudaOP.cuh"
+#include "cutlass/cutlass.h"
+#include "cutlass/epilogue/thread/linear_combination.h"
+#include "cutlass/gemm/device/gemm.h"
+#include "cutlass/util/host_tensor.h"
+#include "cutlass/util/reference/device/gemm.h"
+#include "cutlass/util/reference/host/tensor_compare.h"
+#include "cutlass/util/reference/host/tensor_fill.h"
+#include "cutlass/util/tensor_view_io.h"
 
 inline void checkCublasStatus(cublasStatus_t status, const char *file,
                               int line) {
@@ -24,6 +33,92 @@ inline void checkCublasStatus(cublasStatus_t status, const char *file,
 #define CHECK_CUBLAS(call) checkCublasStatus(call, __FILE__, __LINE__)
 
 namespace cuda_OP {
+// 定义类型转换 traits（可扩展支持更多类型）
+template <typename T>
+struct to_cutlass_type {
+  using type = T;
+};
+
+template <>
+struct to_cutlass_type<__nv_bfloat16> {
+  using type = cutlass::bfloat16_t;
+};
+
+// 修改后的模板函数
+template <typename ElementA, typename ElementB, typename ElementOutput,
+          typename LayoutA, typename LayoutB, typename LayoutOutput,
+          typename ElementAccumulator = float,
+          typename ElementComputeEpilogue = ElementAccumulator,
+          typename MMAOp = cutlass::arch::OpClassTensorOp,
+          typename SmArch = cutlass::arch::Sm75,
+          typename ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>,
+          typename ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>,
+          typename ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>,
+          typename SwizzleThreadBlock =
+              cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+          int NumStages = 2>
+cutlass::Status run_cutlass_gemm_raw_templated(
+    int m, int n, int k, ElementA const *d_a, ElementB const *d_b,
+    ElementOutput const *d_bias, ElementOutput *d_d,
+    ElementComputeEpilogue alpha = ElementComputeEpilogue(1),
+    int split_k_slices = 1) {
+  // 使用 to_cutlass_type 对输入数据类型做转换
+  using ElementA_t = typename to_cutlass_type<ElementA>::type;
+  using ElementB_t = typename to_cutlass_type<ElementB>::type;
+  using ElementOutput_t = typename to_cutlass_type<ElementOutput>::type;
+
+  // 定义 epilogue 操作（注意用转换后的 ElementOutput_t）
+  using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
+      ElementOutput_t, 128 / cutlass::sizeof_bits<ElementOutput_t>::value,
+      ElementAccumulator, ElementComputeEpilogue,
+      cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
+
+  // 定义 GEMM 操作类型，使用转换后的类型
+  using Gemm = cutlass::gemm::device::Gemm<
+      ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
+      ElementAccumulator, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp,
+      ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages>;
+
+  // 构造问题尺寸
+  cutlass::gemm::GemmCoord problem_size(m, n, k);
+
+  // 使用原始指针构造 TensorRef。这里假设原始数据的内存布局与转换后的类型兼容，
+  // 因此可以通过 reinterpret_cast 转换指针类型。
+  cutlass::TensorRef<ElementA_t, LayoutA> ref_A(
+      const_cast<ElementA_t *>(reinterpret_cast<const ElementA_t *>(d_a)),
+      LayoutA(m));
+  cutlass::TensorRef<ElementB_t, LayoutB> ref_B(
+      const_cast<ElementB_t *>(reinterpret_cast<const ElementB_t *>(d_b)),
+      LayoutB(k));
+  cutlass::TensorRef<ElementOutput_t, LayoutOutput> ref_D(
+      reinterpret_cast<ElementOutput_t *>(d_d), LayoutOutput(m));
+
+  // 构造 Gemm kernel 参数。bias 同样进行类型转换
+  typename Gemm::Arguments arguments{
+      problem_size,  ref_A,
+      ref_B,         {reinterpret_cast<const ElementOutput_t *>(d_bias), 0},
+      ref_D,         {alpha},
+      split_k_slices};
+
+  // 查询 workspace 内存大小并分配
+  size_t workspace_size = Gemm::get_workspace_size(arguments);
+  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+  // 实例化 GEMM 对象，并检查问题是否可实现
+  Gemm gemm_op;
+  cutlass::Status status = gemm_op.can_implement(arguments);
+  CUTLASS_CHECK(status);
+
+  // 初始化 GEMM 操作
+  status = gemm_op.initialize(arguments, workspace.get());
+  CUTLASS_CHECK(status);
+
+  // 调用 CUTLASS GEMM 内核
+  status = gemm_op();
+  CUTLASS_CHECK(status);
+
+  return status;
+}
 
 // --------------------------------------------------
 // --------------------------------------------------
@@ -259,7 +354,7 @@ void cublas_matmul_wrapper(cublasHandle_t handle, cublasOperation_t transa,
 // --------------------------------------------------
 template <typename T>
 void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
-            cudaStream_t stream, const Tensor<T> *bias, bool use_cublas) {
+            cudaStream_t stream, const Tensor<T> *bias, int use_) {
   // 如果选择使用 cublas 计算，则调用 cublas 的包装函数接口
 
   const std::vector<size_t> &A_shape = A.sizes();
@@ -269,8 +364,23 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
   size_t M = A_shape[0];
   size_t K = A_shape[1];
   size_t N = B_shape[1];
+  if (use_ == 2) {
+    if (bias == nullptr) {
+      throw std::runtime_error("Bias must exist.");
+    }
 
-  if (use_cublas) {
+    float alpha = 1.0f;
+    cutlass::Status status = run_cutlass_gemm_raw_templated<
+        T,                          // ElementA
+        T,                          // ElementB
+        T,                          // ElementOutput
+        cutlass::layout::RowMajor,  // LayoutA
+        cutlass::layout::RowMajor,  // LayoutB
+        cutlass::layout::RowMajor   // LayoutOutput
+        >(M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(),
+          alpha, 1);
+
+  } else if (use_ == 1) {
     static cublasHandle_t handle = nullptr;
     // 使用静态标志和互斥锁确保线程安全的单次初始化
     static std::once_flag init_flag;
@@ -419,9 +529,10 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
 
 template void matmul<float>(const Tensor<float> &, const Tensor<float> &,
                             Tensor<float> *, cudaStream_t,
-                            const Tensor<float> *, bool);
-template void matmul<nvbf16>(const Tensor<nvbf16> &, const Tensor<nvbf16> &,
-                             Tensor<nvbf16> *, cudaStream_t,
-                             const Tensor<nvbf16> *, bool);
+                            const Tensor<float> *, int);
+template void matmul<__nv_bfloat16>(const Tensor<__nv_bfloat16> &,
+                                    const Tensor<__nv_bfloat16> &,
+                                    Tensor<__nv_bfloat16> *, cudaStream_t,
+                                    const Tensor<__nv_bfloat16> *, int);
 
 }  // namespace cuda_OP
