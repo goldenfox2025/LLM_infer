@@ -242,8 +242,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
-    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
+    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[3]);
+    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[4]);
 
     // 更新KV缓存
     size_t row_size = n_kv_heads_ * head_dim_;
@@ -271,10 +271,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       // 异步拷贝：使用 cudaMemcpyAsync 替换同步版本
       cudaError_t err1 = cudaMemcpyAsync(
           k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
-          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[4]);
+          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[3]);
       cudaError_t err2 = cudaMemcpyAsync(
           v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
-          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[5]);
+          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[4]);
     }
 
     for (int j = 0; j < 3; ++j) {
