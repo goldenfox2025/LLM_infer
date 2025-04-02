@@ -103,7 +103,7 @@ __global__ void flash_attention_kernel_v2(T* q, const T* k, const T* v,
   __shared__ float s_tmp[DQKV_VALUE * B_C_VALUE];  // 临时归约数组
   // s_lm[0 ~ B_C_VALUE-1] 用于归约；s_lm[B_C_VALUE]
   // 存全局最大值；s_lm[B_C_VALUE+1] 存全局归一化因子
-  __shared__ float s_lm[B_C_VALUE + 2];
+  __shared__ float s_lm[2];
   __shared__ float s_max_local[B_C_VALUE];  // 局部最大值归约缓存
   __shared__ float s_exp_local[B_C_VALUE];  // 局部指数和归约缓存
 
@@ -133,8 +133,8 @@ __global__ void flash_attention_kernel_v2(T* q, const T* k, const T* v,
   __syncthreads();
 
   // s_lm[B_C_VALUE] 存储全局最大值，s_lm[B_C_VALUE+1] 存储全局归一化因子
-  float& global_m = s_lm[B_C_VALUE];
-  float& global_l = s_lm[B_C_VALUE + 1];
+  float& global_m = s_lm[0];
+  float& global_l = s_lm[1];
 
   // --------------------------
   // 3. 遍历每个 KV 分块（chunk）
@@ -283,7 +283,7 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
   dim3 block(threads_x, threads_y);
 
   // 使用静态共享内存，故 shmem_bytes = 0
-  flash_attention_kernel_v1<T><<<grid, block, 0>>>(
+  flash_attention_kernel_v2<T><<<grid, block, 0>>>(
       Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
       cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
       static_cast<T>(softmax_scale));

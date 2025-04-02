@@ -10,7 +10,7 @@
 #include "inference.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
-constexpr int kNumStreams = 3;
+constexpr int kNumStreams = 5;
 
 template <typename T>
 class QwenModel : public BaseModel {

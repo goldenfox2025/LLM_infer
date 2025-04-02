@@ -54,7 +54,8 @@ void matmul(const Tensor<T>& A, const Tensor<T>& B, Tensor<T>* C,
 
 // rope 算子，用于位置编码
 template <typename T>
-void rope(Tensor<T>* tensor, size_t current_pos, float theta);
+void rope(Tensor<T>* tensor, size_t current_pos, float theta,
+          cudaStream_t stream = nullptr);
 
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>

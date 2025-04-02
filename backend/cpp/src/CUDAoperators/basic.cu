@@ -154,7 +154,7 @@ __global__ void rope_kernel(T *tensor, size_t seq_len, size_t n_heads,
 }
 
 template <typename T>
-void rope(Tensor<T> *x, size_t offset, float theta) {
+void rope(Tensor<T> *x, size_t offset, float theta, cudaStream_t stream) {
   const auto &sizes = x->sizes();
   if (sizes.size() < 3) {
     throw std::runtime_error("rope: tensor must be at least 3D");
@@ -165,18 +165,21 @@ void rope(Tensor<T> *x, size_t offset, float theta) {
   size_t total_elements = seq_len * n_heads;
   int threads = 256;
   int blocks = (total_elements + threads - 1) / threads;
-  rope_kernel<<<blocks, threads>>>(x->data_ptr(), seq_len, n_heads, head_dim,
-                                   offset, theta);
+  rope_kernel<<<blocks, threads, 0, stream>>>(x->data_ptr(), seq_len, n_heads,
+                                              head_dim, offset, theta);
+
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
     std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
     throw std::runtime_error("CUDA rope kernel launch failed");
   }
-  err = cudaDeviceSynchronize();
-  if (err != cudaSuccess) {
-    std::cerr << "CUDA synchronization error: " << cudaGetErrorString(err)
-              << std::endl;
-    throw std::runtime_error("CUDA rope synchronization failed");
+  if (stream == nullptr) {
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+      std::cerr << "CUDA synchronization error: " << cudaGetErrorString(err)
+                << std::endl;
+      throw std::runtime_error("CUDA rope synchronization failed");
+    }
   }
 }
 
@@ -450,7 +453,7 @@ void init_curand(curandState *d_states, unsigned long long seed, int offset) {
   checkCudaError(cudaDeviceSynchronize());
 }
 
-template void rope<float>(Tensor<float> *, size_t, float);
+template void rope<float>(Tensor<float> *, size_t, float, cudaStream_t);
 template void rms_norm<float>(Tensor<float> *, const Tensor<float> *,
                               const Tensor<float> *, float);
 template void silu<float>(Tensor<float> *, const Tensor<float> *);
@@ -471,7 +474,7 @@ template void compute_att_output_prefill<float>(const Tensor<float> &,
 
 // 对 nvbf16 类型的实例化
 
-template void rope<nvbf16>(Tensor<nvbf16> *, size_t, float);
+template void rope<nvbf16>(Tensor<nvbf16> *, size_t, float, cudaStream_t);
 template void rms_norm<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *,
                                const Tensor<nvbf16> *, float);
 template void silu<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *);
