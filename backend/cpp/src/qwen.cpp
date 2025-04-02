@@ -242,8 +242,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[3]);
-    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[4]);
+    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
+    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
+
+    for (int j = 0; j < 3; ++j) {
+      cudaStreamSynchronize(compute_streams_[j]);
+    }
 
     // 更新KV缓存
     size_t row_size = n_kv_heads_ * head_dim_;
@@ -275,10 +279,6 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       cudaError_t err2 = cudaMemcpyAsync(
           v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
           row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[4]);
-    }
-
-    for (int j = 0; j < 3; ++j) {
-      cudaStreamSynchronize(compute_streams_[j]);
     }
 
     // 准备计算自注意力
@@ -522,9 +522,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
     cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
 
-    for (int j = 0; j < 3; ++j) {
-      cudaStreamSynchronize(compute_streams_[j]);
-    }
+
 
     // 同步并销毁流
     // for (int j = 0; j < 3; j++) {
@@ -542,8 +540,12 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, offset, rope_theta_);
-    cuda_OP::rope(&k_buf_view, offset, rope_theta_);
+    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
+    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
+
+    for (int j = 0; j < 3; ++j) {
+      cudaStreamSynchronize(compute_streams_[j]);
+    }
 
     // 将K,V存储到缓存中
     // for (size_t j = 0; j < seq_len; j++) {
