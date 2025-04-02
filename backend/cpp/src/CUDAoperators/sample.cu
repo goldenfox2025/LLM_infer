@@ -13,7 +13,7 @@
 #include "CudaMemoryPool.hpp"  // 用于调试输出
 #include "cudaOP.cuh"
 #include "tensor.hpp"  // 假设你的 Tensor 类头文件
-
+#define max_topk 1024
 // Simple CUDA error checking macro
 #define CUDA_CHECK(call)                                                \
   do {                                                                  \
@@ -27,82 +27,65 @@
   } while (0)
 
 namespace cuda_OP {
-
-template <typename T_prob = float>
+template <typename T = float>
 __global__ void sample_kernel(
     size_t top_k,  // 需要选择的 TopK 数量
     float top_p,   // 暂未使用
-    T_prob* probabilities,  // 概率数组（需要可写，因为要“清除”已选项）
+    T* probabilities,  // 概率数组（需要可写，因为要“清除”已选项）
     uint32_t* d_sampled_index,  // 最终输出：从 TopK 中按权重随机采样的候选索引
     curandState* states,  // 随机状态（这里仅使用 states[0]）
     size_t vocab_size     // 词表大小
 ) {
-  const int THREADS = blockDim.x;
-  int tid = threadIdx.x;
-  curandState localState = states[0];
-  // 安全检查：若 top_k 为 0 或大于词表大小，则调整
+  const int THREADS_PER_BLOCK = blockDim.x;
+  const int tid = threadIdx.x + blockIdx.x * THREADS_PER_BLOCK;
 
-  // 仅线程 0 用于存储每轮选出的候选概率和索引
-  const int MAX_TOPK = 1024;
-  T_prob top_candidate_probs[MAX_TOPK];
-  uint32_t top_candidate_indices[MAX_TOPK];
-  // 迭代 top_k 轮，每轮找出当前全局最大值
-  for (int candidate = 0; candidate < top_k; candidate++) {
-    // 每个线程遍历自己负责的部分，找出局部最大值及其索引
-    T_prob local_max = -FLT_MAX;
+  curandState localState = states[0];
+  __shared__ T shared_probs[max_topk];
+  __shared__ int shared_indices[max_topk];
+  T top_candidate_probs[max_topk];
+  int top_candidate_idx[max_topk];
+  for (int idx = 0; idx < top_k; ++idx) {
+    T local_max = -FLT_MAX;
     int local_idx = -1;
-    for (int i = tid; i < vocab_size; i += THREADS) {
-      T_prob prob = probabilities[i];
+    for (int i = tid; i < vocab_size; i += THREADS_PER_BLOCK) {
+      const T prob = __ldg(&probabilities[i]);
       if (prob > local_max) {
         local_max = prob;
         local_idx = i;
       }
     }
-    // 利用共享内存进行线程块归约，得到全局最大值
-    __shared__ T_prob sdata[1024];  // 存放局部最大值
-    __shared__ int sindex[1024];    // 存放对应的索引
-    sdata[tid] = local_max;
-    sindex[tid] = local_idx;
+    shared_probs[tid] = local_max;
+    shared_indices[tid] = local_idx;
     __syncthreads();
-
-    // 采用二分归约
-    for (int s = THREADS / 2; s > 0; s >>= 1) {
-      if (tid < s) {
-        if (sdata[tid] < sdata[tid + s]) {
-          sdata[tid] = sdata[tid + s];
-          sindex[tid] = sindex[tid + s];
+    for (int i = THREADS_PER_BLOCK >> 1; i > 0; i >>= 1) {
+      if (tid < i) {
+        const T prob = shared_probs[tid + i];
+        if (prob > shared_probs[tid]) {
+          shared_probs[tid] = prob;
+          shared_indices[tid] = shared_indices[tid + i];
         }
       }
       __syncthreads();
     }
-
-    // 归约结束后，线程 0 得到当前全局最大值及其索引
     if (tid == 0) {
-      int max_idx = sindex[0];
-      T_prob max_prob = sdata[0];
-      // 保存当前候选信息
-      top_candidate_probs[candidate] = max_prob;
-      top_candidate_indices[candidate] = max_idx;
-      // 将该候选从原数组中“清除”，以免下轮再次选中
-      probabilities[max_idx] = -FLT_MAX;
+      probabilities[shared_indices[0]] = T(-FLT_MAX);  // 清除已选项
+      top_candidate_probs[idx] = shared_probs[0];
+      top_candidate_idx[idx] = shared_indices[0];
     }
-    __syncthreads();  // 等待所有线程更新后再进入下一轮
+    __syncthreads();
   }
-  // 采样：由线程 0 对这 top_k 个候选进行加权随机采样
   if (tid == 0) {
-    // 计算 top_k 候选的概率总和
-    T_prob total = 0;
+    T total = 0;
     for (int i = 0; i < top_k; i++) {
       total += top_candidate_probs[i];
     }
-    // 生成 [0, total) 范围内的随机数
-    T_prob r = static_cast<T_prob>(curand_uniform(&localState)) * total;
-    T_prob cumulative = 0;
-    uint32_t selected = top_candidate_indices[0];
+    T r = static_cast<T>(curand_uniform(&localState)) * total;
+    T cumulative = 0;
+    uint32_t selected = top_candidate_idx[0];
     for (int i = 0; i < top_k; i++) {
       cumulative += top_candidate_probs[i];
       if (cumulative >= r) {
-        selected = top_candidate_indices[i];
+        selected = top_candidate_idx[i];
         break;
       }
     }
