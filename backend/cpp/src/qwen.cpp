@@ -250,20 +250,34 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
     // 更新KV缓存
     size_t row_size = n_kv_heads_ * head_dim_;
+    // for (size_t j = 0; j < seq_len; j++) {
+    //   // 获取对应的 k 和 v slice
+
+    //   Tensor<T>& k_slice = kv_cache->k_cache(i, offset + j);
+    //   Tensor<T>& v_slice = kv_cache->v_cache(i, offset + j);
+    //   // debugPrintTensor(k_slice, "k_slice");
+    //   // debugPrintTensor(v_slice, "v_slice");
+    //   // 将数据从 k_buf_view 和 v_buf_view 拷贝到对应 slice 的内存中
+    //   cudaMemcpy(k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+    //              row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+    //   cudaMemcpy(v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+    //              row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+    //   // debugPrintTensor(k_slice, "k_slice");
+    //   // debugPrintTensor(v_slice, "v_slice");
+    // }
+
     for (size_t j = 0; j < seq_len; j++) {
       // 获取对应的 k 和 v slice
-
       Tensor<T>& k_slice = kv_cache->k_cache(i, offset + j);
       Tensor<T>& v_slice = kv_cache->v_cache(i, offset + j);
-      // debugPrintTensor(k_slice, "k_slice");
-      // debugPrintTensor(v_slice, "v_slice");
-      // 将数据从 k_buf_view 和 v_buf_view 拷贝到对应 slice 的内存中
-      cudaMemcpy(k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
-                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
-      cudaMemcpy(v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
-                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
-      // debugPrintTensor(k_slice, "k_slice");
-      // debugPrintTensor(v_slice, "v_slice");
+
+      // 异步拷贝：使用 cudaMemcpyAsync 替换同步版本
+      cudaError_t err1 = cudaMemcpyAsync(
+          k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[0]);
+      cudaError_t err2 = cudaMemcpyAsync(
+          v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[0]);
     }
 
     // 准备计算自注意力
@@ -409,7 +423,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
   Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
   cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
-
+  cudaStreamSynchronize(compute_streams_[0]);
   // 返回最后一个token的logits
 
   return logits;
@@ -530,16 +544,30 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     cuda_OP::rope(&k_buf_view, offset, rope_theta_);
 
     // 将K,V存储到缓存中
+    // for (size_t j = 0; j < seq_len; j++) {
+    //   // 获取对应的 k 和 v slice
+    //   Tensor<T>& k_slice = kv_cache->k_cache(i, offset + j);
+    //   Tensor<T>& v_slice = kv_cache->v_cache(i, offset + j);
+
+    //   // 将数据从 k_buf_view 和 v_buf_view 拷贝到对应 slice 的内存中
+    //   cudaMemcpy(k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+    //              row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+    //   cudaMemcpy(v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+    //              row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+    // }
+
     for (size_t j = 0; j < seq_len; j++) {
       // 获取对应的 k 和 v slice
       Tensor<T>& k_slice = kv_cache->k_cache(i, offset + j);
       Tensor<T>& v_slice = kv_cache->v_cache(i, offset + j);
 
-      // 将数据从 k_buf_view 和 v_buf_view 拷贝到对应 slice 的内存中
-      cudaMemcpy(k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
-                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
-      cudaMemcpy(v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
-                 row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+      // 异步拷贝：使用 cudaMemcpyAsync 替换同步版本
+      cudaError_t err1 = cudaMemcpyAsync(
+          k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
+          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[0]);
+      cudaError_t err2 = cudaMemcpyAsync(
+          v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
+          row_size * sizeof(T), cudaMemcpyDeviceToDevice, compute_streams_[0]);
     }
 
     // 重新格式化Q用于注意力计算
@@ -552,40 +580,43 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
       size_t cached_len = offset;
       total_seq_len = cached_len + seq_len;
 
-      total_K =
-          Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
-      total_V =
-          Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+      // total_K =
+      //     Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+      // total_V =
+      //     Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
 
-      // 拷贝缓存的K,V
-      for (size_t pos = 0; pos < cached_len; pos++) {
-        const auto& cached_k = kv_cache->k_cache(i, pos);
-        const auto& cached_v = kv_cache->v_cache(i, pos);
+      // // 拷贝缓存的K,V
+      // for (size_t pos = 0; pos < cached_len; pos++) {
+      //   const auto& cached_k = kv_cache->k_cache(i, pos);
+      //   const auto& cached_v = kv_cache->v_cache(i, pos);
 
-        cudaMemcpy(total_K.data_ptr() + pos * n_kv_heads_ * head_dim_,
-                   cached_k.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
-                   cudaMemcpyDeviceToDevice);
+      //   cudaMemcpy(total_K.data_ptr() + pos * n_kv_heads_ * head_dim_,
+      //              cached_k.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
+      //              cudaMemcpyDeviceToDevice);
 
-        cudaMemcpy(total_V.data_ptr() + pos * n_kv_heads_ * head_dim_,
-                   cached_v.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
-                   cudaMemcpyDeviceToDevice);
-      }
-      // 拷贝当前的K, V
+      //   cudaMemcpy(total_V.data_ptr() + pos * n_kv_heads_ * head_dim_,
+      //              cached_v.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
+      //              cudaMemcpyDeviceToDevice);
+      // }
+      // // 拷贝当前的K, V
 
-      cudaMemcpy(total_K.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
-                 k_buf_view.data_ptr(),
-                 seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
-                 cudaMemcpyDeviceToDevice);
+      // cudaMemcpy(total_K.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
+      //            k_buf_view.data_ptr(),
+      //            seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
+      //            cudaMemcpyDeviceToDevice);
 
-      cudaMemcpy(total_V.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
-                 v_buf_view.data_ptr(),
-                 seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
-                 cudaMemcpyDeviceToDevice);
-      // auto [total_K, total_V] = kv_cache->get_contiguous_tensor(i);
-      // total_K.view({total_seq_len, n_kv_heads_, head_dim_});
-      // total_V.view({total_seq_len, n_kv_heads_, head_dim_});
+      // cudaMemcpy(total_V.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
+      //            v_buf_view.data_ptr(),
+      //            seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
+      //            cudaMemcpyDeviceToDevice);
+      auto [total_K1, total_V1] = kv_cache->get_contiguous_tensor(i);
+      // total_KX.view({total_seq_len, n_kv_heads_, head_dim_});
+      // debugPrintTensor(total_KX, "total_KX");
       // debugPrintTensor(total_K, "total_K");
-      // debugPrintTensor(total_V, "total_V");
+
+      total_K = total_K1.view({total_seq_len, n_kv_heads_, head_dim_});
+      // debugPrintTensor(total_K, "total_K");
+      total_V = total_V1.view({total_seq_len, n_kv_heads_, head_dim_});
     } else {
       total_K = k_buf_view;
       total_V = v_buf_view;
@@ -685,6 +716,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
   cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
 
   // 返回最后一个token的logits
+  cudaStreamSynchronize(compute_streams_[0]);
   return logits;
 }
 
