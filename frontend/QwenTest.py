@@ -288,7 +288,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # 准备测试用 prompt
-    prompt = "我爱你。"
+    prompt = "讲个故事。"
     messages = [
         {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
         {"role": "user", "content": prompt},
