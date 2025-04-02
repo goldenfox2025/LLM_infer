@@ -27,6 +27,118 @@
   } while (0)
 
 namespace cuda_OP {
+
+// 定义一个模板联合体，用于重解释 16 字节为一个 T 数组
+template <typename T, int N>
+union Vec {
+  float4 f4;  // 实际载入 16 字节数据
+  T t[N];     // 重解释为 N 个 T 类型元素
+};
+
+template <typename T = float>
+__global__ void sample_kernel_v1(
+    size_t top_k,  // 需要选择的 TopK 数量
+    float top_p,   // 暂未使用
+    T* probabilities,  // 概率数组（需要可写，因为要“清除”已选项）
+    uint32_t* d_sampled_index,  // 最终输出：从 TopK 中按权重随机采样的候选索引
+    curandState* states,  // 随机状态（这里仅使用 states[0]）
+    size_t vocab_size     // 词表大小
+) {
+  // 假设 blockDim.x 为 THREADS_PER_BLOCK
+  const int THREADS_PER_BLOCK = blockDim.x;
+  const int tid = threadIdx.x + blockIdx.x * THREADS_PER_BLOCK;
+
+  curandState localState = states[0];
+  __shared__ T shared_probs[max_topk];
+  __shared__ int shared_indices[max_topk];
+  T top_candidate_probs[max_topk];
+  int top_candidate_idx[max_topk];
+
+  // 计算每次 vectorized 载入的元素数：float4 占16字节
+  constexpr int vec_unit = 16 / sizeof(T);
+  typedef Vec<T, vec_unit> VecT;
+  // 整个数组能划分成多少完整的 vector 块
+  int total_vec = vocab_size / vec_unit;
+  // 刚好完整 vector 所覆盖的元素数
+  int total_vectorized = total_vec * vec_unit;
+
+  // 外层循环：选出 top_k 个候选
+  for (int idx = 0; idx < top_k; ++idx) {
+    T local_max = static_cast<T>(-FLT_MAX);
+    int local_idx = -1;
+    // 将全局概率数组转换为 vectorized 形式读取
+    const VecT* prob_vec = reinterpret_cast<const VecT*>(probabilities);
+
+    // 1. 先处理完整 vector 部分
+    for (int v = tid; v < total_vec; v += THREADS_PER_BLOCK) {
+      VecT vec_data = prob_vec[v];
+#pragma unroll
+      for (int j = 0; j < vec_unit; j++) {
+        int index = v * vec_unit + j;
+        T prob = vec_data.t[j];
+        if (prob > local_max) {
+          local_max = prob;
+          local_idx = index;
+        }
+      }
+    }
+    // 2. 处理剩余未构成完整 vector 的尾部部分
+    for (int i = total_vectorized + tid; i < vocab_size;
+         i += THREADS_PER_BLOCK) {
+      T prob = __ldg(&probabilities[i]);
+      if (prob > local_max) {
+        local_max = prob;
+        local_idx = i;
+      }
+    }
+
+    // 将每个线程找到的局部最大值写入共享内存
+    shared_probs[tid] = local_max;
+    shared_indices[tid] = local_idx;
+    __syncthreads();
+
+    // 归约：在当前 block 内选出全局最大概率及其索引
+    for (int s = THREADS_PER_BLOCK >> 1; s > 0; s >>= 1) {
+      if (tid < s) {
+        if (shared_probs[tid + s] > shared_probs[tid]) {
+          shared_probs[tid] = shared_probs[tid + s];
+          shared_indices[tid] = shared_indices[tid + s];
+        }
+      }
+      __syncthreads();
+    }
+
+    // 线程 0 得到当前轮选出的最大值，清除该概率，记录候选信息
+    if (tid == 0) {
+      probabilities[shared_indices[0]] =
+          static_cast<T>(-FLT_MAX);  // 清除已选项
+      top_candidate_probs[idx] = shared_probs[0];
+      top_candidate_idx[idx] = shared_indices[0];
+    }
+    __syncthreads();
+  }
+
+  // 最后线程 0 对 top_k 候选进行加权采样
+  if (tid == 0) {
+    T total = 0;
+    for (int i = 0; i < top_k; i++) {
+      total += top_candidate_probs[i];
+    }
+    T r = static_cast<T>(curand_uniform(&localState)) * total;
+    T cumulative = 0;
+    uint32_t selected = top_candidate_idx[0];
+    for (int i = 0; i < top_k; i++) {
+      cumulative += top_candidate_probs[i];
+      if (cumulative >= r) {
+        selected = top_candidate_idx[i];
+        break;
+      }
+    }
+    *d_sampled_index = selected;
+    states[0] = localState;
+  }
+}
+
 template <typename T = float>
 __global__ void sample_kernel(
     size_t top_k,  // 需要选择的 TopK 数量
@@ -136,8 +248,8 @@ uint32_t sample(Tensor<T>&& logits, float temperature, float top_p,
 
   uint32_t* d_sampled_index = static_cast<uint32_t*>(
       GlobalCudaMemoryPool::instance().allocate(sizeof(uint32_t)));
-  sample_kernel<T><<<1, 1024>>>(top_k, top_p, d_probabilities.data_ptr(),
-                                d_sampled_index, d_states, vocab_size);
+  sample_kernel_v1<T><<<1, 1024>>>(top_k, top_p, d_probabilities.data_ptr(),
+                                   d_sampled_index, d_states, vocab_size);
   CUDA_CHECK(cudaGetLastError());
   uint32_t res = 0;
   cudaMemcpy(&res, d_sampled_index, sizeof(uint32_t), cudaMemcpyDeviceToHost);

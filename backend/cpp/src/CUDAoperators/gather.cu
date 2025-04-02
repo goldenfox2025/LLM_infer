@@ -10,6 +10,43 @@
 #include "cudaOP.cuh"
 #include "tensor.hpp"
 namespace cuda_OP {
+template <typename T>
+__global__ void gather_kernel_v2(const uint32_t* input,
+                                 const T* embedding_table, T* output,
+                                 int seq_len, int embed_dim, int vocab_size) {
+  // 每个 float4 载入 16 字节，单位 T 的个数：
+  constexpr int vec_unit =
+      sizeof(float4) / sizeof(T);  // =4 for float, =8 for __nv_bfloat16
+  // 每行有多少个 vectorized 块
+  int num_vec = embed_dim / vec_unit;
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  // 总共需要处理的 vectorized 块数
+  int total = seq_len * num_vec;
+
+  // 将 embedding_table 和 output 当作 float4 数组处理
+  const float4* embedding_table_vec =
+      reinterpret_cast<const float4*>(embedding_table);
+  float4* output_vec = reinterpret_cast<float4*>(output);
+
+  for (int idx = tid; idx < total; idx += stride) {
+    int row = idx / num_vec;
+    int vec_idx = idx % num_vec;
+    uint32_t token_id = input[row];
+    if (token_id >= vocab_size) {
+      continue;
+    }
+    // 计算当前 vector 块在 embedding_table 中起始元素的全局偏移
+    int emb_index = token_id * embed_dim + vec_idx * vec_unit;
+    if (emb_index + vec_unit > vocab_size * embed_dim) {
+      continue;
+    }
+    // 将元素索引转换为 vector 索引
+    int vec_index = emb_index / vec_unit;
+    float4 vec_data = embedding_table_vec[vec_index];
+    output_vec[row * num_vec + vec_idx] = vec_data;
+  }
+}
 
 // 模板化的 CUDA kernel，output[i, :] = embedding_table[input[i], :]
 template <typename T>
@@ -70,7 +107,7 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
   int blocks = (total + threadsPerBlock - 1) / threadsPerBlock;
 
   // 启动 CUDA kernel
-  gather_kernel_v1<T><<<blocks, threadsPerBlock>>>(
+  gather_kernel_v2<T><<<blocks, threadsPerBlock>>>(
       input->data_ptr(), embedding_table->data_ptr(), output->data_ptr(),
       seq_len, embed_dim, vocab_size);
 

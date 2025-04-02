@@ -288,7 +288,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # 准备测试用 prompt
-    prompt = "讲个故事。"
+    prompt = "我爱你。"
     messages = [
         {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
         {"role": "user", "content": prompt},
@@ -298,6 +298,8 @@ def main():
         tokenize=False,
         add_generation_prompt=True,
     )
+    # 计算输出总token及其时间
+    import time
 
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
@@ -305,15 +307,16 @@ def main():
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
     # 运行生成测试，并测量生成时间
-    print("Running generation test (streaming)...")
+ 
     start_time = time.time()
+    print("Running generation test (streaming)...")
     generated_ids = model.generate(
         **model_inputs,
         max_new_tokens=512,
         streamer=streamer,
     )
     elapsed_time = time.time() - start_time
-
+    
     # 截取生成部分的 token，用于计算速度
     generated_ids = [
         output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)

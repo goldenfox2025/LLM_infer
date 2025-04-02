@@ -42,7 +42,7 @@ void rms_norm(Tensor<T>* output, const Tensor<T>* input,
 /**
  * @brief 矩阵乘法 C = AB
  * @param A 输入矩阵A [M, K]
- * @param B 输入矩阵B [K, N]（转置后）
+ * @param B 输入矩阵B [K, N]（但是内存没变）
  * @param stream CUDA流
  * @param bias 可选偏置 [N]，默认为nullptr
  * @return 输出矩阵C [M, N]
