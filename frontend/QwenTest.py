@@ -288,7 +288,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # 准备测试用 prompt
-    prompt = "讲个故事。"
+    prompt = "讲个故事"
     messages = [
         {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
         {"role": "user", "content": prompt},
@@ -304,6 +304,7 @@ def main():
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
     # 创建流式输出 streamer
+
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
     # 运行生成测试，并测量生成时间
@@ -327,9 +328,9 @@ def main():
     print(f"\nSpeed: {speed:.2f} tokens/sec")
     print(f"Generation time: {elapsed_time:.2f} seconds")
 
-    # 打印模型结构
-    print("\nModel Structure:")
-    print(model)
+    # # 打印模型结构
+    # print("\nModel Structure:")
+    # print(model)
 
 if __name__ == "__main__":
     main()

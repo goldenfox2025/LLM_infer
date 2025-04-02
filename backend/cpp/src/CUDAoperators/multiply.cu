@@ -9,13 +9,6 @@
 
 namespace cuda_OP {
 
-// 模板联合体，用于将 16 字节重解释为 vec_unit 个 T 类型的元素
-template <typename T, int vec_unit>
-union Vec {
-  float4 f4;      // 16 字节载入
-  T t[vec_unit];  // 以 T 数组形式访问
-};
-
 template <typename T>
 __global__ void multiply_kernel_v3(const T *A, const T *B, T *out, int total) {
   // 计算每次载入的 T 元素个数
@@ -77,7 +70,6 @@ __global__ void multiply_kernel_v1(const T *A, const T *B, T *out, int total) {
 // --------------------------------------------------
 // 模板化的 host 端逐元素乘法函数
 // 输入张量 A 与 B 均为 Tensor<T> 类型，输出张量 output 用于存储结果。
-// 这里调用的是版本 v2 内核函数
 // --------------------------------------------------
 template <typename T>
 void multiply(Tensor<T> *output, const Tensor<T> *A, const Tensor<T> *B) {

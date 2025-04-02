@@ -28,12 +28,8 @@
 
 namespace cuda_OP {
 
-// 定义一个模板联合体，用于重解释 16 字节为一个 T 数组
-template <typename T, int N>
-union Vec {
-  float4 f4;  // 实际载入 16 字节数据
-  T t[N];     // 重解释为 N 个 T 类型元素
-};
+
+
 
 template <typename T = float>
 __global__ void sample_kernel_v1(

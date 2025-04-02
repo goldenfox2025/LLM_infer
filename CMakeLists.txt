@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 project(llm_infer LANGUAGES CXX CUDA)
+set(CMAKE_CUDA_ARCHITECTURES 89)
 
 set(CMAKE_CXX_STANDARD 17)
 set(PYBIND11_PYTHON_VERSION 3.12)
@@ -28,15 +29,29 @@ pybind11_add_module(model_bridge
     backend/cpp/src/inference.cpp
     backend/cpp/src/thread_pool.cpp
     backend/cpp/src/qwen.cpp
-
-
     
 )
 
 
+
+
+
+
+
 target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES} operators)
 
-target_compile_options(model_bridge PRIVATE -mavx2 -mfma)
+# 为 g++ (CXX) 添加 Release 优化参数
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -funroll-loops -flto")
+
+# 为 nvcc 添加 Release 优化参数
+# 注意：CUDA_NVCC_FLAGS_RELEASE 变量可能需要根据你的 CUDA 版本确认
+set(CUDA_NVCC_FLAGS_RELEASE "${CUDA_NVCC_FLAGS_RELEASE} -O3 --use_fast_math  -arch=sm_89")
+
+# 修改 target 的编译选项，使用生成器表达式针对 CXX 与 CUDA 分别设置
+target_compile_options(model_bridge PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-O3 -march=native -funroll-loops -flto -mavx2 -mfma>
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math -arch=sm_89>
+)
 
 # 启用 CUDA 分离式编译
 set_target_properties(model_bridge PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

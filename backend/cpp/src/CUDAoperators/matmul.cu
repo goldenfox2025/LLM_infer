@@ -77,7 +77,7 @@ cutlass::Status run_cutlass_gemm_raw_templated(
   using Gemm = cutlass::gemm::device::Gemm<
       ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
       ElementAccumulator, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp,
-      ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages>;
+      ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages, 8, 8>;
 
   // 构造问题尺寸
   cutlass::gemm::GemmCoord problem_size(m, n, k);

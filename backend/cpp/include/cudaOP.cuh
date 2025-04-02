@@ -19,6 +19,17 @@
 #include "tensor.hpp"
 namespace cuda_OP {
 
+template <typename T, int N>
+union Vec {
+  float4 f4;  // 实际载入 16 字节数据
+  T t[N];     // 重解释为 N 个 T 类型元素
+};
+
+template <typename T, int N>
+union Vec_2 {
+  float2 f4;  // 实际载入 8 字节数据
+  T t[N];     // 重解释为 N 个 T 类型元素
+};
 // 定义支持的数据类型别名
 
 using nvbf16 = __nv_bfloat16;
