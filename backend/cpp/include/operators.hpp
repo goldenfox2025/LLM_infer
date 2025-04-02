@@ -191,11 +191,11 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
   }
 
   // 调试打印：归一化后的候选 token（前 5）
-  std::cout << "[OP::sample] 归一化后的候选分布:" << std::endl;
+  // std::cout << "[OP::sample] 归一化后的候选分布:" << std::endl;
   for (size_t i = 0; i < 5 && i < indices.size(); i++) {
     uint32_t idx = indices[i];
-    std::cout << "  idx = " << idx << ", norm_prob = " << renorm_probs[i]
-              << std::endl;
+    // std::cout << "  idx = " << idx << ", norm_prob = " << renorm_probs[i]
+    //           << std::endl;
   }
 
   // 使用随机数生成器和离散分布进行采样
@@ -204,8 +204,8 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
   std::mt19937 gen(rd());
   std::discrete_distribution<> dist(renorm_probs.begin(), renorm_probs.end());
   uint32_t chosen = indices[dist(gen)];
-  std::cout << "[OP::sample] 采样结果: " << chosen << std::endl;
-  std::cout << "[OP::sample] ====== 采样完成 ======\n" << std::endl;
+  // std::cout << "[OP::sample] 采样结果: " << chosen << std::endl;
+  // std::cout << "[OP::sample] ====== 采样完成 ======\n" << std::endl;
   return chosen;
 }
 // 逐元素乘法

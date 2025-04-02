@@ -111,6 +111,8 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
   // __shared__ float s_max_local[B_C_VALUE];  // 局部最大值归约缓存
   // __shared__ float s_exp_local[B_C_VALUE];  // 局部指数和归约缓存
 
+  __shared__ float s_o[12 * DQKV_VALUE];
+
   // 线程内变量
   const int d_tid = threadIdx.x;  // 特征维度内线程索引，[0, dqkv)
   const int token_tid = threadIdx.y;  // 当前 chunk 内 token 线程索引，[0, B_c)
@@ -119,7 +121,7 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
   const int kv_head = head_id / n_groups;  // KV head 索引
 
   // 设定一次加载的元素个数 (vec_unit)
-  constexpr int vec_unit = 8 / sizeof(T);
+  constexpr int vec_unit = 16 / sizeof(T);
   const int vecCount = dqkv / vec_unit;
   Vec<T, vec_unit> vq, vk, vv;  // 用于加载 key, value
   // --------------------------
@@ -276,7 +278,7 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
     if (j == 0) {
       // 第一个分块，直接写输出
       if (token_tid == 0) {
-        att_output[q_offset + d_tid] = static_cast<T>(partial_out);
+        s_o[q_offset + d_tid] = static_cast<T>(partial_out);
       }
       // 全局 softmax 的初始 m, l
       if (token_tid == 0 && d_tid == 0) {
@@ -291,13 +293,13 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
       float exp_cur = expf(cur_m - new_global_m);
       float new_global_l = global_l * exp_old + cur_l * exp_cur;
 
-      float old_out = static_cast<float>(att_output[q_offset + d_tid]);
+      float old_out = static_cast<float>(s_o[q_offset + d_tid]);
       float new_out =
           (global_l * exp_old * old_out + cur_l * exp_cur * partial_out) /
           new_global_l;
 
       if (token_tid == 0) {
-        att_output[q_offset + d_tid] = static_cast<T>(new_out);
+        s_o[q_offset + d_tid] = static_cast<T>(new_out);
       }
       if (token_tid == 0 && d_tid == 0) {
         global_m = new_global_m;
@@ -306,6 +308,10 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
       __syncthreads();
     }
   }  // end for each chunk (T_c)
+  // 写回att_output
+
+  if (threadIdx.y == 0) att_output[q_offset + d_tid] = s_o[q_offset + d_tid];
+  __syncthreads();
 }
 
 // 暂时不考虑动态dqkv

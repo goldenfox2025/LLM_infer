@@ -290,7 +290,7 @@ def main():
     # 准备测试用 prompt
     prompt = "讲个故事"
     messages = [
-        {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
+        {"role": "system", "content": "You are a helpful AI assistant."},
         {"role": "user", "content": prompt},
     ]
     text = tokenizer.apply_chat_template(
@@ -314,8 +314,11 @@ def main():
     generated_ids = model.generate(
         **model_inputs,
         max_new_tokens=512,
+        temperature=0.7,  # 温度参数，值越低生成越确定；值越高生成更多样化
+        top_k=40,         # top-k 策略，只从概率最高的 40 个 token 中采样
         streamer=streamer,
     )
+
     elapsed_time = time.time() - start_time
     
     # 截取生成部分的 token，用于计算速度
