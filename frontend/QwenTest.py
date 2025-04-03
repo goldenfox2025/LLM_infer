@@ -313,9 +313,9 @@ def main():
     print("Running generation test (streaming)...")
     generated_ids = model.generate(
         **model_inputs,
-        max_new_tokens=200,
+        max_new_tokens=2048,
         temperature=1,  # 温度参数，值越低生成越确定；值越高生成更多样化
-        top_k=1,         # top-k 策略，只从概率最高的 40 个 token 中采样
+        top_k=40,         # top-k 策略，只从概率最高的 40 个 token 中采样
         streamer=streamer,
     )
 

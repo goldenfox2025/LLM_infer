@@ -58,7 +58,7 @@ template <typename ElementA, typename ElementB, typename ElementOutput,
           int NumStages = 2>
 cutlass::Status run_cutlass_gemm_raw_templated(
     int m, int n, int k, ElementA const *d_a, ElementB const *d_b,
-    ElementOutput const *d_bias, ElementOutput *d_d,
+    ElementOutput const *d_bias, ElementOutput *d_d, cudaStream_t stream = 0,
     ElementComputeEpilogue alpha = ElementComputeEpilogue(1),
     int split_k_slices = 1) {
   // 使用 to_cutlass_type 对输入数据类型做转换
@@ -112,7 +112,7 @@ cutlass::Status run_cutlass_gemm_raw_templated(
   CUTLASS_CHECK(status);
 
   // 调用 CUTLASS GEMM 内核
-  status = gemm_op();
+  status = gemm_op(stream);
   CUTLASS_CHECK(status);
 
   return status;
@@ -375,7 +375,8 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
         cutlass::layout::RowMajor,     // LayoutA
         cutlass::layout::ColumnMajor,  // LayoutB
         cutlass::layout::RowMajor      // LayoutOutput
-        >(M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr());
+        >(M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(),
+          stream);
 
   } else if (use_ == 1) {
     static cublasHandle_t handle = nullptr;
