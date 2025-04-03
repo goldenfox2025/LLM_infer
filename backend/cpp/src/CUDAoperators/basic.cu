@@ -35,7 +35,96 @@ __device__ inline float warp_reduce_sum(float val) {
   return val;
 }
 
+// v2 版本: 修复内存合并问题，优化块内归约
+template <typename T>
+__global__ void rms_norm_kernel_v2(const T *__restrict__ input,
+                                   T *__restrict__ output,
+                                   const T *__restrict__ weight, float eps,
+                                   size_t row_size) {
+  // 每个 block 处理一行数据
+  int row = blockIdx.x;
+  const T *__restrict__ in_row = input + row * row_size;
+  T *__restrict__ out_row = output + row * row_size;
+
+  int tid = threadIdx.x;
+  int nthreads = blockDim.x;  // 使用 blockDim.x 获取块大小
+
+  // --- 1. 并行计算平方和 (修复内存合并问题) ---
+  float local_sum = 0.0f;
+  // 每个块处理 row_size 个元素，块内线程合作处理
+  for (size_t i_base = 0; i_base < row_size; i_base += nthreads) {
+    size_t i = i_base + tid;
+    // 边界检查，确保不越界访问
+    if (i < row_size) {
+      float val = static_cast<float>(in_row[i]);
+      local_sum += val * val;
+    }
+  }
+
+  // --- 2. Warp 内归约 ---
+  local_sum = warp_reduce_sum(local_sum);
+
+  // --- 3. 块内归约 (使用 Shared Memory) ---
+  // 为每个 warp 的部分和分配共享内存
+  // 需要足够容纳块中所有 warp 的 leader 线程写入
+  // 例如，如果最多 1024 线程，则最多 32 个 warp
+  __shared__ float s_warp_sums[32];  // 32 is max warps for 1024 threads
+
+  int lane = tid % warpSize;     // Lane index within warp (0-31)
+  int warp_id = tid / warpSize;  // Warp index within block
+
+  // 每个 warp 的第一个线程 (lane 0) 将其 warp 的归约结果写入共享内存
+  if (lane == 0) {
+    s_warp_sums[warp_id] = local_sum;
+  }
+
+  // 同步，确保所有 warp 的结果都已写入共享内存
+  __syncthreads();
+
+  // --- 4. 最终块内归约 (由第一个 Warp 完成) ---
+  // 让第一个 warp (warp_id == 0) 读取所有 warp 的部分和并进行最终归约
+  float block_sum = 0.0f;
+  if (warp_id == 0) {
+    int num_warps_in_block = (nthreads + warpSize - 1) / warpSize;
+    // 读取其他 warp (包括自己) 的部分和
+    // 注意：这里的读取操作是分散的，但因为只由一个 warp 执行，影响相对较小
+    // 并且读取的数据量很小 (最多 32 个 float)
+    float warp_partial_sum =
+        (tid < num_warps_in_block) ? s_warp_sums[tid] : 0.0f;
+
+    // 在第一个 warp 内部再次使用 warp_reduce_sum 进行最终归约
+    block_sum = warp_reduce_sum(warp_partial_sum);
+    // 此时，block_sum 只在 warp 0 的 lane 0 中持有最终结果
+  }
+
+  // --- 5. 广播 RMS 值 ---
+  // 使用共享内存的第一个元素广播最终的 RMS 值或其倒数
+  __shared__ float s_inv_rms;
+  if (tid == 0) {  // 只有线程 0 计算最终的 rms 并写入共享内存
+    // 计算 1 / rms，使用乘法通常比除法快
+    s_inv_rms = rsqrtf(block_sum / row_size + eps);
+  }
+
+  // 同步，确保 s_inv_rms 已被线程 0 写入
+  __syncthreads();
+
+  // 所有线程从共享内存读取广播后的 1/rms 值
+  float inv_rms = s_inv_rms;
+
+  // --- 6. 归一化和加权 (修复内存合并问题) ---
+  for (size_t i_base = 0; i_base < row_size; i_base += nthreads) {
+    size_t i = i_base + tid;
+    if (i < row_size) {
+      float val = static_cast<float>(in_row[i]);
+      float w = static_cast<float>(weight[i]);
+      // 使用乘法代替除法
+      out_row[i] = static_cast<T>((val * inv_rms) * w);
+    }
+  }
+}
+
 // v1版本
+
 template <typename T>
 __global__ void rms_norm_kernel_v1(const T *input, T *output, const T *weight,
                                    float eps, size_t row_size) {
@@ -119,14 +208,52 @@ void rms_norm(Tensor<T> *output, const Tensor<T> *input,
               const Tensor<T> *weight, float eps) {
   // input/output shape 均为 [seq_len, d]
   size_t seq_len = input->sizes()[0];
-  size_t d = input->sizes()[1];
-  int threads = 64;
-  // 无印版本仅支持单线程
-  rms_norm_kernel_v1<<<seq_len, threads>>>(
+  size_t d = input->sizes()[1];  // row_size
+
+  // --- 可调参数 ---
+  // 块大小（每行用多少线程处理）
+  // 常见选择: 128, 256, 512. 需要根据 GPU 架构和 d 的大小进行调整测试
+  // 256 是一个比较通用的起点
+  int threads_per_block = 256;
+
+  // 确保线程数不超过设备限制 (通常是 1024)
+  // 同时考虑 d 的大小，如果 d 很小，用太多线程可能浪费
+  // if (d < threads_per_block) {
+  //     threads_per_block = next_power_of_2(d); // 或者选择一个合理的较小值
+  // }
+  // 这里暂时不加动态调整逻辑，假设 256 是一个可接受的起点
+
+  // 检查 threads_per_block 是否是 warpSize (32) 的倍数通常更好，但非必须
+  // 检查是否超过 1024 (大多数设备的最大值)
+  if (threads_per_block > 1024) threads_per_block = 1024;
+
+  // --- Kernel 启动 ---
+  // 网格大小 gridDim.x = seq_len (一个 block 处理一行)
+  // 块大小 blockDim.x = threads_per_block
+  dim3 block_dim(threads_per_block);
+  dim3 grid_dim(seq_len);  // grid_dim.x = seq_len
+
+  rms_norm_kernel_v2<T><<<grid_dim, block_dim>>>(
       input->data_ptr(), output->data_ptr(), weight->data_ptr(), eps, d);
+
+  // --- 错误检查和同步 ---
   checkCudaError(cudaGetLastError());
+  // 对于性能分析或确保后续 CPU 操作能看到结果，需要同步
   checkCudaError(cudaDeviceSynchronize());
 }
+
+// Helper function (optional, if you want dynamic adjustment based on d)
+// int next_power_of_2(int n) {
+//     n--;
+//     n |= n >> 1;
+//     n |= n >> 2;
+//     n |= n >> 4;
+//     n |= n >> 8;
+//     n |= n >> 16;
+//     n++;
+//     // Ensure it's at least warpSize for efficiency maybe?
+//     return (n < 32) ? 32 : n;
+// }
 
 // --------------------------------------------------
 // rope 内核与包装函数（模板化）
@@ -218,10 +345,31 @@ __global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor,
     size_t i1 = vec_i * 2 + 1;
 
     // Calculate frequencies and rotation angles for both elements
-    float freq0 = 1.0f / powf(theta, static_cast<float>(2 * i0) /
-                                         static_cast<float>(head_dim));
-    float freq1 = 1.0f / powf(theta, static_cast<float>(2 * i1) /
-                                         static_cast<float>(head_dim));
+    // float freq0 = 1.0f / powf(theta, static_cast<float>(2 * i0) /
+    //                                      static_cast<float>(head_dim));
+    // float freq1 = 1.0f / powf(theta, static_cast<float>(2 * i1) /
+    //                                      static_cast<float>(head_dim));
+
+    float log_theta = logf(theta);
+    float neg_two_log_theta_div_hd =
+        -2.0f * log_theta / static_cast<float>(head_dim);
+
+    // --- Inside the loop or calculation for specific i0/i1 ---
+    // Calculate the argument for expf
+    float exp_arg0 = neg_two_log_theta_div_hd * static_cast<float>(i0);
+    float exp_arg1 = neg_two_log_theta_div_hd * static_cast<float>(i1);
+
+    // Calculate frequencies using expf
+    float freq0 = expf(exp_arg0);
+    float freq1 = expf(exp_arg1);
+
+
+
+
+
+
+
+    
 
     float val0 = (static_cast<float>(seq_idx) + offset) * freq0;
     float val1 = (static_cast<float>(seq_idx) + offset) * freq1;

@@ -418,10 +418,6 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
       fprintf(stderr, "Error: cuBLAS handle was not initialized correctly.\n");
       return;  // 或者抛出异常
     }
-
-    cudaStream_t stream = nullptr;  // 或者获取当前线程的流
-    CHECK_CUBLAS(cublasSetStream(handle, stream));  // 确保 handle 使用正确的流
-
     // 原始数据（均按行主序存储）：
     // A: M×K, 每行有 K 个元素  -> lda = K
     // B: N×K, 每行有 K 个元素  -> ldb = K
@@ -431,26 +427,31 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
     int ldc = N;  // C 每行有 N 个元素
     const float alpha = 1.0f;
     const float beta = 0.0f;
+    {  // 引入作用域方便 lock_guard 管理
+      std::lock_guard<std::mutex> lock(handle_mutex);
+      // 将 cuBLAS 操作与传入的 stream 关联
+      CHECK_CUBLAS(
+          cublasSetStream(handle, stream));  // 确保 handle 使用正确的流
 
-    // 目标计算： C = A * B^T
-    // 利用转换： C^T = B * A^T
-    // GEMM 调用参数：
-    //    m = N, n = M, k = K
-    // 同时对 A 和 B 使用转置操作：
-    cublas_matmul_wrapper<T>(handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                             int(N),  // m = N
-                             int(M),  // n = M
-                             int(K),  // k = K
-                             &alpha,
-                             B.data_ptr(),  // 原始 B
-                             ldb,           // ldb = K
-                             A.data_ptr(),  // 原始 A
-                             lda,           // lda = K
-                             &beta,
-                             C->data_ptr(),  // 输出 C
-                             ldc);           // ldc = N
-    cudaStreamSynchronize(stream);
-
+      // 目标计算： C = A * B^T
+      // 利用转换： C^T = B * A^T
+      // GEMM 调用参数：
+      //    m = N, n = M, k = K
+      // 同时对 A 和 B 使用转置操作：
+      cublas_matmul_wrapper<T>(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                               int(N),  // m = N
+                               int(M),  // n = M
+                               int(K),  // k = K
+                               &alpha,
+                               B.data_ptr(),  // 原始 B
+                               ldb,           // ldb = K
+                               A.data_ptr(),  // 原始 A
+                               lda,           // lda = K
+                               &beta,
+                               C->data_ptr(),  // 输出 C
+                               ldc);           // ldc = N
+      // cudaStreamSynchronize(stream);
+    }
     // std::cout << "cublas_matmul_wrapper<T> 调用成功" << std::endl;
     if (bias != nullptr) {
       // printf("Launching add_bias_kernel:\n");
@@ -484,9 +485,9 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
       // 计算网格大小，确保覆盖所有元素
       dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                    (M + blockDim.y - 1) / blockDim.y);
-      add_bias_kernel<T><<<gridDim, blockDim>>>(C->data_ptr(), bias->data_ptr(),
-                                                static_cast<int>(M),
-                                                static_cast<int>(N), ldc);
+      add_bias_kernel<T><<<gridDim, blockDim, 0, stream>>>(
+          C->data_ptr(), bias->data_ptr(), static_cast<int>(M),
+          static_cast<int>(N), ldc);
     }
     // std::cout << "add_bias_kernel 调用成功" << std::endl;
     return;
