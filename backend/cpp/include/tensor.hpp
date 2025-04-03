@@ -26,8 +26,7 @@ Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
 template <typename T>
 class Tensor {
  private:
-  // 静态内存池：所有 GPU 内存分配都使用这个内存池（目前内部仍是简单调用
-  // cudaMalloc/cudaFree）
+
 
   // 检查 CUDA 错误的静态内联函数（可在 const 成员中调用）
   static inline void checkCudaError(cudaError_t error) {

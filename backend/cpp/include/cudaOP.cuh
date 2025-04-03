@@ -71,7 +71,7 @@ void rope(Tensor<T>* tensor, size_t current_pos, float theta,
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T>* output, const Tensor<T>* input, int dim,
-             bool mask = true, int offset = 0, float temperature = -1.0f);
+             bool mask = true, int offset = 0);
 
 // silu 激活函数算子
 template <typename T>
