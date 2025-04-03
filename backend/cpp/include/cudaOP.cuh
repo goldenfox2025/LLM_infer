@@ -83,7 +83,8 @@ void multiply(Tensor<T>* output, const Tensor<T>* A, const Tensor<T>* B);
 
 // 逐元素加法算子
 template <typename T>
-void add(Tensor<T>* output, Tensor<T>* A, const Tensor<T>* B);
+void add(Tensor<T>* output, Tensor<T>* A, Tensor<T>* B,
+         cudaStream_t stream = 0);
 
 template <typename T>
 uint32_t sample(Tensor<T>&& input, float temperature, float top_p, size_t top_k,

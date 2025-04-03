@@ -244,9 +244,11 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
     // (C2) 并行归约求指数和 cur_l (改为 warp reduce)
     __shared__ float cur_l_s;
     float warp_val_l = 0.0f;
+    __shared__ float s_s_score[B_C_VALUE];
     // 只有 (d_tid < B_c && y==0) 的线程去计算 exp(...)，其余线程赋值0
     if (d_tid < B_c && threadIdx.y == 0) {
       warp_val_l = expf(s_score_buf[d_tid] - cur_m);
+      s_s_score[d_tid] = warp_val_l;
     }
 
     // 仍然所有线程都参与同一段归约指令
@@ -266,11 +268,29 @@ __global__ void flash_attention_kernel_v4(T* q, const T* k, const T* v,
     // --------------------------
     // (D) 在本分块内计算对 V 的加权求和 (部分输出)
     // --------------------------
-    float partial_out = 0.0f;
+    float partial_out = 0.0f;  // 当前线程所计算的输出元素的累加器
+
+    // 遍历当前块中的所有 token（长度为 B_c）
     for (int i = 0; i < B_c; ++i) {
-      float weight = expf(s_score_buf[i] - cur_m) / cur_l;
-      partial_out += weight * s_vj[i * dqkv + d_tid];
+      // 获取第 i 个 token 的预计算过的 softmax 分值（已做指数运算）
+      // 从共享内存 s_s_score 中读取，共有 B_c 个元素
+      float exp_score = s_s_score[i];
+      float weight = exp_score / cur_l;  // 归一化 softmax 权重
+      float v_val =
+          s_vj[i * dqkv + d_tid];  // 获取该 token 的第 d_tid 维 Value 值
+
+      // 将当前 token 的权重值累加到输出结果中。使用 fmaf 可能更高效（FMA 指令）
+      partial_out = fmaf(weight, v_val, partial_out);
+      // 或者：partial_out += weight * v_val;
     }
+
+    // 将当前线程计算的结果（对应某个 feature 维度 d_tid）
+    // 存入共享内存输出缓冲 s_o 中
+    // 确保 s_o 的声明正确：__shared__ float s_o[DQKV_VALUE];（或等效大小）
+
+    // 同步 block 中所有线程，确保 s_o 完全写入
+    // 因为下一步 online update（步骤 E）会从 s_o 中读取
+    __syncthreads();
 
     // --------------------------
     // (E) 将本分块输出累加到 att_output，并做全局 softmax 递归更新

@@ -26,8 +26,6 @@ Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
 template <typename T>
 class Tensor {
  private:
-
-
   // 检查 CUDA 错误的静态内联函数（可在 const 成员中调用）
   static inline void checkCudaError(cudaError_t error) {
     if (error != cudaSuccess) {

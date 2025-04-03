@@ -361,8 +361,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     cuda_OP::matmul(att_heads_reshaped, wo, &att_proj, nullptr, o_bias);
 
     // 残差连接
-    residual = residual + att_proj;
 
+    cuda_OP::add(&residual, &residual, &att_proj);
     auto& ffn_norm_weight =
         params_.at(layer_prefix + "post_attention_layernorm.weight");
     cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
@@ -405,7 +405,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     cuda_OP::matmul(gate_buf, down_weight, &ffn_out, nullptr, down_bias);
 
     // 残差连接
-    residual = residual + ffn_out;
+    cuda_OP::add(&residual, &residual, &ffn_out);
   }
 
   // 最终的LayerNorm (RMSNorm)
@@ -521,8 +521,6 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
 
     Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
     cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
-
-
 
     // 同步并销毁流
     // for (int j = 0; j < 3; j++) {
@@ -647,8 +645,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
                     &att_proj, nullptr, o_bias);
 
     // 残差连接
-    residual = residual + att_proj;
 
+    cuda_OP::add(&residual, &residual, &att_proj);
     // 3. Post Attention LayerNorm (RMSNorm)
     auto& ffn_norm_weight =
         params_.at(layer_prefix + "post_attention_layernorm.weight");
@@ -698,7 +696,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     cuda_OP::matmul(gate_buf, down_weight, &ffn_out, nullptr, down_bias);
 
     // 残差连接
-    residual = residual + ffn_out;
+    cuda_OP::add(&residual, &residual, &ffn_out);
   }
 
   // 最终的LayerNorm (RMSNorm)
