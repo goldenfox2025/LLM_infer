@@ -131,6 +131,152 @@ void rms_norm(Tensor<T> *output, const Tensor<T> *input,
 // --------------------------------------------------
 // rope 内核与包装函数（模板化）
 // --------------------------------------------------
+
+template <typename T>
+__global__ void rope_kernel_v1(T *tensor, size_t seq_len, size_t n_heads,
+                               size_t head_dim, size_t offset, float theta) {
+  // Each thread handles one dimension pair (i, i + head_dim/2) for a specific
+  // (seq_idx, head_idx) Grid dimension should be (seq_len * n_heads * head_dim
+  // / 2)
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t total_rotations = seq_len * n_heads * (head_dim / 2);
+
+  if (idx < total_rotations) {
+    size_t head_dim_half = head_dim / 2;
+    size_t i = idx % head_dim_half;  // Dimension index (0 to head_dim/2 - 1)
+    size_t head_flat_idx =
+        idx / head_dim_half;  // Flat index for (seq_idx, head_idx)
+    size_t seq_idx = head_flat_idx / n_heads;   // Sequence index
+    size_t head_idx = head_flat_idx % n_heads;  // Head index
+
+    size_t head_offset = seq_idx * n_heads * head_dim + head_idx * head_dim;
+    T *head_ptr = tensor + head_offset;
+
+    // Calculate frequency and rotation angle
+    // Inverse frequency calculation is stable across threads working on the
+    // same head/seq pos
+    float freq = 1.0f / powf(theta, static_cast<float>(2 * i) /
+                                        static_cast<float>(head_dim));
+    float val = (static_cast<float>(seq_idx) + offset) * freq;
+    float cos_val;
+    float sin_val;
+    __sincosf(val, &sin_val, &cos_val);  // Compute sin and cos together
+
+    // Load the pair of elements
+    // Accesses head_ptr[i] and head_ptr[i + head_dim_half]
+    // Consecutive threads access consecutive 'i', improving coalescing for both
+    // reads.
+    float x0_f = static_cast<float>(head_ptr[i]);
+    float x1_f = static_cast<float>(head_ptr[i + head_dim_half]);
+
+    // Perform rotation
+    float rotated_x0 = x0_f * cos_val - x1_f * sin_val;
+    float rotated_x1 = x0_f * sin_val + x1_f * cos_val;
+
+    // Store the rotated pair back
+    // Consecutive threads access consecutive 'i', improving coalescing for
+    // writes.
+    head_ptr[i] = static_cast<T>(rotated_x0);
+    head_ptr[i + head_dim_half] = static_cast<T>(rotated_x1);
+  }
+}
+
+// --- BF16 Specialization using __nv_bfloat162 ---
+// This leverages vector types and intrinsics for BF16
+
+// Check if CUDA version supports __nv_bfloat162 intrinsics (usually >= 11.0)
+#if defined(__CUDA_ARCH__) && \
+    (__CUDA_ARCH__ >= 800)  // Ampere or later recommended
+
+template <>
+__global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor,
+                                              size_t seq_len, size_t n_heads,
+                                              size_t head_dim, size_t offset,
+                                              float theta) {
+  // Each thread handles TWO dimension pairs using bfloat162 type
+  // Total number of bfloat162 pairs to process per head is head_dim / 4
+  // Grid dimension should be (seq_len * n_heads * head_dim / 4)
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t head_dim_half = head_dim / 2;
+  size_t pairs_per_head_half =
+      head_dim_half / 2;  // Each bfloat162 holds 2 elements
+  size_t total_vec_rotations = seq_len * n_heads * pairs_per_head_half;
+
+  if (idx < total_vec_rotations) {
+    size_t vec_i = idx % pairs_per_head_half;  // Index of the bfloat162 pair (0
+                                               // to pairs_per_head_half - 1)
+    size_t head_flat_idx =
+        idx / pairs_per_head_half;  // Flat index for (seq_idx, head_idx)
+    size_t seq_idx = head_flat_idx / n_heads;   // Sequence index
+    size_t head_idx = head_flat_idx % n_heads;  // Head index
+
+    size_t head_offset = seq_idx * n_heads * head_dim + head_idx * head_dim;
+    __nv_bfloat16 *head_ptr = tensor + head_offset;
+
+    // Calculate dimension indices for the two elements in the vector
+    size_t i0 = vec_i * 2;
+    size_t i1 = vec_i * 2 + 1;
+
+    // Calculate frequencies and rotation angles for both elements
+    float freq0 = 1.0f / powf(theta, static_cast<float>(2 * i0) /
+                                         static_cast<float>(head_dim));
+    float freq1 = 1.0f / powf(theta, static_cast<float>(2 * i1) /
+                                         static_cast<float>(head_dim));
+
+    float val0 = (static_cast<float>(seq_idx) + offset) * freq0;
+    float val1 = (static_cast<float>(seq_idx) + offset) * freq1;
+
+    float cos_val0, sin_val0, cos_val1, sin_val1;
+    __sincosf(val0, &sin_val0, &cos_val0);
+    __sincosf(val1, &sin_val1, &cos_val1);
+
+    // Load a pair of bfloat162 (4 elements total) using vector load
+    // reinterpret_cast is necessary for vectorized loads/stores
+    __nv_bfloat162 x0_vec = *reinterpret_cast<__nv_bfloat162 *>(
+        &head_ptr[i0]);  // Loads elements at i0, i1
+    __nv_bfloat162 x1_vec = *reinterpret_cast<__nv_bfloat162 *>(
+        &head_ptr[i0 + head_dim_half]);  // Loads elements at i0+d/2, i1+d/2
+
+    // Convert bf16 vectors to float vectors for calculation
+    float2 x0_fvec = __bfloat1622float2(x0_vec);
+    float2 x1_fvec = __bfloat1622float2(x1_vec);
+
+    // Pack sin/cos values into float2 for potential vector operations (though
+    // used component-wise here)
+    float2 cos_vec = make_float2(cos_val0, cos_val1);
+    float2 sin_vec = make_float2(sin_val0, sin_val1);
+
+    // Perform rotation using float components (or use bf16 intrinsics if
+    // preferred, requires bf16 sin/cos) If using intrinsics, convert cos/sin to
+    // bf162 first:
+    // __nv_bfloat162 cos_bf16 = __float22bfloat162_rn(cos_vec);
+    // __nv_bfloat162 sin_bf16 = __float22bfloat162_rn(sin_vec);
+    // __nv_bfloat162 neg_x1_vec = __hnegb2(x1_vec); // Negate x1 for FMA
+    // __nv_bfloat162 rotated_x0_bf16 = __hfma2(x0_vec, cos_bf16,
+    // __hmul2(neg_x1_vec, sin_bf16));
+    // __nv_bfloat162 rotated_x1_bf16 = __hfma2(x0_vec, sin_bf16,
+    // __hmul2(x1_vec, cos_bf16));
+
+    // Component-wise rotation using float:
+    float rot_x0_f0 = x0_fvec.x * cos_vec.x - x1_fvec.x * sin_vec.x;
+    float rot_x0_f1 = x0_fvec.y * cos_vec.y - x1_fvec.y * sin_vec.y;
+    float rot_x1_f0 = x0_fvec.x * sin_vec.x + x1_fvec.x * cos_vec.x;
+    float rot_x1_f1 = x0_fvec.y * sin_vec.y + x1_fvec.y * cos_vec.y;
+
+    // Convert results back to bfloat162
+    __nv_bfloat162 rotated_x0_bf16 =
+        __float22bfloat162_rn(make_float2(rot_x0_f0, rot_x0_f1));
+    __nv_bfloat162 rotated_x1_bf16 =
+        __float22bfloat162_rn(make_float2(rot_x1_f0, rot_x1_f1));
+
+    // Store the rotated pairs back using vector store
+    *reinterpret_cast<__nv_bfloat162 *>(&head_ptr[i0]) = rotated_x0_bf16;
+    *reinterpret_cast<__nv_bfloat162 *>(&head_ptr[i0 + head_dim_half]) =
+        rotated_x1_bf16;
+  }
+}
+#endif  // __CUDA_ARCH__ >= 800
+
 template <typename T>
 __global__ void rope_kernel(T *tensor, size_t seq_len, size_t n_heads,
                             size_t head_dim, size_t offset, float theta) {
@@ -162,22 +308,90 @@ void rope(Tensor<T> *x, size_t offset, float theta, cudaStream_t stream) {
   size_t seq_len = sizes[0];
   size_t n_heads = sizes[1];
   size_t head_dim = sizes[2];
-  size_t total_elements = seq_len * n_heads;
-  int threads = 256;
-  int blocks = (total_elements + threads - 1) / threads;
-  rope_kernel<<<blocks, threads, 0, stream>>>(x->data_ptr(), seq_len, n_heads,
-                                              head_dim, offset, theta);
 
+  if (head_dim == 0) return;  // Nothing to do
+  if (head_dim % 2 != 0) {
+    throw std::runtime_error("rope: head_dim must be even");
+  }
+
+  int threads = 256;  // Common block size, can be tuned (128, 512, etc.)
+  int blocks = 0;
+  void *kernel_ptr = nullptr;
+
+  // Select kernel and grid based on type
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    if (head_dim % 4 != 0) {
+      // BF16 kernel requires head_dim to be a multiple of 4 for bfloat162
+      // loads/stores Fallback to generic kernel or throw error. Here we throw.
+      throw std::runtime_error(
+          "rope: BF16 requires head_dim to be a multiple of 4 for optimized "
+          "kernel");
+    }
+    size_t total_vec_rotations =
+        seq_len * n_heads *
+        (head_dim / 4);  // Each thread handles a bfloat162 pair
+    blocks = (total_vec_rotations + threads - 1) / threads;
+    kernel_ptr = (void *)rope_kernel_v1<__nv_bfloat16>;
+    // std::cout << "Using BF16 Optimized Kernel" << std::endl; // For debugging
+  } else
+#endif
+  {
+    // Generic FP32/FP16 path
+    size_t total_rotations =
+        seq_len * n_heads * (head_dim / 2);  // Each thread handles one pair
+    blocks = (total_rotations + threads - 1) / threads;
+    kernel_ptr = (void *)rope_kernel_v1<T>;
+    // std::cout << "Using Generic Optimized Kernel" << std::endl; // For
+    // debugging
+  }
+
+  if (blocks == 0 && (seq_len * n_heads * head_dim) > 0) {
+    // Handle cases where total rotations might be 0 but tensor isn't empty
+    // or very small head_dim resulted in 0 rotations/blocks.
+    // If head_dim was 0, we returned earlier. If head_dim is > 0, blocks should
+    // be > 0. This calculation should ensure blocks > 0 if work needs to be
+    // done. If blocks is still 0, it likely means seq_len or n_heads is 0.
+    if (seq_len > 0 && n_heads > 0 && head_dim > 0) {
+      blocks = 1;  // Launch at least one block if there's data
+    } else {
+      return;  // No work to do
+    }
+  }
+
+  // --- Kernel Launch ---
+  // We use a function pointer to avoid repeating the launch code inside
+  // if/else. Note: Directly using the kernel function name is usually preferred
+  // for type safety, but this shows how to handle it if selecting dynamically.
+  if (kernel_ptr == (void *)rope_kernel_v1<T>) {
+    rope_kernel_v1<T><<<blocks, threads, 0, stream>>>(
+        x->data_ptr(), seq_len, n_heads, head_dim, offset, theta);
+  }
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  else if (kernel_ptr == (void *)rope_kernel_v1<__nv_bfloat16>) {
+    rope_kernel_v1<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<__nv_bfloat16 *>(
+            x->data_ptr()),  // Cast needed if T is bf16
+        seq_len, n_heads, head_dim, offset, theta);
+  }
+#endif
+  else {
+    throw std::runtime_error("Internal error: No valid kernel selected.");
+  }
+
+  // --- Error Checking ---
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
-    std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+    std::cerr << "CUDA error after rope kernel launch: "
+              << cudaGetErrorString(err) << std::endl;
     throw std::runtime_error("CUDA rope kernel launch failed");
   }
+  // Optional synchronization for debugging or if stream is null
   if (stream == nullptr) {
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
-      std::cerr << "CUDA synchronization error: " << cudaGetErrorString(err)
-                << std::endl;
+      std::cerr << "CUDA synchronization error after rope: "
+                << cudaGetErrorString(err) << std::endl;
       throw std::runtime_error("CUDA rope synchronization failed");
     }
   }
