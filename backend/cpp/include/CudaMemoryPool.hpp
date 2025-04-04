@@ -612,44 +612,64 @@
 //     free_lists_[level].push_back(current);
 //   }
 // };
-#pragma once
+#pragma once  // 防止头文件被多次包含
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <iostream>
 #include <mutex>
+#include <numeric>  // 需要包含 numeric 用于 accumulate
 #include <string>
-#include <unordered_map>
-#include <unordered_set>  // Add this
+#include <unordered_map>  // 需要包含 map
+#include <unordered_set>  // 仍然需要 set，但用于析构函数中的清理
 #include <vector>
+
 class CudaMemoryPool {
  public:
+  // 构造函数：确保CUDA上下文初始化
   CudaMemoryPool() {
-    // 确保CUDA上下文已初始化
-    cudaFree(0);
+    cudaError_t err = cudaFree(0);  // 尝试一个无操作的 CUDA 调用来初始化上下文
+    if (err != cudaSuccess && err != cudaErrorInvalidDevicePointer) {
+      // cudaFree(0) 返回 cudaErrorInvalidDevicePointer 是正常的
+      // 如果是其他错误，打印出来
+      std::cerr << "Warning: CUDA context initialization check returned: "
+                << cudaGetErrorString(err) << std::endl;
+    }
   }
 
+  // 析构函数：释放所有池管理的内存
   ~CudaMemoryPool() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 释放所有大小类别中的内存块
+    // 释放所有大小类别中的缓存内存块
     for (auto& [size, blocks] : free_blocks_) {
       for (void* ptr : blocks) {
         cudaFree(ptr);
       }
     }
+    free_blocks_.clear();  // 清空空闲块记录
 
-    // 释放所有直接分配的内存
-    for (void* ptr : direct_allocations_) {
-      cudaFree(ptr);
+    // 释放仍然活跃的（未被free回池的）内存块
+    // 这通常不应该发生，如果代码正确调用了 free
+    if (!active_allocations_.empty()) {
+      std::cerr << "Warning: CudaMemoryPool destructor freeing "
+                << active_allocations_.size() << " active allocations."
+                << std::endl;
+      for (auto const& [ptr, size] : active_allocations_) {
+        cudaFree(ptr);
+      }
+      active_allocations_.clear();  // 清空活跃分配记录
     }
-
-    // 清空容器
-    free_blocks_.clear();
-    direct_allocations_.clear();
   }
 
+  // 禁止拷贝和赋值
+  CudaMemoryPool(const CudaMemoryPool&) = delete;
+  CudaMemoryPool& operator=(const CudaMemoryPool&) = delete;
+  CudaMemoryPool(CudaMemoryPool&&) = delete;
+  CudaMemoryPool& operator=(CudaMemoryPool&&) = delete;
+
+  // 分配内存
   void* allocate(size_t size) {
     if (size == 0) return nullptr;
 
@@ -664,62 +684,112 @@ class CudaMemoryPool {
       // 有可用的缓存块，取用最后一个（避免vector前端操作）
       void* ptr = it->second.back();
       it->second.pop_back();
+
+      // 将取出的块重新标记为活跃，并记录其大小
+      active_allocations_[ptr] = aligned_size;
       return ptr;
     }
 
-    // 没有缓存块，直接分配新内存
+    // 没有缓存块，需要分配新内存
     void* ptr = nullptr;
     cudaError_t err = cudaMalloc(&ptr, aligned_size);
     if (err != cudaSuccess) {
-      std::cerr << "CUDA分配失败: " << cudaGetErrorString(err) << std::endl;
-      return nullptr;
+      std::cerr << "CudaMemoryPool: CUDA allocation failed for size "
+                << aligned_size << " (" << size
+                << " requested): " << cudaGetErrorString(err) << std::endl;
+      // 可以尝试释放一些缓存来腾出空间
+      // trim_internal(aligned_size); // 尝试释放一些内存再试一次？(需要实现
+      // trim_internal) err = cudaMalloc(&ptr, aligned_size); // 再次尝试分配 if
+      // (err != cudaSuccess) return nullptr; // 如果仍然失败则返回
+      return nullptr;  // 直接返回失败
     }
 
-    // 记录此次分配
-    direct_allocations_.insert(ptr);
+    // 记录此次新分配及其对齐后的大小
+    active_allocations_[ptr] = aligned_size;
     return ptr;
   }
 
+  // 释放内存回池
   void free(void* ptr) {
     if (!ptr) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 查找此指针是否是我们之前分配的
-    auto it = direct_allocations_.find(ptr);
-    if (it == direct_allocations_.end()) {
-      // 不是我们分配的内存，忽略
+    // 查找此指针是否在活跃分配中
+    auto it = active_allocations_.find(ptr);
+    if (it == active_allocations_.end()) {
+      // 尝试释放一个不由该池管理的指针，这通常是一个错误
+      // 选择忽略、打印警告或抛出异常
+      std::cerr << "Warning: Attempting to free pointer not managed by "
+                   "CudaMemoryPool."
+                << std::endl;
       return;
     }
 
-    // 获取分配的大小（通过查询CUDA）
-    size_t size = 0;
-    cudaError_t err = cudaMemGetInfo(nullptr, &size);
-    if (err != cudaSuccess) {
-      // 如果无法获取大小信息，直接释放
-      cudaFree(ptr);
-      direct_allocations_.erase(it);
-      return;
-    }
+    // 获取记录的对齐后的大小
+    size_t aligned_size = it->second;
 
-    // 将内存块移到空闲列表
-    size_t aligned_size = (size + 255) & ~255;
+    // 将内存块移到对应大小的空闲列表
+    // 注意：这里可能需要检查 free_blocks_[aligned_size] 是否存在
+    // 但由于 map 会自动创建，所以直接 push_back 也可以
     free_blocks_[aligned_size].push_back(ptr);
-    direct_allocations_.erase(it);
+
+    // 从活跃分配映射中移除
+    active_allocations_.erase(it);
   }
 
-  // 手动释放特定大小类别的缓存块
+  // 手动释放特定大小类别或所有缓存块
   void trim(size_t size = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
+    trim_internal(size);
+  }
 
+  // 释放超过指定数量的缓存块（每个大小类别）
+  void trim_threshold(size_t max_blocks_per_size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    trim_threshold_internal(max_blocks_per_size);
+  }
+
+  // 获取池统计信息
+  struct PoolStats {
+    size_t total_cached_blocks = 0;  // 空闲列表中总块数
+    size_t total_cached_bytes = 0;   // 空闲列表中总字节数
+    size_t active_allocations = 0;   // 当前活跃（未释放回池）的块数
+    size_t active_bytes = 0;         // 当前活跃的总字节数
+    size_t size_categories = 0;      // 空闲列表中有多少种不同的大小类别
+  };
+
+  PoolStats getStats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    PoolStats stats;
+    stats.size_categories = free_blocks_.size();
+    stats.active_allocations = active_allocations_.size();
+
+    for (const auto& [size, blocks] : free_blocks_) {
+      stats.total_cached_blocks += blocks.size();
+      stats.total_cached_bytes += size * blocks.size();
+    }
+
+    stats.active_bytes = std::accumulate(
+        active_allocations_.begin(), active_allocations_.end(), 0ULL,
+        [](size_t sum, const auto& pair) { return sum + pair.second; });
+
+    return stats;
+  }
+
+ private:
+  // 内部实现的 trim 函数，避免重复加锁
+  void trim_internal(size_t size = 0) {
     if (size == 0) {
       // 释放所有缓存块
       for (auto& [block_size, blocks] : free_blocks_) {
         for (void* ptr : blocks) {
           cudaFree(ptr);
         }
-        blocks.clear();
+        // blocks.clear(); // 清空 vector (可选, map迭代器会失效)
       }
+      free_blocks_.clear();  // 清空整个 map
     } else {
       // 释放特定大小的缓存块
       size_t aligned_size = (size + 255) & ~255;
@@ -728,67 +798,59 @@ class CudaMemoryPool {
         for (void* ptr : it->second) {
           cudaFree(ptr);
         }
-        it->second.clear();
+        free_blocks_.erase(it);  // 从 map 中移除该类别
       }
     }
   }
 
-  // 释放超过指定数量的缓存块
-  void trim_threshold(size_t max_blocks_per_size) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
+  // 内部实现的 trim_threshold 函数
+  void trim_threshold_internal(size_t max_blocks_per_size) {
+    std::vector<size_t> keys_to_erase;  // 如果需要删除整个类别
     for (auto& [size, blocks] : free_blocks_) {
       if (blocks.size() > max_blocks_per_size) {
-        // 释放超过阈值的块
+        // 释放超过阈值的块 (从尾部开始释放)
         size_t to_release = blocks.size() - max_blocks_per_size;
-        for (size_t i = 0; i < to_release; i++) {
-          cudaFree(blocks.back());
+        for (size_t i = 0; i < to_release; ++i) {
+          cudaError_t err = cudaFree(blocks.back());
+          if (err != cudaSuccess) {
+            std::cerr << "CudaMemoryPool: cudaFree failed during "
+                         "trim_threshold for size "
+                      << size << ": " << cudaGetErrorString(err) << std::endl;
+          }
           blocks.pop_back();
         }
       }
+      // 如果修剪后该类别空了，可以考虑删除 map 条目
+      // if (blocks.empty()) { keys_to_erase.push_back(size); }
     }
+    // for(size_t key : keys_to_erase) { free_blocks_.erase(key); }
   }
 
-  // 获取池统计信息
-  struct PoolStats {
-    size_t total_cached_blocks;
-    size_t total_cached_bytes;
-    size_t active_allocations;
-    size_t size_categories;
-  };
-
-  PoolStats getStats() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    size_t total_blocks = 0;
-    size_t total_bytes = 0;
-
-    for (const auto& [size, blocks] : free_blocks_) {
-      total_blocks += blocks.size();
-      total_bytes += size * blocks.size();
-    }
-
-    return {.total_cached_blocks = total_blocks,
-            .total_cached_bytes = total_bytes,
-            .active_allocations = direct_allocations_.size(),
-            .size_categories = free_blocks_.size()};
-  }
-
- private:
-  // 核心数据结构：按大小组织的空闲块向量
+  // 核心数据结构：按对齐后的大小组织的空闲块向量
   std::unordered_map<size_t, std::vector<void*>> free_blocks_;
 
-  // 当前活跃分配的集合
-  std::unordered_set<void*> direct_allocations_;
+  // 当前活跃分配的映射：指针 -> 对齐后的大小
+  std::unordered_map<void*, size_t> active_allocations_;
 
   // 同步锁
   mutable std::mutex mutex_;
 };
 
+// 提供一个全局单例访问点
 class GlobalCudaMemoryPool {
  public:
   static CudaMemoryPool& instance() {
-    static CudaMemoryPool pool;
-    return pool;
+    // 使用静态局部变量确保线程安全的单例初始化 (C++11 起)
+    static CudaMemoryPool pool_instance;
+    return pool_instance;
   }
+
+ private:
+  // 私有构造/析构/拷贝/赋值防止外部创建实例
+  GlobalCudaMemoryPool() = default;
+  ~GlobalCudaMemoryPool() = default;
+  GlobalCudaMemoryPool(const GlobalCudaMemoryPool&) = delete;
+  GlobalCudaMemoryPool& operator=(const GlobalCudaMemoryPool&) = delete;
+  GlobalCudaMemoryPool(GlobalCudaMemoryPool&&) = delete;
+  GlobalCudaMemoryPool& operator=(GlobalCudaMemoryPool&&) = delete;
 };
