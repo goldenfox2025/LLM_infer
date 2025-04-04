@@ -129,7 +129,7 @@ def main():
     parser.add_argument('--model_path', type=str, default="../models/Qwen2.5-1.5B-Instruct", help='模型路径')
     parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
-    parser.add_argument('--max_length', type=int, default=200, help='生成文本的最大长度')
+    parser.add_argument('--max_length', type=int, default=200+23, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=0.7, help='生成温度')
     parser.add_argument('--top_p', type=float, default=0.9, help='top-p 采样阈值')
     parser.add_argument('--top_k', type=int, default=40, help='top-k 采样阈值')
@@ -244,7 +244,6 @@ def main():
         start_time = None
         last_token_time = None
         total_tokens = 0
-        token_speed = 0.0
 
         while True:
             token_id = q.get()
@@ -253,10 +252,8 @@ def main():
             current_time = time.monotonic()
             if start_time is None:
                 start_time = current_time
-            speed = 0.0
             if last_token_time is not None:
                 delta = current_time - last_token_time
-                speed = 1.0 / delta if delta > 0 else 0.0
             last_token_time = current_time
 
             accumulated_tokens.append(token_id)
@@ -266,16 +263,13 @@ def main():
             diff = new_text[len(last_output):]
             last_output = new_text
 
-            total_time = current_time - start_time
-            avg_speed = total_tokens / total_time if total_time > 0 else 0.0
-
             if diff:
                 print(diff, end="", flush=True)
-                # 此处可扩展其他处理，如统计每个 token 的速度（本示例仅打印最终信息）
-                token_speed = speed  # 仅记录最新一个 token 的瞬时速度
+
+        total_time = current_time - start_time if start_time is not None else 0.0
+        avg_speed = total_tokens / total_time if total_time > 0 else 0.0
 
         print("\n")
-        print(f"Token Speed (last token): {token_speed:.2f} tokens/sec")
         print(f"Total Time: {total_time:.2f} seconds")
         print(f"Total Tokens: {total_tokens}")
         print(f"Average Speed: {avg_speed:.2f} tokens/sec\n")
