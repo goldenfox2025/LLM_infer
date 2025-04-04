@@ -118,6 +118,120 @@ cutlass::Status run_cutlass_gemm_raw_templated(
   return status;
 }
 
+// --- FP32 Specialization ---
+// We specialize for ElementA=float, ElementB=float, ElementOutput=float
+// We keep Layouts, Shapes, Arch, etc., templated for flexibility within FP32
+// case.
+template <typename LayoutA, typename LayoutB, typename LayoutOutput,
+          typename MMAOp,   // Allow specifying MMAOp (though FP32 might ignore
+                            // TensorCore specifics)
+          typename SmArch,  // Allow specifying Arch
+          typename ShapeMMAThreadBlock,  // Allow specifying Threadblock shape
+          typename ShapeMMAWarp,         // Allow specifying Warp shape
+          typename ShapeMMAOp,  // Allow specifying MMA Op shape (e.g., with
+                                // K=16 if desired)
+          typename SwizzleThreadBlock, int NumStages>
+cutlass::Status run_cutlass_gemm_raw_templated<
+    /*ElementA=*/float, /*ElementB=*/float, /*ElementOutput=*/float, LayoutA,
+    LayoutB, LayoutOutput,
+    /*ElementAccumulator=*/float,      // Fixed to float for FP32 accumulation
+    /*ElementComputeEpilogue=*/float,  // Fixed to float for FP32 epilogue
+                                       // computation
+    MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp, ShapeMMAOp,
+    SwizzleThreadBlock, NumStages>(
+    int m, int n, int k,
+    float const *d_a,     // Use float directly
+    float const *d_b,     // Use float directly
+    float const *d_bias,  // Use float directly (can be nullptr if not used)
+    float *d_d,           // Use float directly
+    cudaStream_t stream,
+    float alpha,  // Default alpha for float is 1.0f
+    int split_k_slices) {
+  // Use float types directly
+  using ElementA_t = float;
+  using ElementB_t = float;
+  using ElementOutput_t = float;
+  using ElementAccumulator_t = float;
+  using ElementComputeEpilogue_t = float;
+
+  // Define epilogue operation for FP32 output.
+  // Vector width = 128 / sizeof_bits<float>::value = 128 / 32 = 4 elements.
+  // This corresponds to 4 * sizeof(float) = 16 bytes alignment requirement for
+  // d_d and d_bias.
+  using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
+      ElementOutput_t, 4,  // Explicitly 4 elements per vector access (16 bytes)
+      ElementAccumulator_t, ElementComputeEpilogue_t,
+      cutlass::epilogue::thread::ScaleType::NoBetaScaling>;  // Assuming bias is
+                                                             // added (alpha*AB
+                                                             // + bias)
+
+  // Define the GEMM kernel using the FP32 types and specified parameters
+  using Gemm = cutlass::gemm::device::Gemm<
+      ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
+      ElementAccumulator_t, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp,
+      ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages, 16, 16
+      // Note: The original template had extra 8, 8 params here, likely related
+      // to alignment assumptions within DefaultMma. Let's omit them unless the
+      // specific cutlass::gemm::device::Gemm template expects them. Check your
+      // CUTLASS version's definition if needed. If they were alignment hints,
+      // they might be relevant. Example: DefaultMma might take alignment args:
+      // using DefaultMma = cutlass::gemm::threadblock::DefaultMma<... AlignA,
+      // AlignB ...> Gemm might inherit these or take separate alignment args.
+      >;
+
+  // Construct the problem size
+  cutlass::gemm::GemmCoord problem_size(m, n, k);
+
+  // Define TensorRefs for inputs and outputs using float*
+  // Use the layout objects passed as template arguments to determine strides.
+  // The original code used Layout(k) and Layout(n), which implies specific
+  // leading dimensions.
+  cutlass::TensorRef<ElementA_t, LayoutA> ref_A(const_cast<ElementA_t *>(d_a),
+                                                LayoutA(k));
+  cutlass::TensorRef<ElementB_t, LayoutB> ref_B(const_cast<ElementB_t *>(d_b),
+                                                LayoutB(n));
+  cutlass::TensorRef<ElementOutput_t, LayoutOutput> ref_D(d_d, LayoutOutput(n));
+
+  // Construct arguments for the GEMM kernel
+  // Handle bias: pass the pointer and a stride of 0 (common for vector bias)
+  // If d_bias is nullptr, the epilogue should handle it gracefully (often
+  // requires a different epilogue type or checks inside). The LinearCombination
+  // epilogue typically expects a valid pointer if used. Let's assume d_bias is
+  // valid if provided, matching the original structure.
+  typename Gemm::Arguments arguments{
+      problem_size,
+      ref_A,
+      ref_B,
+      {d_bias, 0},  // Pass bias pointer and stride (0 for vector bias)
+      ref_D,
+      {alpha},  // Epilogue parameters (alpha, beta=0 implicitly
+                // by NoBetaScaling)
+      split_k_slices};
+
+  // --- Rest of the execution logic is the same ---
+
+  // Query workspace memory size and allocate
+  size_t workspace_size = Gemm::get_workspace_size(arguments);
+  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+  // Instantiate the GEMM operation object
+  Gemm gemm_op;
+
+  // Check if the problem can be implemented by this kernel configuration
+  cutlass::Status status = gemm_op.can_implement(arguments);
+  CUTLASS_CHECK(status);  // Use your error checking macro
+
+  // Initialize the GEMM operation
+  // Note: Some CUTLASS versions might require stream in initialize()
+  status = gemm_op.initialize(arguments, workspace.get(), stream);
+  CUTLASS_CHECK(status);
+
+  // Run the GEMM kernel
+  status = gemm_op(stream);
+  CUTLASS_CHECK(status);
+
+  return status;  // Return success
+}
 // --------------------------------------------------
 // --------------------------------------------------
 template <typename T>
