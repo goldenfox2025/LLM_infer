@@ -64,37 +64,38 @@ std::unique_ptr<infer_base> g_engine;
 Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
   try {
     py::object torch_module = py::module::import("torch");
-    
+
     // 确保张量在CPU上，便于数据访问
     py::object cpu_tensor = tensor.attr("detach")().attr("cpu")();
-    
+
     // 获取形状
     py::tuple shape_tuple = cpu_tensor.attr("shape");
     std::vector<size_t> shape;
     for (size_t i = 0; i < py::len(shape_tuple); ++i) {
       shape.push_back(shape_tuple[i].cast<size_t>());
     }
-    
+
     // 计算元素总数
     size_t numel = 1;
     for (auto dim : shape) {
       numel *= dim;
     }
-    
+
     // 预分配数据向量
     std::vector<__nv_bfloat16> data;
     data.reserve(numel);
-    
+
     // 使用PyTorch的低级接口直接获取原始数据
-    if (py::hasattr(cpu_tensor, "element_size") && py::hasattr(cpu_tensor, "data_ptr")) {
+    if (py::hasattr(cpu_tensor, "element_size") &&
+        py::hasattr(cpu_tensor, "data_ptr")) {
       size_t element_size = cpu_tensor.attr("element_size")().cast<size_t>();
-      
+
       // 确认是否为bfloat16类型（2字节）
       if (element_size == 2) {
         // 获取数据指针，这会返回一个整数，表示内存地址
         uintptr_t data_ptr = cpu_tensor.attr("data_ptr")().cast<uintptr_t>();
         const uint16_t* ptr = reinterpret_cast<const uint16_t*>(data_ptr);
-        
+
         // 每个元素直接拷贝二进制数据
         for (size_t i = 0; i < numel; ++i) {
           __nv_bfloat16 value;
@@ -106,26 +107,32 @@ Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
         }
       } else {
         // 如果不是2字节元素，先转换为float再处理
-        std::cerr << "Warning: Input tensor is not bfloat16, converting through float" << std::endl;
-        
+        std::cerr
+            << "Warning: Input tensor is not bfloat16, converting through float"
+            << std::endl;
+
         // 转为float32
-        py::object float_tensor = cpu_tensor.attr("to")(torch_module.attr("float"));
-        
+        py::object float_tensor =
+            cpu_tensor.attr("to")(torch_module.attr("float"));
+
         // 转为numpy再获取数据
-        py::array_t<float> np_array = float_tensor.attr("numpy")().cast<py::array_t<float>>();
+        py::array_t<float> np_array =
+            float_tensor.attr("numpy")().cast<py::array_t<float>>();
         py::buffer_info buffer = np_array.request();
         float* float_ptr = static_cast<float*>(buffer.ptr);
-        
+
         for (size_t i = 0; i < numel; ++i) {
           data.push_back(__nv_bfloat16(float_ptr[i]));
         }
       }
     } else {
       // 备选方案：使用循环直接访问每个元素
-      std::cerr << "Warning: Using fallback element-wise access for conversion" << std::endl;
-      
+      std::cerr << "Warning: Using fallback element-wise access for conversion"
+                << std::endl;
+
       // 转为float32
-      py::object float_tensor = cpu_tensor.attr("to")(torch_module.attr("float"));
+      py::object float_tensor =
+          cpu_tensor.attr("to")(torch_module.attr("float"));
       for (size_t i = 0; i < numel; ++i) {
         // 使用索引操作访问每个元素
         py::object item = float_tensor.attr("flatten")()[py::int_(i)];
@@ -133,7 +140,7 @@ Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
         data.push_back(__nv_bfloat16(value));
       }
     }
-    
+
     return Tensor<__nv_bfloat16>(std::move(data), shape);
   } catch (const std::exception& e) {
     std::cerr << "Exception in convert_bf16_tensor: " << e.what() << std::endl;
@@ -251,8 +258,7 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
       {"model.norm.weight", "norm.weight"},
       {"lm_head.weight", "lm_head"},
       {"transformer.wte.weight", "token_embeddings.weight"},
-      {"transformer.ln_f.weight", "norm.weight"}
-  };
+      {"transformer.ln_f.weight", "norm.weight"}};
   for (const auto& [src_key, dst_key] : qwen_key_mapping) {
     if (weights.contains(src_key)) {
       std::cout << "Processing Qwen FP32 key: " << src_key << " -> " << dst_key
@@ -277,7 +283,8 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_key_mapping = {
           {"input_layernorm.weight", "input_layernorm.weight"},
-          {"post_attention_layernorm.weight", "post_attention_layernorm.weight"},
+          {"post_attention_layernorm.weight",
+           "post_attention_layernorm.weight"},
           {"self_attn.q_proj.weight", "self_attn.q_proj.weight"},
           {"self_attn.k_proj.weight", "self_attn.k_proj.weight"},
           {"self_attn.v_proj.weight", "self_attn.v_proj.weight"},
@@ -365,7 +372,7 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
       for (auto item : weights) {
         std::string key = py::str(item.first).cast<std::string>();
         std::cout << "Available key: " << key << std::endl;
-        if (key.find("embed") != std::string::npos || 
+        if (key.find("embed") != std::string::npos ||
             key.find("wte") != std::string::npos) {
           std::cout << "Found potential embedding key: " << key << std::endl;
           py::array_t<float> np_array = item.second.cast<py::array_t<float>>();
@@ -374,15 +381,17 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
             shape.push_back(np_array.shape(i));
           }
           std::vector<float> data(np_array.data(),
-                                np_array.data() + np_array.size());
-          cpp_weights.emplace("token_embeddings.weight", 
-                             Tensor<float>(std::move(data), shape));
+                                  np_array.data() + np_array.size());
+          cpp_weights.emplace("token_embeddings.weight",
+                              Tensor<float>(std::move(data), shape));
           try {
-            Tensor<float> lm_head = cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
+            Tensor<float> lm_head =
+                cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
             cpp_weights.emplace("lm_head", std::move(lm_head));
             break;
           } catch (const std::exception& e) {
-            std::cerr << "Error creating lm_head from found key: " << e.what() << std::endl;
+            std::cerr << "Error creating lm_head from found key: " << e.what()
+                      << std::endl;
           }
         }
       }
@@ -420,7 +429,8 @@ process_qwen_weights_bf16(const py::dict& weights) {
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_key_mapping = {
           {"input_layernorm.weight", "input_layernorm.weight"},
-          {"post_attention_layernorm.weight", "post_attention_layernorm.weight"},
+          {"post_attention_layernorm.weight",
+           "post_attention_layernorm.weight"},
           {"self_attn.q_proj.weight", "self_attn.q_proj.weight"},
           {"self_attn.k_proj.weight", "self_attn.k_proj.weight"},
           {"self_attn.v_proj.weight", "self_attn.v_proj.weight"},

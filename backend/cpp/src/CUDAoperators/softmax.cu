@@ -285,7 +285,7 @@ void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
         "softmax: Unsupported tensor dimension or dim value");
   }
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 template void softmax<nvbf16>(Tensor<nvbf16>*, const Tensor<nvbf16>*, int, bool,

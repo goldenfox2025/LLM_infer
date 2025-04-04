@@ -79,7 +79,7 @@ void multiply(Tensor<T> *output, const Tensor<T> *A, const Tensor<T> *B) {
   multiply_kernel_v3<T><<<blocks, threads>>>(A->data_ptr(), B->data_ptr(),
                                              output->data_ptr(), total);
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 template void multiply<float>(Tensor<float> *, const Tensor<float> *,
                               const Tensor<float> *);

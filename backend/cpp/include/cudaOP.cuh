@@ -5,6 +5,9 @@
 
 #include <stdexcept>
 #include <vector>
+
+#include "inference.hpp"
+#include "tensor.hpp"
 #define CUTLASS_CHECK(status)                                             \
   {                                                                       \
     cutlass::Status error = status;                                       \
@@ -15,8 +18,6 @@
     }                                                                     \
   }
 
-#include "inference.hpp"
-#include "tensor.hpp"
 namespace cuda_OP {
 
 template <typename T, int N>

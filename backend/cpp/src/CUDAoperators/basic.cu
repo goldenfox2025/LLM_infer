@@ -239,7 +239,7 @@ void rms_norm(Tensor<T> *output, const Tensor<T> *input,
   // --- 错误检查和同步 ---
   checkCudaError(cudaGetLastError());
   // 对于性能分析或确保后续 CPU 操作能看到结果，需要同步
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 // Helper function (optional, if you want dynamic adjustment based on d)
@@ -362,14 +362,6 @@ __global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor,
     // Calculate frequencies using expf
     float freq0 = expf(exp_arg0);
     float freq1 = expf(exp_arg1);
-
-
-
-
-
-
-
-    
 
     float val0 = (static_cast<float>(seq_idx) + offset) * freq0;
     float val1 = (static_cast<float>(seq_idx) + offset) * freq1;
@@ -534,9 +526,9 @@ void rope(Tensor<T> *x, size_t offset, float theta, cudaStream_t stream) {
               << cudaGetErrorString(err) << std::endl;
     throw std::runtime_error("CUDA rope kernel launch failed");
   }
-  // Optional synchronization for debugging or if stream is null
+
   if (stream == nullptr) {
-    err = cudaDeviceSynchronize();
+    // err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
       std::cerr << "CUDA synchronization error after rope: "
                 << cudaGetErrorString(err) << std::endl;
@@ -569,7 +561,7 @@ void silu(Tensor<T> *output, const Tensor<T> *input) {
   int blocks = (total + threads - 1) / threads;
   silu_kernel<<<blocks, threads>>>(output->data_ptr(), total);
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 // --------------------------------------------------
@@ -630,7 +622,7 @@ void compute_attention_scores(const Tensor<T> &Q, const Tensor<T> &K,
       Q.data_ptr(), n_q_h, dqkv, K.data_ptr(), cache_length,
       att_scores.data_ptr(), n_kv_h, is_3d_q);
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 // --------------------------------------------------
@@ -676,7 +668,7 @@ void compute_att_output(const Tensor<T> &att_probs, const Tensor<T> &V,
       static_cast<int>(cache_length), static_cast<int>(dqkv), V.data_ptr(),
       att_output.data_ptr(), static_cast<int>(n_kv_h));
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 // --------------------------------------------------
@@ -735,7 +727,7 @@ void compute_attention_scores_prefill(const Tensor<T> &Q, const Tensor<T> &K,
       static_cast<int>(dqkv), static_cast<int>(n_q_h),
       static_cast<int>(n_kv_h));
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 // --------------------------------------------------
@@ -797,7 +789,7 @@ void compute_att_output_prefill(const Tensor<T> &att_probs, const Tensor<T> &V,
       static_cast<int>(dqkv), static_cast<int>(n_kv_h),
       static_cast<int>(n_q_h_int));
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 __global__ void init_curand_state_kernel(curandState *states,
@@ -812,7 +804,7 @@ void init_curand(curandState *d_states, unsigned long long seed, int offset) {
   int threads = 1;
   init_curand_state_kernel<<<blocks, threads>>>(d_states, seed, offset);
   checkCudaError(cudaGetLastError());
-  checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize());
 }
 
 template void rope<float>(Tensor<float> *, size_t, float, cudaStream_t);

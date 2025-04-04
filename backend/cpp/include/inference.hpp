@@ -5,6 +5,9 @@
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "kvcache_base.hpp"
