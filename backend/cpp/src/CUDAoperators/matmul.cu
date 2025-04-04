@@ -169,15 +169,7 @@ cutlass::Status run_cutlass_gemm_raw_templated<
   using Gemm = cutlass::gemm::device::Gemm<
       ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
       ElementAccumulator_t, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp,
-      ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages, 16, 16
-      // Note: The original template had extra 8, 8 params here, likely related
-      // to alignment assumptions within DefaultMma. Let's omit them unless the
-      // specific cutlass::gemm::device::Gemm template expects them. Check your
-      // CUTLASS version's definition if needed. If they were alignment hints,
-      // they might be relevant. Example: DefaultMma might take alignment args:
-      // using DefaultMma = cutlass::gemm::threadblock::DefaultMma<... AlignA,
-      // AlignB ...> Gemm might inherit these or take separate alignment args.
-      >;
+      ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages, 32, 32>;
 
   // Construct the problem size
   cutlass::gemm::GemmCoord problem_size(m, n, k);
@@ -488,9 +480,12 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
         T,                             // ElementOutput
         cutlass::layout::RowMajor,     // LayoutA
         cutlass::layout::ColumnMajor,  // LayoutB
-        cutlass::layout::RowMajor      // LayoutOutput
-        >(M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(),
-          stream);
+        cutlass::layout::RowMajor,     // LayoutOutput
+        float,                         // ElementAccumulator
+        float,                         // ElementComputeEpilogue
+        cutlass::arch::OpClassTensorOp>(M, N, K, A.data_ptr(), B.data_ptr(),
+                                        bias->data_ptr(), C->data_ptr(),
+                                        stream);
 
   } else if (use_ == 1) {
     static cublasHandle_t handle = nullptr;
