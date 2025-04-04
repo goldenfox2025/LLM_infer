@@ -313,7 +313,7 @@ def main():
     print("Running generation test (streaming)...")
     generated_ids = model.generate(
         **model_inputs,
-        max_new_tokens=2048,
+        max_new_tokens=177,
         temperature=1,  # 温度参数，值越低生成越确定；值越高生成更多样化
         top_k=40,         # top-k 策略，只从概率最高的 40 个 token 中采样
         streamer=streamer,
@@ -326,8 +326,10 @@ def main():
         output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
     ]
 
-    # 计算生成速度
+    # 计算生成速度和总token数
+    
     speed = len(generated_ids[0]) / elapsed_time
+    print(f"Token count: {len(generated_ids[0])}")
     print(f"\nSpeed: {speed:.2f} tokens/sec")
     print(f"Generation time: {elapsed_time:.2f} seconds")
 

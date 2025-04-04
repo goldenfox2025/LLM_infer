@@ -376,21 +376,22 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     const Tensor<T>* gate_bias = nullptr;
     const Tensor<T>* up_bias = nullptr;
     const Tensor<T>* down_bias = nullptr;
-    try {
-      gate_bias = &params_.at(layer_prefix + "mlp.gate_proj.bias");
-    } catch (const std::out_of_range&) {
-    }
-    try {
-      up_bias = &params_.at(layer_prefix + "mlp.up_proj.bias");
-    } catch (const std::out_of_range&) {
-    }
-    try {
-      down_bias = &params_.at(layer_prefix + "mlp.down_proj.bias");
-    } catch (const std::out_of_range&) {
-    }
+    // try {
+    //   gate_bias = &params_.at(layer_prefix + "mlp.gate_proj.bias");
+    // } catch (const std::out_of_range&) {
+    // }
+    // try {
+    //   up_bias = &params_.at(layer_prefix + "mlp.up_proj.bias");
+    // } catch (const std::out_of_range&) {
+    // }
+    // try {
+    //   down_bias = &params_.at(layer_prefix + "mlp.down_proj.bias");
+    // } catch (const std::out_of_range&) {
+    // }
 
     // SwiGLU激活: (gate_proj * silu(up_proj))
     // 预先分配输出张量
+
     Tensor<T> gate_buf({seq_len, gate_weight.sizes()[1]}, Device::CUDA);
     cuda_OP::matmul(hidden_states, gate_weight, &gate_buf, nullptr, gate_bias);
 
