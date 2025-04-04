@@ -248,10 +248,6 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
     cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
 
-    for (int j = 0; j < 3; ++j) {
-      cudaStreamSynchronize(compute_streams_[j]);
-    }
-
     // 更新KV缓存
     size_t row_size = n_kv_heads_ * head_dim_;
     // for (size_t j = 0; j < seq_len; j++) {
@@ -269,6 +265,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     //   // debugPrintTensor(k_slice, "k_slice");
     //   // debugPrintTensor(v_slice, "v_slice");
     // }
+
+    for (int j = 0; j < 3; ++j) {
+      cudaStreamSynchronize(compute_streams_[j]);
+    }
 
     for (size_t j = 0; j < seq_len; j++) {
       // 获取对应的 k 和 v slice
@@ -428,8 +428,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
   Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
   cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
-  cudaStreamSynchronize(compute_streams_[3]);
-  cudaStreamSynchronize(compute_streams_[4]);
+
   // 返回最后一个token的logits
 
   return logits;
@@ -467,7 +466,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
 
   // Token嵌入 (从embedding_table中获取token嵌入)
   cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
-
+  cudaStreamSynchronize(compute_streams_[3]);
+  cudaStreamSynchronize(compute_streams_[4]);
   // 主循环：遍历所有Transformer层
   for (size_t i = 0; i < n_layers_; i++) {
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
