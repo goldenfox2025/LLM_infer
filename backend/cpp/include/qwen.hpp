@@ -1,9 +1,9 @@
 #pragma once
 #include <cuda_bf16.h>  // For __nv_bfloat16 support
-
+#include <unordered_map>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
+
 
 #include "base_model.hpp"
 #include "cudaOP.cuh"
@@ -76,6 +76,7 @@ class QwenModel : public BaseModel {
   Device device() const override { return device_; }
 
  private:
+  cudaEvent_t eventQ, eventK, eventV;
   size_t vocab_size_;
   size_t n_layers_;
   size_t n_heads_;
