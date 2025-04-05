@@ -51,18 +51,17 @@ template <typename T>
 void rms_norm(Tensor<T>* output, const Tensor<T>* input,
               const Tensor<T>* weight, float eps);
 
-/**
- * @brief 矩阵乘法 C = AB
- * @param A 输入矩阵A [M, K]
- * @param B 输入矩阵B [K, N]（但是内存没变）
- * @param stream CUDA流
- * @param bias 可选偏置 [N]，默认为nullptr
- * @return 输出矩阵C [M, N]
- */
+template <typename T_weight>
+void decode_qkv_matmul(
+    const Tensor<T_weight>& weight,
+    const Tensor<T_weight>& qkv_decode,  // Input vector type now T_weight
+    Tensor<T_weight>* out, cudaStream_t stream = 0,
+    const Tensor<T_weight>* bias = nullptr);
+
 template <typename T>
 void matmul(const Tensor<T>& A, const Tensor<T>& B, Tensor<T>* C,
             cudaStream_t stream = nullptr, const Tensor<T>* bias = nullptr,
-            int use_ = 2);
+            int use_ = 1);
 
 // rope 算子，用于位置编码
 template <typename T>

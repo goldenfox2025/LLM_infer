@@ -170,9 +170,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   // Token嵌入 (从embedding_table中获取token嵌入)
   cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
 
-  // 返回最后一个token的logits
-  cudaStreamSynchronize(compute_streams_[3]);
-  cudaStreamSynchronize(compute_streams_[4]);
+  // cudaStreamSynchronize(compute_streams_[3]);
+  // cudaStreamSynchronize(compute_streams_[4]);
   // 主循环：遍历所有Transformer层
   for (size_t i = 0; i < n_layers_; i++) {
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
@@ -224,14 +223,37 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // 预先分配输出张量并计算Q, K, V投影
     // Q的输出shape为 [seq_len, n_heads_ * head_dim_]
     Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wq, &q_buf, compute_streams_[0], q_bias);
+
+    // cuda_OP::matmul(hidden_states, wq, &q_buf, compute_streams_[0], q_bias);
+
+    cuda_OP::decode_qkv_matmul(
+        wq,                   // 参数1 (const Tensor<float>&) - OK
+        hidden_states,        // 参数2 (const Tensor<float>&) - OK
+        &q_buf,               // 参数3 (Tensor<float>*) - 传递地址
+        compute_streams_[0],  // 参数4 (cudaStream_t) - OK
+        q_bias);              // 参数5 (const Tensor<float>*) - 直接传递指针s
 
     // K、V的输出shape为 [seq_len, n_kv_heads_ * head_dim_]
     Tensor<T> k_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
+    // cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
+
+    cuda_OP::decode_qkv_matmul(
+        wk,                   // 参数1 (const Tensor<float>&) - OK
+        hidden_states,        // 参数2 (const Tensor<float>&) - OK
+        &k_buf,               // 参数3 (Tensor<float>*) - 传递地址
+        compute_streams_[1],  // 参数4 (cudaStream_t) - OK
+        k_bias);              // 参数5 (const Tensor<float>*) - 直接传递指针s
 
     Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-    cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
+    // cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
+
+    // 假设 v_bias 是 const Tensor<float>* 类型
+    cuda_OP::decode_qkv_matmul(
+        wv,                   // 参数1 (const Tensor<float>&) - OK
+        hidden_states,        // 参数2 (const Tensor<float>&) - OK
+        &v_buf,               // 参数3 (Tensor<float>*) - 传递地址
+        compute_streams_[2],  // 参数4 (cudaStream_t) - OK
+        v_bias);              // 参数5 (const Tensor<float>*) - 直接传递指针s
 
     // // 同步CUDA流并销毁
     // for (int j = 0; j < 3; j++) {
