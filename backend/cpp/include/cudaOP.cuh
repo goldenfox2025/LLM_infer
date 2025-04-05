@@ -53,9 +53,9 @@ void rms_norm(Tensor<T>* output, const Tensor<T>* input,
 
 template <typename T_weight>
 void decode_qkv_matmul(
-    const Tensor<T_weight>& weight,
-    const Tensor<T_weight>& qkv_decode,  // Input vector type now T_weight
-    Tensor<T_weight>* out, cudaStream_t stream = 0,
+    const Tensor<T_weight>& qkv_decode,
+    const Tensor<T_weight>& weight,  // Input vector type now T_weight
+    Tensor<T_weight>* out, cudaStream_t stream = nullptr,
     const Tensor<T_weight>* bias = nullptr);
 
 template <typename T>

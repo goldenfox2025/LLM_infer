@@ -262,10 +262,9 @@ matmul_vector_kernel_optimized_fused_bias(  // Renamed for clarity
 // C++ Wrapper Function Definition (Using Fused Kernel by Default)
 // ----------------------------------------------------------------
 template <typename T_weight>
-void decode_qkv_matmul(const Tensor<T_weight>& weight,
-                       const Tensor<T_weight>& qkv_decode,
-                       Tensor<T_weight>* out, cudaStream_t stream,
-                       const Tensor<T_weight>* bias) {
+void decode_qkv_matmul(const Tensor<T_weight>& qkv_decode,
+                       const Tensor<T_weight>& weight, Tensor<T_weight>* out,
+                       cudaStream_t stream, const Tensor<T_weight>* bias) {
   // --- 1. Type and Shape Checks ---
   static_assert(std::is_same<T_weight, nv_bfloat16>::value ||
                     std::is_same<T_weight, float>::value,
@@ -276,17 +275,6 @@ void decode_qkv_matmul(const Tensor<T_weight>& weight,
   const std::vector<size_t>& y_shape = out->sizes();
 
   // Basic dimension count check and extract P, N
-  if (!(M_shape.size() == 2 &&
-        (v_shape.size() == 1 ||
-         (v_shape.size() == 2 && v_shape[0] == 1 && v_shape[1] > 0) ||
-         (v_shape.size() == 2 && v_shape[1] == 1 &&
-          v_shape[0] > 0)) &&  // Allow [N] or [1,N] or [N,1]
-        (y_shape.size() == 1 ||
-         (y_shape.size() == 2 && y_shape[0] == 1 && y_shape[1] > 0) ||
-         (y_shape.size() == 2 && y_shape[1] == 1 &&
-          y_shape[0] > 0)))) {  // Allow [P] or [1,P] or [P,1]
-    throw std::runtime_error("decode_qkv_matmul: Invalid tensor dimensions.");
-  }
 
   // Assume weight is [P, N] row-major
   size_t P = M_shape[1];
@@ -309,9 +297,14 @@ void decode_qkv_matmul(const Tensor<T_weight>& weight,
     P_check_y = (y_shape[0] == 1)
                     ? y_shape[1]
                     : y_shape[0];  // If [1,P] take P, if [P,1] take P
+  else if (y_shape.size() == 3)
+    P_check_y = y_shape[1] * y_shape[2];  // If [B,P,H] take P*H
 
-  if (N != N_check_v)
+  if (N != N_check_v) {
+    std::cout << "N: " << N << " N_check_v: " << N_check_v << std::endl;
+
     throw std::runtime_error("decode_qkv_matmul: Inner dimension N mismatch.");
+  }
   if (P != P_check_y)
     throw std::runtime_error("decode_qkv_matmul: Output dimension P mismatch.");
   if (N == 0 || P == 0)
@@ -402,13 +395,13 @@ void decode_qkv_matmul(const Tensor<T_weight>& weight,
 }
 
 // --- Template Instantiations (Define in .cu file) ---
-template void decode_qkv_matmul<float>(const Tensor<float>& weight,
-                                       const Tensor<float>& qkv_decode,
+template void decode_qkv_matmul<float>(const Tensor<float>& qkv_decode,
+                                       const Tensor<float>& weight,
                                        Tensor<float>* out, cudaStream_t stream,
                                        const Tensor<float>* bias);
 
 template void decode_qkv_matmul<nv_bfloat16>(
-    const Tensor<nv_bfloat16>& weight, const Tensor<nv_bfloat16>& qkv_decode,
+    const Tensor<nv_bfloat16>& qkv_decode, const Tensor<nv_bfloat16>& weight,
     Tensor<nv_bfloat16>* out, cudaStream_t stream,
     const Tensor<nv_bfloat16>* bias);
 
