@@ -4,8 +4,8 @@ set(CMAKE_CUDA_ARCHITECTURES 89)
 
 set(CMAKE_CXX_STANDARD 17)
 set(PYBIND11_PYTHON_VERSION 3.12)
-set(CMAKE_CXX_FLAGS_DEBUG "-g") # 为 Debug 构建类型添加 -g
-set(CMAKE_BUILD_TYPE Debug) # 默认或显式设置为 Debug 类型以启用 -g
+# set(CMAKE_CXX_FLAGS_DEBUG "-g") # 为 Debug 构建类型添加 -g
+# set(CMAKE_BUILD_TYPE Debug) # 默认或显式设置为 Debug 类型以启用 -g
 # 设置 pybind11 的 cmake 配置路径
 set(pybind11_DIR "/root/miniconda3/lib/python3.12/site-packages/pybind11/share/cmake/pybind11")
 find_package(pybind11 REQUIRED)

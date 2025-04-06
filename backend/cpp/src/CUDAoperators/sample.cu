@@ -307,8 +307,8 @@ uint32_t sample(Tensor<T>&& logits, float temperature,
 
   // --- Copy result back ---
   uint32_t h_result = 0;
-  CUDA_CHECK(cudaMemcpy(&h_result, d_sampled_index, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpyAsync(&h_result, d_sampled_index, sizeof(uint32_t),
+                             cudaMemcpyDeviceToHost, stream));
 
   // --- Free Memory ---
   pool.free(d_scaled_logits);

@@ -206,10 +206,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       v_bias = &params_.at(layer_prefix + "self_attn.v_proj.bias");
     } catch (const std::out_of_range&) {
     }
-    try {
-      o_bias = &params_.at(layer_prefix + "self_attn.o_proj.bias");
-    } catch (const std::out_of_range&) {
-    }
+    // try {
+    //   o_bias = &params_.at(layer_prefix + "self_attn.o_proj.bias");
+    // } catch (const std::out_of_range&) {
+    // }
 
     // // 创建CUDA流以并行计算Q, K, V
     // cudaStream_t streams[3];
@@ -361,6 +361,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     for (int j = 0; j < 3; ++j) {
       cudaStreamSynchronize(compute_streams_[j]);
     }
+
+
+
+    
     cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads_);
 
     // Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
@@ -446,11 +450,11 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   // LM head投影到词汇表大小
   auto& lm_head_weight = params_.at("lm_head");
   const Tensor<T>* lm_head_bias = nullptr;
-  try {
-    lm_head_bias = &params_.at("lm_head_bias");
-    std::cout << "Found lm_head_bias" << std::endl;
-  } catch (const std::out_of_range&) {
-  }
+  // try {
+  //   lm_head_bias = &params_.at("lm_head_bias");
+  //   std::cout << "Found lm_head_bias" << std::endl;
+  // } catch (const std::out_of_range&) {
+  // }
 
   Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
   cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
