@@ -54,7 +54,7 @@ class ThreadSafeQueue {
 // 定义用于结果队列的类型
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
 using GenerationResult =
-    std::variant<uint32_t*, Signal, std::exception_ptr>;  // 定义类型别名
+    std::variant<uint32_t, Signal, std::exception_ptr>;  // 定义类型别名
 namespace py = pybind11;
 template <typename T>
 void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
@@ -289,15 +289,15 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
 }
 
 template <typename T>
-uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
-                                                  uint32_t* input_ids,
-                                                  float temperature,
-                                                  float top_p, size_t top_k) {
+uint32_t InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
+                                                 uint32_t input_ids,
+                                                 float temperature, float top_p,
+                                                 size_t top_k) {
   // std::cout << "[InferenceEngine::generate_next_token] 开始生成下一个 token"
   //           << std::endl;
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
 
-  Tensor<uint32_t> input(input_ids, {1}, device_);
+  Tensor<uint32_t> input({input_ids}, {1}, device_);
   // std::cout << "[InferenceEngine::generate_next_token] 输入 token: "
   //           << input_ids.back() << std::endl;
 
@@ -310,7 +310,7 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
     std::cerr << "Error resizing KV cache: " << e.what() << std::endl;
     throw;
   }
-  uint32_t* next_token;
+  uint32_t next_token;
   // 前向计算，传入 KVCache 的地址
   if (device_ == Device::CUDA) {
     next_token = model_->forward(&input, thread_pool, &kv_cache_, top_k,
@@ -393,7 +393,7 @@ void InferenceEngine<T>::generate_with_callback(
   std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
     try {
       // --- 在 try 块开始处声明 next_token ---
-      uint32_t* next_token;
+      uint32_t next_token;
 
       // --- 在移动 input_ids_copy 之前获取其大小 ---
       size_t input_size = input_ids_copy.size();
@@ -433,7 +433,7 @@ void InferenceEngine<T>::generate_with_callback(
       // 扩容完成 "
       //           << std::endl;
       // std::cout << next_token << std::endl;
-      if (next_token == nullptr) {
+      if (next_token == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
         return;
       }
@@ -441,7 +441,7 @@ void InferenceEngine<T>::generate_with_callback(
       result_queue.push(next_token);
 
       size_t current_total_length = input_size + 1;
-      uint32_t* last_token = next_token;
+      uint32_t last_token = next_token;
 
       while (current_total_length < max_length) {
         next_token = this->generate_next_token(this->thread_pool_, last_token,
@@ -451,7 +451,7 @@ void InferenceEngine<T>::generate_with_callback(
         current_total_length++;
 
         // bool is_eos = (next_token == this->model_->get_eos_token_id());
-        bool is_eos = (next_token == nullptr);
+        bool is_eos = (next_token == this->model_->get_eos_token_id());
 
         if (is_eos) {
           result_queue.push(Signal::EndOfStream);
@@ -474,14 +474,11 @@ void InferenceEngine<T>::generate_with_callback(
       std::visit(
           [&](auto&& arg) {
             using Type = std::decay_t<decltype(arg)>;
-            if constexpr (std::is_same_v<Type, uint32_t*>) {
+            if constexpr (std::is_same_v<Type, uint32_t>) {
               uint32_t token;
-              if (device_ == Device::CPU) {
-                token = *arg;
-              } else if (device_ == Device::CUDA) {
-                cudaMemcpy(&token, arg, sizeof(uint32_t),
-                           cudaMemcpyDeviceToHost);
-              }
+
+              token = arg;
+
               try {
                 py::gil_scoped_release release;
                 callback(token);

@@ -92,8 +92,7 @@ class InferenceEngine : public infer_base {
                   Device device = Device::CUDA);
 
   // 生成单个 token
-  uint32_t generate_next_token(ThreadPool& thread_pool,
-                               const std::vector<uint32_t>& input_ids,
+  uint32_t generate_next_token(ThreadPool& thread_pool, uint32_t input_ids,
                                float temperature = 1.0f, float top_p = 0.9f,
                                size_t top_k = 50);
   // 批量生成 token，直到达到 max_length 或遇到 eos
