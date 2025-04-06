@@ -1,9 +1,15 @@
 #include "inference.hpp"
 
 #include <cmath>
+#include <condition_variable>
+#include <exception>
 #include <functional>  // 添加以使用 std::function
 #include <iostream>
+#include <mutex>
+#include <optional>
+#include <queue>
 #include <stdexcept>
+#include <variant>
 
 #include "base_model.hpp"
 #include "cudaOP.cuh"
@@ -21,6 +27,34 @@
 
 #include <iostream>
 #include <stdexcept>
+template <typename T>
+class ThreadSafeQueue {
+ public:
+  void push(T value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(std::move(value));
+    cv_.notify_one();
+  }
+
+  T pop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return !queue_.empty(); });
+    T value = std::move(queue_.front());
+    queue_.pop();
+    return value;
+  }
+  // ... (其他成员函数，如 empty, clear, try_pop 可选) ...
+
+ private:
+  mutable std::mutex mutex_;
+  std::queue<T> queue_;
+  std::condition_variable cv_;
+};
+
+// 定义用于结果队列的类型
+enum class Signal { EndOfStream };  // 定义 Signal 枚举
+using GenerationResult =
+    std::variant<uint32_t*, Signal, std::exception_ptr>;  // 定义类型别名
 namespace py = pybind11;
 template <typename T>
 void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
@@ -255,13 +289,15 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
 }
 
 template <typename T>
-uint32_t InferenceEngine<T>::generate_next_token(
-    ThreadPool& thread_pool, const std::vector<uint32_t>& input_ids,
-    float temperature, float top_p, size_t top_k) {
+uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
+                                                  uint32_t* input_ids,
+                                                  float temperature,
+                                                  float top_p, size_t top_k) {
   // std::cout << "[InferenceEngine::generate_next_token] 开始生成下一个 token"
   //           << std::endl;
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
-  Tensor<uint32_t> input({input_ids.back()}, {1}, device_);
+
+  Tensor<uint32_t> input(input_ids, {1}, device_);
   // std::cout << "[InferenceEngine::generate_next_token] 输入 token: "
   //           << input_ids.back() << std::endl;
 
@@ -274,7 +310,7 @@ uint32_t InferenceEngine<T>::generate_next_token(
     std::cerr << "Error resizing KV cache: " << e.what() << std::endl;
     throw;
   }
-  uint32_t next_token;
+  uint32_t* next_token;
   // 前向计算，传入 KVCache 的地址
   if (device_ == Device::CUDA) {
     next_token = model_->forward(&input, thread_pool, &kv_cache_, top_k,
@@ -284,122 +320,218 @@ uint32_t InferenceEngine<T>::generate_next_token(
                                  temperature, top_p);
   }
 
-  // std::cout << "[InferenceEngine::generate_next_token] 前向计算完成"
-  //           << std::endl;
-
-  // if (logits.device() != device_) {
-  //   if (device_ == Device::CUDA) {
-  //     logits.cuda();  // 确保 logits 在正确的设备上
-  //   } else {
-  //     logits.cpu();
-  //   }
-  //   // std::cout
-  //   // << "[InferenceEngine::generate_next_token] 将 logits 移动到正确的设备"
-  //   // << std::endl;
-  // }
-
-  // 根据 logits 采样下一个 token
-  // uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
-  // std::cout << "[InferenceEngine::generate_next_token] 采样得到 token: "
-  //           << next_token << std::endl;
-
   return next_token;
 }
 
-// 在 InferenceEngine 类的实现文件（例如 inference.cpp）中增加：
+// template <typename T>
+// void InferenceEngine<T>::generate_with_callback(
+//     const std::vector<uint32_t>& input_ids, size_t max_length,
+//     float temperature, float top_p, size_t top_k,
+//     std::function<void(uint32_t)> callback) {
+//   // 如果需要从头开始，可清空缓存
+//   // kv_cache_.clear();
+//   // 让 KVCache 扩容到容纳 input_ids.size() 个位置
+//   // std::cout << "[InferenceEngine::generate_with_callback] 扩容 KVCache 到
+//   // "
+//   // << kv_cache_.size() + input_ids.size() << " 个位置" << std::endl;
+//   try {
+//     kv_cache_.resize(kv_cache_.size() + input_ids.size());
+//   } catch (const std::runtime_error& e) {
+//     std::cerr << "Error resizing KV cache (prefill): " << e.what() <<
+//     std::endl; throw;
+//   }
+
+//   Tensor<uint32_t> input_tensor(std::vector<uint32_t>(input_ids),
+//                                 {input_ids.size()}, device_);
+
+//   uint32_t next_token;
+//   if (device_ == Device::CPU)
+//     next_token = model_->prefill(&input_tensor, thread_pool_, &kv_cache_,
+//     top_k,
+//                                  temperature, top_p);
+//   else {
+//     next_token = model_->prefill(&input_tensor, thread_pool_, &kv_cache_,
+//     top_k,
+//                                  temperature, top_p, d_states);
+//   }
+
+//   if (next_token == model_->get_eos_token_id()) {
+//     return;
+//   }
+//   {
+//     py::gil_scoped_release release;  // 释放 GIL
+//     callback(next_token);
+//   }
+//   std::vector<uint32_t> output = input_ids;
+//   output.push_back(next_token);
+
+//   // 继续生成直到达到 max_length 或遇到 eos
+//   while (output.size() < max_length) {
+//     next_token =
+//         generate_next_token(thread_pool_, output, temperature, top_p, top_k);
+
+//     output.push_back(next_token);
+//     if (next_token == model_->get_eos_token_id()) {
+//       break;
+//     }
+//     {
+//       py::gil_scoped_release release;  // 释放 GIL
+//       callback(next_token);
+//     }
+//   }
+// }
+namespace py = pybind11;
+
 template <typename T>
 void InferenceEngine<T>::generate_with_callback(
     const std::vector<uint32_t>& input_ids, size_t max_length,
     float temperature, float top_p, size_t top_k,
     std::function<void(uint32_t)> callback) {
-  // 如果需要从头开始，可清空缓存
-  // kv_cache_.clear();
-  // 让 KVCache 扩容到容纳 input_ids.size() 个位置
-  // std::cout << "[InferenceEngine::generate_with_callback] 扩容 KVCache 到 "
-  // << kv_cache_.size() + input_ids.size() << " 个位置" << std::endl;
+  ThreadSafeQueue<GenerationResult> result_queue;
+
+  // 注意：lambda 捕获列表保持不变 [&, this, input_ids_copy = input_ids]
+  std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
+    try {
+      // --- 在 try 块开始处声明 next_token ---
+      uint32_t* next_token;
+
+      // --- 在移动 input_ids_copy 之前获取其大小 ---
+      size_t input_size = input_ids_copy.size();
+
+      // --- KV Cache Resize ---
+      try {
+        // 注意：这里的 kv_cache_ 访问假设是非并发的，或者在类内部有锁保护
+        kv_cache_.resize(kv_cache_.size() + input_size);
+      } catch (const std::runtime_error& e) {
+        std::cerr << "Error resizing KV cache (prefill): " << e.what()
+                  << std::endl;
+
+        throw;
+      }
+
+      {
+        std::vector<uint32_t> prefill_input =
+            input_ids_copy;  // 创建真正的拷贝给 Tensor
+        // std::cout
+        //     << "[InferenceEngine::generate_with_callback] 扩容 KVCache 到 "
+        //     << kv_cache_.size() << " 个位置" << std::endl;
+
+        Tensor<uint32_t> input_tensor(std::move(prefill_input), {input_size},
+                                      this->device_);
+
+        if (this->device_ == Device::CPU) {
+          next_token = this->model_->prefill(&input_tensor, this->thread_pool_,
+                                             &this->kv_cache_, top_k,
+                                             temperature, top_p);
+        } else {
+          next_token = this->model_->prefill(
+              &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
+              temperature, top_p, this->d_states);
+        }
+      }
+      // std::cout << "[InferenceEngine::generate_with_callback] KVCache
+      // 扩容完成 "
+      //           << std::endl;
+      // std::cout << next_token << std::endl;
+      if (next_token == nullptr) {
+        result_queue.push(Signal::EndOfStream);
+        return;
+      }
+
+      result_queue.push(next_token);
+
+      size_t current_total_length = input_size + 1;
+      uint32_t* last_token = next_token;
+
+      while (current_total_length < max_length) {
+        next_token = this->generate_next_token(this->thread_pool_, last_token,
+                                               temperature, top_p, top_k);
+
+        last_token = next_token;
+        current_total_length++;
+
+        // bool is_eos = (next_token == this->model_->get_eos_token_id());
+        bool is_eos = (next_token == nullptr);
+
+        if (is_eos) {
+          result_queue.push(Signal::EndOfStream);
+          return;
+        }
+        result_queue.push(next_token);
+      }
+
+      result_queue.push(Signal::EndOfStream);
+
+    } catch (...) {
+      result_queue.push(std::current_exception());
+    }
+  });
+
   try {
-    kv_cache_.resize(kv_cache_.size() + input_ids.size());
-  } catch (const std::runtime_error& e) {
-    std::cerr << "Error resizing KV cache (prefill): " << e.what() << std::endl;
-    throw;
-  }
-  // std::cout << "[InferenceEngine::generate_with_callback] KVCache 扩容完成"
-  // << std::endl;
-  // 输入 tensor 也放在正确的设备上
+    while (true) {
+      GenerationResult result = result_queue.pop();
+      bool should_break = false;
+      std::visit(
+          [&](auto&& arg) {
+            using Type = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<Type, uint32_t*>) {
+              uint32_t token;
+              if (device_ == Device::CPU) {
+                token = *arg;
+              } else if (device_ == Device::CUDA) {
+                cudaMemcpy(&token, arg, sizeof(uint32_t),
+                           cudaMemcpyDeviceToHost);
+              }
+              try {
+                py::gil_scoped_release release;
+                callback(token);
+              } catch (const py::error_already_set& e) {
+                std::cerr << "Python error in callback: " << e.what()
+                          << std::endl;
+                // 将 Python 异常包装成 C++ 异常并抛出
+                throw std::runtime_error("Python callback failed: " +
+                                         std::string(e.what()));
+              } catch (const std::exception& e) {  // 捕获标准 C++ 异常
+                std::cerr << "C++ error in callback: " << e.what() << std::endl;
+                throw;  // 重新抛出
+              } catch (...) {
+                std::cerr << "Unknown error during callback execution."
+                          << std::endl;
+                throw;  // 重新抛出未知异常
+              }
+            } else if constexpr (std::is_same_v<Type, Signal>) {
+              if (arg == Signal::EndOfStream) {
+                should_break = true;  // 收到结束信号，准备退出循环
+              }
+            } else if constexpr (std::is_same_v<Type, std::exception_ptr>) {
+              if (arg) {
+                std::rethrow_exception(arg);  // 重新抛出工作线程捕获的异常
+              } else {
+                // 理论上不应发生，但作为健壮性检查
+                throw std::runtime_error(
+                    "Worker thread sent null exception pointer.");
+              }
+            }
+          },
+          result);
 
-  Tensor<uint32_t> input_tensor(std::vector<uint32_t>(input_ids),
-                                {input_ids.size()}, device_);
-
-  // std::cout << "[InferenceEngine::generate_with_callback] 输入 tensor "
-  //              "放置在正确设备上 "
-  //           << std::endl;
-  // 调用 prefill，一次性处理全部 input_ids
-  uint32_t next_token;
-  if (device_ == Device::CPU)
-    next_token = model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k,
-                                 temperature, top_p);
-  else {
-    next_token = model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k,
-                                 temperature, top_p, d_states);
-  }
-
-  // debugPrintTensor(prefill_logits, "prefill_logits");
-  // std::cout << "[InferenceEngine::prefill] " << std::endl;
-
-  // prefill_logits.shape = [seq_len, vocab_size]
-  // size_t seq_len = input_ids.size();
-  // if (seq_len == 0) {
-  //   return;
-  // }
-
-  // // 从 prefill 的最后一行 logits 中采样第一个生成 token
-  // const size_t vocab_size = prefill_logits.sizes()[1];
-  // std::vector<float> last_row_data(vocab_size, 0.f);
-  // const float* prefill_ptr =
-  //     prefill_logits.data_ptr() + (seq_len - 1) * vocab_size;
-  // std::copy(prefill_ptr, prefill_ptr + vocab_size, last_row_data.begin());
-  // Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
-  //                           Device::CPU);  // 强制使用CPU设备
-
-  // // debugPrintTensor(last_logits, "last_logits");
-  // uint32_t next_token = OP::sample(&last_logits, temperature, top_p, top_k);
-
-  // 通过回调函数将 token 传回给 Python
-  if (next_token == model_->get_eos_token_id()) {
-    return;
-  }
-  {
-    py::gil_scoped_release release;  // 释放 GIL
-    callback(next_token);
-  }
-  std::vector<uint32_t> output = input_ids;
-  output.push_back(next_token);
-
-  // 继续生成直到达到 max_length 或遇到 eos
-  while (output.size() < max_length) {
-    // if (kv_cache_.size() >= kv_cache_.max_seq_len_) {
-    //   callback(-1);  // 传递 -1 表示超出
-    //   break;
-    // }
-    // auto start = std::chrono::high_resolution_clock::now();
-
-    next_token =
-        generate_next_token(thread_pool_, output, temperature, top_p, top_k);
-
-    // 在生成 token 后记录结束时间
-    // auto end = std::chrono::high_resolution_clock::now();
-    // std::chrono::duration<double, std::milli> token_time = end - start;
-    // std::cout << "生成 token 耗时: " << token_time.count() << " 毫秒"
-    //           << std::endl;
-
-    output.push_back(next_token);
-    if (next_token == model_->get_eos_token_id()) {
-      break;
+      if (should_break) {
+        break;  // 退出结果处理循环
+      }
     }
-    {
-      py::gil_scoped_release release;  // 释放 GIL
-      callback(next_token);
+  } catch (...) {
+    // 捕获主线程中重新抛出的异常 (来自工作线程或回调函数)
+    // 确保即使出错也要尝试 join 线程
+    if (generation_thread.joinable()) {
+      generation_thread.join();
     }
+    throw;  // 将异常继续向外层传递
+  }
+
+  // --- Cleanup ---
+  // 确保线程在函数正常结束时也被 join
+  if (generation_thread.joinable()) {
+    generation_thread.join();
   }
 }
 template <typename T>
