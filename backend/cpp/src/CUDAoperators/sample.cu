@@ -230,7 +230,7 @@ uint32_t sample(Tensor<T>&& logits, float temperature,
   void* d_sort_temp_storage = nullptr;
   size_t sort_temp_storage_bytes = 0;
 
-  cudaStream_t stream = 0;
+  cudaStream_t stream = nullptr;
 
   // --- Step 1 (Fused): Scale Logits and Initialize Indices ---
   const int scale_init_block_size = 256;

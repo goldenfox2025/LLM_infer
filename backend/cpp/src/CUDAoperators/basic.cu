@@ -567,83 +567,313 @@ void silu(Tensor<T> *output, const Tensor<T> *input) {
 // --------------------------------------------------
 // 注意力计算：decode 版本 — 计算注意力分数（模板化）
 // --------------------------------------------------
+#include <cuda_runtime.h>
+
+#include <cmath>  // For sqrtf, rsqrtf
+
+// (假设 checkCudaError 宏和函数已定义，同上一个例子)
+
 template <typename T>
-__global__ void attention_scores_kernel(const T *Q, int n_q_h, int dqkv,
-                                        const T *K, int cache_length,
-                                        T *att_scores, int n_kv_h,
-                                        bool is_3d_tensor) {
-  int q = blockIdx.x;     // 查询头索引，每个 block 负责一个头
-  int pos = threadIdx.x;  // 缓存位置索引
-  if (q < n_q_h && pos < cache_length) {
-    int n_groups = n_q_h / n_kv_h;  // 头分组数
-    int kv_head = q / n_groups;     // 对应的 KV 头
-    float dot = 0.0f;
-    for (int i = 0; i < dqkv; i++) {
-      float q_val;
-      if (is_3d_tensor) {
-        q_val = static_cast<float>(Q[(0 * n_q_h + q) * dqkv + i]);
-      } else {
-        q_val = static_cast<float>(Q[q * dqkv + i]);
-      }
-      float k_val = static_cast<float>(K[(pos * n_kv_h + kv_head) * dqkv + i]);
-      dot += q_val * k_val;
-    }
-    att_scores[q * cache_length + pos] =
-        static_cast<T>(dot / sqrtf((float)dqkv));
+__global__ void attention_scores_kernel(
+    const T *__restrict__ Q,  // Q 指针，假定布局为 [n_q_h, dqkv] 或等效
+    const int n_q_h, const int dqkv,
+    const T *__restrict__ K,  // K 指针，布局 [cache_length, n_kv_h, dqkv]
+    const int cache_length,
+    T *__restrict__ att_scores,  // 输出，布局 [n_q_h, cache_length]
+    const int n_kv_h) {
+  // 使用 extern 声明共享内存，大小在启动时指定
+  // 需要存储一个 Q 向量
+  __shared__ T smemQ[128];
+
+  // Grid 映射: blockIdx.x -> q (query head), blockIdx.y -> pos_block
+  // (块内位置的起始) Block 映射: threadIdx.x -> pos_offset (块内位置的偏移)
+  const int q = blockIdx.x;
+  const int pos_base = blockIdx.y * blockDim.x;
+  const int tid =
+      threadIdx.x;  // Thread ID within the block (0 to blockDim.x - 1)
+  const int block_size = blockDim.x;
+
+  // 计算当前线程负责的 cache position
+  const int pos = pos_base + tid;
+
+  // --- 边界检查 ---
+  // 检查 q 是否有效 (理论上 gridDim.x == n_q_h)
+  if (q >= n_q_h) {
+    return;
   }
+
+  // --- 加载 Q 到共享内存 ---
+  // 让块内的线程协作加载 Q[q] 到 smemQ
+  // Q 的布局假定为 [n_q_h, dqkv] (或等效 [1, n_q_h, dqkv])
+  // q_vec 指向当前 query head 的数据起始位置
+  const T *q_vec = Q + static_cast<size_t>(q) * dqkv;
+
+  // 每个线程负责加载 Q 向量的一部分
+  // 使用循环确保所有 dqkv 维度都被加载，即使 dqkv > block_size
+  for (int i = tid; i < dqkv; i += block_size) {
+    // 检查 i 是否越界（理论上不需要，因为上层循环保证）
+    smemQ[i] = q_vec[i];
+  }
+  // 等待块内所有线程完成加载 Q 到共享内存
+  __syncthreads();
+
+  // --- 计算 Attention Score ---
+  // 再次检查 pos 是否越界 (因为 cache_length 可能不是 block_size 的整数倍)
+  if (pos < cache_length) {
+    // 计算对应的 KV head
+    const int n_groups = n_q_h / n_kv_h;
+    const int kv_head = q / n_groups;
+
+    // 计算 K 向量的起始地址
+    // K 布局: [cache_length, n_kv_h, dqkv]
+    // 索引: pos * n_kv_h * dqkv + kv_head * dqkv + i
+    //      = (pos * n_kv_h + kv_head) * dqkv + i
+    const size_t k_vec_offset =
+        (static_cast<size_t>(pos) * n_kv_h + kv_head) * dqkv;
+    const T *k_vec = K + k_vec_offset;
+
+    // 计算点积 (从共享内存读取 Q, 从全局内存读取 K)
+    float dot = 0.0f;
+    for (int i = 0; i < dqkv; ++i) {
+      // 从共享内存读取 Q 值
+      float q_val = static_cast<float>(smemQ[i]);
+      // 从全局内存读取 K 值 (访问 k_vec[i] 是连续的)
+      float k_val = static_cast<float>(k_vec[i]);
+      // 累加点积
+      dot = fmaf(q_val, k_val, dot);  // 使用 FMA 指令
+                                      // dot += q_val * k_val; // 等价写法
+    }
+
+    // 计算缩放因子 (1 / sqrt(dqkv))
+    // 使用 rsqrtf (更快，但精度可能略低) 或 1.0f / sqrtf
+    const float scale = rsqrtf(static_cast<float>(dqkv));
+    // const float scale = 1.0f / sqrtf(static_cast<float>(dqkv)); //
+    // 备选，精度更高
+
+    // 写入结果到全局内存 (写入 att_scores[q * cache_length + pos])
+    // 由于 pos = pos_base + threadIdx.x，块内的写入是合并的
+    att_scores[static_cast<size_t>(q) * cache_length + pos] =
+        static_cast<T>(dot * scale);
+  }
+  // 注意：这里不需要最后的 __syncthreads()，因为线程之间没有后续依赖
 }
 
+// 2. 修改后的 C++ 封装函数 (compute_attention_scores)
 template <typename T>
 void compute_attention_scores(const Tensor<T> &Q, const Tensor<T> &K,
                               size_t n_q_h, size_t dqkv, Tensor<T> &att_scores,
                               size_t n_kv_h) {
-  size_t cache_length = K.sizes()[0];
-  const std::vector<size_t> &Q_shape = Q.sizes();
-  bool is_3d_q = (Q_shape.size() == 3);
+  // --- 输入检查 ---
+  if (n_q_h == 0 || dqkv == 0 || n_kv_h == 0) {
+    throw std::runtime_error(
+        "Head counts (n_q_h, n_kv_h) and dimension (dqkv) must be non-zero.");
+  }
+  if (n_q_h % n_kv_h != 0) {
+    char msg[256];
+    snprintf(msg, sizeof(msg), "n_q_h (%zu) must be divisible by n_kv_h (%zu)",
+             n_q_h, n_kv_h);
+    throw std::runtime_error(msg);
+  }
+
+  const auto &k_sizes = K.sizes();
+  if (k_sizes.size() != 3) {
+    throw std::runtime_error(
+        "K tensor must have 3 dimensions [cache_length, n_kv_h, dqkv]");
+  }
+  const size_t cache_length = k_sizes[0];
+  if (k_sizes[1] != n_kv_h || k_sizes[2] != dqkv) {
+    char msg[512];
+    snprintf(
+        msg, sizeof(msg),
+        "K tensor shape mismatch. Expected [*, %zu, %zu], got [%zu, %zu, %zu]",
+        n_kv_h, dqkv, k_sizes[0], k_sizes[1], k_sizes[2]);
+    throw std::runtime_error(msg);
+  }
+
+  const auto &q_sizes = Q.sizes();
+  bool is_3d_q = (q_sizes.size() == 3);
+  // size_t expected_q_elems = n_q_h * dqkv;
+  size_t actual_q_elems = 1;
+  for (size_t dim : q_sizes) {
+    actual_q_elems *= dim;
+  }
+
   if (is_3d_q) {
-    if (Q_shape[0] != 1 || Q_shape[1] != n_q_h || Q_shape[2] != dqkv) {
-      throw std::runtime_error("Q tensor dimension mismatch");
+    // 允许 [1, n_q_h, dqkv]
+    if (q_sizes[0] != 1 || q_sizes[1] != n_q_h || q_sizes[2] != dqkv) {
+      char msg[512];
+      snprintf(msg, sizeof(msg),
+               "Q tensor shape mismatch (3D). Expected [1, %zu, %zu], got "
+               "[%zu, %zu, %zu]",
+               n_q_h, dqkv, q_sizes[0], q_sizes[1], q_sizes[2]);
+      throw std::runtime_error(msg);
+    }
+  } else if (q_sizes.size() == 2) {
+    // 允许 [n_q_h, dqkv]
+    if (q_sizes[0] != n_q_h || q_sizes[1] != dqkv) {
+      char msg[512];
+      snprintf(
+          msg, sizeof(msg),
+          "Q tensor shape mismatch (2D). Expected [%zu, %zu], got [%zu, %zu]",
+          n_q_h, dqkv, q_sizes[0], q_sizes[1]);
+      throw std::runtime_error(msg);
     }
   } else {
-    if (Q_shape[0] != n_q_h || Q_shape[1] != dqkv) {
-      throw std::runtime_error("Q tensor dimension mismatch");
-    }
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Q tensor must have 2 or 3 dimensions, got %zu dimensions.",
+             q_sizes.size());
+    throw std::runtime_error(msg);
   }
-  if (K.sizes()[0] != cache_length || K.sizes()[1] != n_kv_h ||
-      K.sizes()[2] != dqkv) {
-    throw std::runtime_error("K tensor dimension mismatch");
+  // Kernel 假定 Q 是连续的 n_q_h * dqkv 数据，无论是 [1, n_q_h, dqkv] 还是
+  // [n_q_h, dqkv] 所以我们不需要根据 is_3d_q 传递不同的指针或标志
+
+  const auto &score_sizes = att_scores.sizes();
+  if (score_sizes.size() != 2 || score_sizes[0] != n_q_h ||
+      score_sizes[1] != cache_length) {
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Attention scores tensor shape mismatch. Expected [%zu, %zu], got "
+             "[%zu, %zu]",
+             n_q_h, cache_length, score_sizes.size() > 0 ? score_sizes[0] : 0,
+             score_sizes.size() > 1 ? score_sizes[1] : 0);
+    throw std::runtime_error(msg);
   }
-  if (att_scores.sizes()[0] != n_q_h || att_scores.sizes()[1] != cache_length) {
-    throw std::runtime_error("attention scores tensor shape mismatch");
+
+  if (cache_length == 0) {
+    // 如果 cache length 为 0，输出应该为空或形状匹配但无数据。
+    // 核函数在这种情况下 gridDim.y 会是 0，不会启动。
+    // 或者可以在这里直接返回，确保 att_scores 状态正确。
+    return;
   }
-  int blocks = n_q_h;
-  int threads = std::min(static_cast<int>(cache_length), 1024);
-  attention_scores_kernel<<<blocks, threads>>>(
-      Q.data_ptr(), n_q_h, dqkv, K.data_ptr(), cache_length,
-      att_scores.data_ptr(), n_kv_h, is_3d_q);
+
+  // --- CUDA Kernel 启动配置 ---
+  // 选择 Block 大小 (线程数)
+  // 256 是一个常用的、通常性能不错的选择，可以调整测试
+  const int block_size_x = 256;  // 使用 1D block
+
+  // Grid 维度
+  // gridDim.x 对应 q (n_q_h)
+  // gridDim.y 对应 cache_length 的块数
+  // 需要向上取整来覆盖所有的 cache_length
+  dim3 gridDim(static_cast<unsigned int>(n_q_h),
+               static_cast<unsigned int>((cache_length + block_size_x - 1) /
+                                         block_size_x),
+               1);
+
+  // Block 维度 (1D)
+  dim3 blockDim(block_size_x, 1, 1);
+
+  // 计算共享内存大小：需要存储 dqkv 个 T 类型的元素
+  // size_t shared_mem_size = dqkv * sizeof(T);
+  // // 注意：共享内存大小有限制 (e.g., 48KB, 96KB per SM)。如果 dqkv *
+  // sizeof(T)
+  // // 过大，此策略会失败。 例如，如果 T=float(4B), dqkv=128, 需要 512
+  // // Bytes，非常小。 如果 T=float(4B), dqkv=16384 (非常大), 需要
+  // // 64KB，可能会超过限制或影响占用率。
+  // cudaDeviceProp prop;
+  // cudaGetDeviceProperties(&prop, 0);  // Get properties of device 0
+  // if (shared_mem_size > prop.sharedMemPerBlock) {
+  //   char msg[512];
+  //   snprintf(msg, sizeof(msg),
+  //            "Required shared memory size (%zu bytes) exceeds device limit
+  //            per " "block (%zu bytes) for dqkv=%zu.", shared_mem_size,
+  //            prop.sharedMemPerBlock, dqkv);
+  //   throw std::runtime_error(msg);
+  // }
+  // if (shared_mem_size > prop.sharedMemPerMultiprocessor) {
+  //   // Technically okay if occupancy allows, but good to be aware
+  //   // printf("Warning: Shared memory size (%zu bytes) is large relative to
+  //   SM
+  //   // limit (%zu bytes).\n",
+  //   //        shared_mem_size, prop.sharedMemPerMultiprocessor);
+  // }
+
+  // 启动内核
+  attention_scores_kernel<<<gridDim, blockDim>>>(
+      Q.data_ptr(),  // 直接传递 Q 的数据指针
+      static_cast<int>(n_q_h), static_cast<int>(dqkv), K.data_ptr(),
+      static_cast<int>(cache_length), att_scores.data_ptr(),
+      static_cast<int>(n_kv_h));
+
+  // 检查错误
   checkCudaError(cudaGetLastError());
-  // checkCudaError(cudaDeviceSynchronize());
+  // checkCudaError(cudaDeviceSynchronize()); // 通常不需要立即同步
 }
 
 // --------------------------------------------------
 // 注意力计算：decode 版本 — 计算注意力输出（模板化）
 // --------------------------------------------------
 template <typename T>
-__global__ void att_output_kernel(const T *att_probs, int n_q_h,
-                                  int cache_length, int dqkv, const T *V,
-                                  T *att_output, int n_kv_h) {
-  int q = blockIdx.x;
-  int d = blockIdx.y;
-  if (q < n_q_h && d < dqkv) {
-    int n_groups = n_q_h / n_kv_h;
-    int kv_head = q / n_groups;
-    float sum = 0.0f;
+__global__ void att_output_kernel(
+    const T *__restrict__ att_probs,  // 使用 __restrict__ 提示编译器指针不混叠
+    const int n_q_h,                  // 总 query head 数量
+    const int cache_length,  // K/V cache 的长度 (seq len)
+    const int dqkv,          // 每个 head 的维度
+    const T *__restrict__ V, T *__restrict__ att_output,
+    const int n_kv_h)  // 总 key/value head 数量
+{
+  // 每个 block 处理一个 query head (q)
+  const int q = blockIdx.x;
+  // 每个 thread 处理一个或多个 d 维度
+  const int d_start = threadIdx.x;
+  const int d_step = blockDim.x;  // 线程块中处理 d 维度的线程数
+
+  // 检查 q 是否越界 (虽然 gridDim.x 通常等于 n_q_h, 但以防万一)
+  if (q >= n_q_h) {
+    return;
+  }
+
+  // 计算这个 query head 对应的 key/value head 索引
+  // 注意：整型除法会自动向下取整，这正是我们需要的
+  const int n_groups = n_q_h / n_kv_h;  // 每个 KV head 对应的 Q head 数量
+  const int kv_head = q / n_groups;
+
+  // 计算 V 张量中对应 kv_head 的起始地址偏移 (不包含 d 维度)
+  // V 的形状是 [cache_length, n_kv_h, dqkv]
+  // 访问 V[pos, kv_head, d] 的线性地址是:
+  // pos * (n_kv_h * dqkv) + kv_head * dqkv + d
+  // = (pos * n_kv_h + kv_head) * dqkv + d
+
+  // 指向当前 query head 的 attention probabilities 行的指针
+  const T *current_att_probs_row =
+      att_probs + static_cast<size_t>(q) * cache_length;
+
+  // 指向当前 query head 的 output 行的指针
+  T *current_att_output_row = att_output + static_cast<size_t>(q) * dqkv;
+
+  // 每个线程负责计算多个 d 维度 (如果 dqkv > blockDim.x)
+  for (int d = d_start; d < dqkv; d += d_step) {
+    float sum = 0.0f;  // 使用 float 进行累加，保证精度
+
+    // V 张量的指针，固定 kv_head 和 d，随 pos 变化
+    // const T* v_ptr_for_d = V + v_base_offset + d; // 不对， V 的布局是 (pos,
+    // kv_head, d)
+
+    // 遍历 K/V cache (序列长度)
     for (int pos = 0; pos < cache_length; ++pos) {
-      float prob = static_cast<float>(att_probs[q * cache_length + pos]);
-      float val = static_cast<float>(V[(pos * n_kv_h + kv_head) * dqkv + d]);
-      sum += prob * val;
+      // 读取 attention probability (所有处理相同 q
+      // 的线程读取相同的值，形成广播)
+      const float prob = static_cast<float>(current_att_probs_row[pos]);
+
+      // 计算 V 中元素的索引
+      // V 的形状: [cache_length, n_kv_h, dqkv]
+      // 线性索引: pos * n_kv_h * dqkv + kv_head * dqkv + d
+      // 优化索引: (pos * n_kv_h + kv_head) * dqkv + d
+      const size_t v_index =
+          (static_cast<size_t>(pos) * n_kv_h + kv_head) * dqkv + d;
+      const float val = static_cast<float>(
+          V[v_index]);  // 读取 V 值 (线程块内对 d 的访问是合并的)
+
+      // 累加
+      // 使用 fmaf (fused multiply-add)
+      // 可能稍微提高性能，但现代编译器通常会自动优化
+      sum = fmaf(prob, val, sum);
+      // sum += prob * val; // 等价写法
     }
-    att_output[q * dqkv + d] = static_cast<T>(sum);
+
+    // 将结果写回 global memory (线程块内对 d 的访问是合并的)
+    current_att_output_row[d] = static_cast<T>(sum);
   }
 }
 
@@ -651,23 +881,87 @@ template <typename T>
 void compute_att_output(const Tensor<T> &att_probs, const Tensor<T> &V,
                         size_t n_q_h, size_t dqkv, Tensor<T> &att_output,
                         size_t n_kv_h) {
-  size_t cache_length = V.sizes()[0];
-  if (att_probs.sizes()[0] != n_q_h || att_probs.sizes()[1] != cache_length) {
-    throw std::runtime_error("attention probabilities tensor shape mismatch");
+  // --- 输入检查 ---
+  // 检查维度信息是否匹配
+  if (n_q_h == 0 || dqkv == 0 || n_kv_h == 0) {
+    throw std::runtime_error(
+        "Head counts (n_q_h, n_kv_h) and dimension (dqkv) must be non-zero.");
   }
-  if (V.sizes()[0] != cache_length || V.sizes()[1] != n_kv_h ||
-      V.sizes()[2] != dqkv) {
-    throw std::runtime_error("V tensor dimension mismatch");
+  if (n_q_h % n_kv_h != 0) {
+    char msg[256];
+    snprintf(msg, sizeof(msg), "n_q_h (%zu) must be divisible by n_kv_h (%zu)",
+             n_q_h, n_kv_h);
+    throw std::runtime_error(msg);
   }
-  if (att_output.sizes()[0] != n_q_h || att_output.sizes()[1] != dqkv) {
-    throw std::runtime_error("attention output tensor shape mismatch");
+
+  const auto &v_sizes = V.sizes();
+  if (v_sizes.size() != 3) {
+    throw std::runtime_error(
+        "V tensor must have 3 dimensions [cache_length, n_kv_h, dqkv]");
   }
-  dim3 grid(n_q_h, dqkv);
-  att_output_kernel<<<grid, 1>>>(
+  const size_t cache_length = v_sizes[0];
+  if (v_sizes[1] != n_kv_h || v_sizes[2] != dqkv) {
+    char msg[512];
+    snprintf(
+        msg, sizeof(msg),
+        "V tensor shape mismatch. Expected [*, %zu, %zu], got [%zu, %zu, %zu]",
+        n_kv_h, dqkv, v_sizes[0], v_sizes[1], v_sizes[2]);
+    throw std::runtime_error(msg);
+  }
+  // if (cache_length == 0) {
+  // 如果 cache length 为 0，输出应该全为
+  // 0，可以提前处理或允许核函数运行（循环次数为0）
+  // 这里假设允许核函数处理，它会正确地将 sum 初始化为 0 并写回。
+  // 如果需要严格处理，可以在这里添加逻辑填充 att_output 为 0 并返回。
+  // 例如: cudaMemsetAsync(att_output.data_ptr(), 0, att_output.numel() *
+  // sizeof(T), stream); return;
+  // }
+
+  const auto &probs_sizes = att_probs.sizes();
+  if (probs_sizes.size() != 2 || probs_sizes[0] != n_q_h ||
+      probs_sizes[1] != cache_length) {
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Attention probabilities tensor shape mismatch. Expected [%zu, "
+             "%zu], got [%zu, %zu]",
+             n_q_h, cache_length, probs_sizes.size() > 0 ? probs_sizes[0] : 0,
+             probs_sizes.size() > 1 ? probs_sizes[1] : 0);
+    throw std::runtime_error(msg);
+  }
+
+  const auto &output_sizes = att_output.sizes();
+  if (output_sizes.size() != 2 || output_sizes[0] != n_q_h ||
+      output_sizes[1] != dqkv) {
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "Attention output tensor shape mismatch. Expected [%zu, %zu], got "
+             "[%zu, %zu]",
+             n_q_h, dqkv, output_sizes.size() > 0 ? output_sizes[0] : 0,
+             output_sizes.size() > 1 ? output_sizes[1] : 0);
+    throw std::runtime_error(msg);
+  }
+
+  // --- CUDA Kernel 启动配置 ---
+  // 每个 block 处理一个 query head (q)
+  // block 内的线程处理 d 维度
+  // 选择一个合适的 block 大小，通常是 128, 256, 512 等，取决于 dqkv 和 GPU 架构
+  // 这里选择 256 作为示例，可以根据实际情况调整
+  const int block_dim_d = 128;
+
+  // Grid 维度：我们需要 n_q_h 个 block，每个 block 负责一个 q
+  dim3 gridDim(static_cast<unsigned int>(n_q_h), 1, 1);
+  // Block 维度：我们用 block_dim_d 个线程来并行处理 d 维度
+  dim3 blockDim(block_dim_d, 1, 1);
+
+  // 启动内核
+  att_output_kernel<<<gridDim, blockDim>>>(
       att_probs.data_ptr(), static_cast<int>(n_q_h),
       static_cast<int>(cache_length), static_cast<int>(dqkv), V.data_ptr(),
       att_output.data_ptr(), static_cast<int>(n_kv_h));
+
+  // 检查内核启动错误和异步错误
   checkCudaError(cudaGetLastError());
+  // 通常不需要立即同步，除非后续 CPU 需要访问结果
   // checkCudaError(cudaDeviceSynchronize());
 }
 
