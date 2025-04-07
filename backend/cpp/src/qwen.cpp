@@ -533,10 +533,10 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     } catch (const std::out_of_range&) {
     }
 
-    try {
-      o_bias = &params_.at(layer_prefix + "self_attn.o_proj.bias");
-    } catch (const std::out_of_range&) {
-    }
+    // try {
+    //   o_bias = &params_.at(layer_prefix + "self_attn.o_proj.bias");
+    // } catch (const std::out_of_range&) {
+    // }
 
     // 创建CUDA流以并行计算Q, K, V
     // cudaStream_t streams[3];
