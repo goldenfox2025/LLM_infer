@@ -15,7 +15,7 @@
 
 // 预先确定的参数（根据实际情况调整）
 #define DQKV_VALUE 128
-#define B_C_VALUE 4
+#define B_C_VALUE 8
 
 constexpr int WARP_SIZE = 32;
 // 增加 Padding 来避免 Bank Conflict
