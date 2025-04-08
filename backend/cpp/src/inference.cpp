@@ -504,20 +504,20 @@ void InferenceEngine<T>::generate_with_callback(
       // 如果正常跑完 max_length
       result_queue.push(Signal::EndOfStream);
 
-      // 统计 decode 完成时间
-      auto decode_end = std::chrono::high_resolution_clock::now();
-      auto decode_elapsed_ms =
-          std::chrono::duration_cast<std::chrono::milliseconds>(decode_end -
-                                                                decode_start)
-              .count();
+      // // 统计 decode 完成时间
+      // auto decode_end = std::chrono::high_resolution_clock::now();
+      // auto decode_elapsed_ms =
+      //     std::chrono::duration_cast<std::chrono::milliseconds>(decode_end -
+      //                                                           decode_start)
+      //         .count();
 
-      // 打印时间信息
-      std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
-                << std::endl;
-      std::cout << "[decode 循环总耗时(循环外计算)] " << decode_elapsed_ms
-                << " ms" << std::endl;
-      std::cout << "[decode 每 step 累计耗时(循环内累加)] "
-                << total_decode_elapsed_ms << " ms" << std::endl;
+      // // 打印时间信息
+      // std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
+      //           << std::endl;
+      // std::cout << "[decode 循环总耗时(循环外计算)] " << decode_elapsed_ms
+      //           << " ms" << std::endl;
+      // std::cout << "[decode 每 step 累计耗时(循环内累加)] "
+      //           << total_decode_elapsed_ms << " ms" << std::endl;
 
     } catch (...) {
       // 如果发生异常，把异常推入队列
