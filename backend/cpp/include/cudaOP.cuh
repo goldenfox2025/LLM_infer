@@ -51,12 +51,11 @@ template <typename T>
 void rms_norm(Tensor<T>* output, const Tensor<T>* input,
               const Tensor<T>* weight, float eps);
 
-template <typename T_weight>
-void decode_qkv_matmul(
-    const Tensor<T_weight>& qkv_decode,
-    const Tensor<T_weight>& weight,  // Input vector type now T_weight
-    Tensor<T_weight>* out, cudaStream_t stream = nullptr,
-    const Tensor<T_weight>* bias = nullptr);
+template <typename T, typename AccT = float>
+void launch_gemmv(const T* x, const T* y, AccT* dst, const int channel_size,
+                  const int channel_ratio, const int row_size,
+                  const int stride_channel_x, const int stride_channel_y,
+                  const int stride_channel_dst);
 
 template <typename T>
 void matmul(const Tensor<T>& A, const Tensor<T>& B, Tensor<T>* C,

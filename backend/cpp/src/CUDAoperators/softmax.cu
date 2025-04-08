@@ -265,7 +265,7 @@ void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
     int n_heads = shape[1];
     int total_seq_len = shape[2];
     int total_rows = seq_len * n_heads;
-    int THREADS_PER_BLOCK = 64;  // 可根据具体情况调节
+    int THREADS_PER_BLOCK = 128;  // 可根据具体情况调节
     // int shared_mem_size = THREADS_PER_BLOCK * sizeof(T);
     softmax_3d_kernel_v2<T><<<total_rows, THREADS_PER_BLOCK>>>(
         output->data_ptr(), seq_len, n_heads, total_seq_len, mask, offset);
@@ -274,7 +274,7 @@ void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
     int n_heads = shape[0];
     int total_seq_len = shape[1];
     int total_rows = seq_len * n_heads;
-    int THREADS_PER_BLOCK = 64;  // 可根据具体情况调节
+    int THREADS_PER_BLOCK = 128;  // 可根据具体情况调节
     // int shared_mem_size = THREADS_PER_BLOCK * sizeof(T);
 
     softmax_3d_kernel_v2<T><<<total_rows, THREADS_PER_BLOCK>>>(
