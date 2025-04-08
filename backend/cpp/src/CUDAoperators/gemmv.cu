@@ -15,17 +15,6 @@ namespace cuda_OP {
 // Helper Structs and Functions                                               //
 //----------------------------------------------------------------------------//
 
-// Define nv_bfloat162 vector type if needed and supported by architecture
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-// Use native type if available
-// typedef __nv_bfloat162 nv_bfloat162; // Uncomment if not auto-defined
-#else
-// Fallback struct if native type is not available or for older architectures
-struct nv_bfloat162 {
-  nv_bfloat16 x, y;
-};
-#endif
-
 // Device function to convert bfloat16 to float (needed if not intrinsic)
 __device__ inline float bfloat16_to_float(nv_bfloat16 val) {
   unsigned int ui;

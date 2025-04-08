@@ -1,5 +1,6 @@
 #include "inference.hpp"
 
+#include <chrono>  // 用于计时
 #include <cmath>
 #include <condition_variable>
 #include <exception>
@@ -389,7 +390,6 @@ void InferenceEngine<T>::generate_with_callback(
     std::function<void(uint32_t)> callback) {
   ThreadSafeQueue<GenerationResult> result_queue;
 
-  // 注意：lambda 捕获列表保持不变 [&, this, input_ids_copy = input_ids]
   std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
     try {
       // --- 在 try 块开始处声明 next_token ---
@@ -398,24 +398,21 @@ void InferenceEngine<T>::generate_with_callback(
       // --- 在移动 input_ids_copy 之前获取其大小 ---
       size_t input_size = input_ids_copy.size();
 
+      // 统计 prefill 开始时间
+      auto prefill_start = std::chrono::high_resolution_clock::now();
+
       // --- KV Cache Resize ---
       try {
-        // 注意：这里的 kv_cache_ 访问假设是非并发的，或者在类内部有锁保护
         kv_cache_.resize(kv_cache_.size() + input_size);
       } catch (const std::runtime_error& e) {
         std::cerr << "Error resizing KV cache (prefill): " << e.what()
                   << std::endl;
-
         throw;
       }
 
       {
         std::vector<uint32_t> prefill_input =
             input_ids_copy;  // 创建真正的拷贝给 Tensor
-        // std::cout
-        //     << "[InferenceEngine::generate_with_callback] 扩容 KVCache 到 "
-        //     << kv_cache_.size() << " 个位置" << std::endl;
-
         Tensor<uint32_t> input_tensor(std::move(prefill_input), {input_size},
                                       this->device_);
 
@@ -429,44 +426,104 @@ void InferenceEngine<T>::generate_with_callback(
               temperature, top_p, this->d_states);
         }
       }
-      // std::cout << "[InferenceEngine::generate_with_callback] KVCache
-      // 扩容完成 "
-      //           << std::endl;
-      // std::cout << next_token << std::endl;
+
+      // 统计 prefill 结束时间并计算耗时
+      auto prefill_end = std::chrono::high_resolution_clock::now();
+      auto prefill_elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end -
+                                                                prefill_start)
+              .count();
+
+      // 如果是 EOS，就直接返回
       if (next_token == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
+        // 打印 prefill 耗时
+        std::cout << std::endl;
+        std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
+                  << std::endl;
+        std::cout << "[decode 耗时] 0 ms" << std::endl;
+        std::cout << std::endl;
         return;
       }
 
+      // 首先将 prefill 得到的第一个 token 推入队列
       result_queue.push(next_token);
 
       size_t current_total_length = input_size + 1;
       uint32_t last_token = next_token;
 
+      // 统计 decode（也就是正式推理循环）的开始时间
+      // auto decode_start = std::chrono::high_resolution_clock::now();
+
+      // 我们可以再开一个累加器，用于累积每次 step 的耗时
+      // long long total_decode_elapsed_ms = 0;
+
       while (current_total_length < max_length) {
+        // 每次 decode 一个 token，可以统计单次 forward 的耗时
+        // auto step_start = std::chrono::high_resolution_clock::now();
+
         next_token = this->generate_next_token(this->thread_pool_, last_token,
                                                temperature, top_p, top_k);
+
+        // auto step_end = std::chrono::high_resolution_clock::now();
+        // auto step_elapsed_ms =
+        //     std::chrono::duration_cast<std::chrono::milliseconds>(step_end -
+        //                                                           step_start)
+        //         .count();
+        // total_decode_elapsed_ms += step_elapsed_ms;
 
         last_token = next_token;
         current_total_length++;
 
-        // bool is_eos = (next_token == this->model_->get_eos_token_id());
         bool is_eos = (next_token == this->model_->get_eos_token_id());
 
         if (is_eos) {
           result_queue.push(Signal::EndOfStream);
+
+          // decode 结束时间
+          // auto decode_end = std::chrono::high_resolution_clock::now();
+          // auto decode_elapsed_ms =
+          //     std::chrono::duration_cast<std::chrono::milliseconds>(
+          //         decode_end - decode_start)
+          //         .count();
+
+          // std::cout << std::endl;
+          // std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
+          //           << std::endl;
+          // std::cout << "[decode 循环总耗时(循环外计算)] " <<
+          // decode_elapsed_ms
+          //           << " ms" << std::endl;
+          // std::cout << "[decode 每 step 累计耗时(循环内累加)] "
+          //           << total_decode_elapsed_ms << " ms" << std::endl;
+          // std::cout << std::endl;
           return;
         }
         result_queue.push(next_token);
       }
 
+      // 如果正常跑完 max_length
       result_queue.push(Signal::EndOfStream);
 
+      // 统计 decode 完成时间
+      auto decode_end = std::chrono::high_resolution_clock::now();
+      auto decode_elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(decode_end -
+                                                                decode_start)
+              .count();
+
+      // 打印时间信息
+      std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
+                << std::endl;
+      std::cout << "[decode 循环总耗时(循环外计算)] " << decode_elapsed_ms
+                << " ms" << std::endl;
+      std::cout << "[decode 每 step 累计耗时(循环内累加)] "
+                << total_decode_elapsed_ms << " ms" << std::endl;
+
     } catch (...) {
+      // 如果发生异常，把异常推入队列
       result_queue.push(std::current_exception());
     }
   });
-
   try {
     while (true) {
       GenerationResult result = result_queue.pop();

@@ -229,8 +229,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     cuda_OP::matmul(hidden_states,
                     wq,  // 参数1 (const Tensor<float>&) - OK
 
-                    &q_buf,               // 参数3 (Tensor<float>*) - 传递地址
-                    compute_streams_[0],  // 参数4 (cudaStream_t) - OK
+                    &q_buf,   // 参数3 (Tensor<float>*) - 传递地址
+                    nullptr,  // 参数4 (cudaStream_t) - OK
                     q_bias);  // 参数5 (const Tensor<float>*) - 直接传递指针s
 
     Tensor<T>& k_slice = kv_cache->k_cache(i, offset);
@@ -240,21 +240,21 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
 
     cuda_OP::matmul(hidden_states,
-                    wk,                   // 参数1 (const Tensor<float>&) - OK
-                                          // 参数2 (const Tensor<float>&) - OK
-                    &k_slice,             // 参数3 (Tensor<float>*) - 传递地址
-                    compute_streams_[1],  // 参数4 (cudaStream_t) - OK
-                    k_bias);  // 参数5 (const Tensor<float>*) - 直接传递指针s
+                    wk,        // 参数1 (const Tensor<float>&) - OK
+                               // 参数2 (const Tensor<float>&) - OK
+                    &k_slice,  // 参数3 (Tensor<float>*) - 传递地址
+                    nullptr,   // 参数4 (cudaStream_t) - OK
+                    k_bias);   // 参数5 (const Tensor<float>*) - 直接传递指针s
 
     // Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
     // cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
 
     // 假设 v_bias 是 const Tensor<float>* 类型
     cuda_OP::matmul(hidden_states,
-                    wv,                   // 参数1 (const Tensor<float>&) - OK
-                    &v_slice,             // 参数3 (Tensor<float>*) - 传递地址
-                    compute_streams_[2],  // 参数4 (cudaStream_t) - OK
-                    v_bias);  // 参数5 (const Tensor<float>*) - 直接传递指针s
+                    wv,        // 参数1 (const Tensor<float>&) - OK
+                    &v_slice,  // 参数3 (Tensor<float>*) - 传递地址
+                    nullptr,   // 参数4 (cudaStream_t) - OK
+                    v_bias);   // 参数5 (const Tensor<float>*) - 直接传递指针s
 
     // // 同步CUDA流并销毁
     // for (int j = 0; j < 3; j++) {
@@ -284,8 +284,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // }
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
-    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
+    cuda_OP::rope(&q_buf_view, offset, rope_theta_, nullptr);
+    cuda_OP::rope(&k_buf_view, offset, rope_theta_, nullptr);
 
     // 更新KV缓存
     // size_t row_size = n_kv_heads_ * head_dim_;
@@ -356,14 +356,44 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       total_V = v_buf_view;
     }
 
+    Tensor<T> att_heads_1({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+    Tensor<T> att_heads_2({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+    Tensor<T> att_heads_3({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+    // Tensor<T> att_heads_4({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
     Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
-
+    int seq_divide = total_seq_len / 3;
     int ratio = n_heads_ / n_kv_heads_;
-    for (int j = 0; j < 3; ++j) {
-      cudaStreamSynchronize(compute_streams_[j]);
-    }
+    // for (int j = 0; j < 3; ++j) {
+    //   cudaStreamSynchronize(compute_streams_[j]);
+    // }
 
-    // cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads);
+    // cuda_OP::flash_attention(
+    //     Q_3d, total_K.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+    //     total_V.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+    //     att_heads_1, compute_streams_[0]);
+    // cuda_OP::flash_attention(
+    //     Q_3d,
+    //     total_K.slice({seq_divide, 0, 0},
+    //                   {2 * seq_divide, n_kv_heads_, head_dim_}),
+    //     total_V.slice({seq_divide, 0, 0},
+    //                   {2 * seq_divide, n_kv_heads_, head_dim_}),
+    //     att_heads_2, compute_streams_[1]);
+    // cuda_OP::flash_attention(
+    //     Q_3d,
+    //     total_K.slice({2 * seq_divide, 0, 0},
+    //                   {total_seq_len, n_kv_heads_, head_dim_}),
+    //     total_V.slice({2 * seq_divide, 0, 0},
+    //                   {total_seq_len, n_kv_heads_, head_dim_}),
+    //     att_heads_3, compute_streams_[2]);
+
+    // for (int j = 0; j < 3; ++j) {
+    //   cudaStreamSynchronize(compute_streams_[j]);
+    // }
+    // cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads);
 
     Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
     // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_, head_dim_,
