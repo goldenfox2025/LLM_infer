@@ -103,8 +103,8 @@ void compute_att_output(const Tensor<T>& att_probs, const Tensor<T>& V,
 
 // flahattention实现
 template <typename T>
-void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
-                     Tensor<T>& att_output, cudaStream_t stream = nullptr);
+void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
+                     Tensor<T>& att_output);
 
 // prefill 版本：计算注意力分数
 template <typename T>

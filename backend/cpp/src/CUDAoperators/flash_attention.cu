@@ -123,6 +123,7 @@ __global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
 
   // 2. 共享内存声明
   __shared__ float s_qi[DQKV_VALUE];
+  // **** 修改点 1: 使用 PADDED_DQKV 定义 s_vj ****
   __shared__ float s_vj[B_C_VALUE * PADDED_DQKV];  // 使用 Padded 维度
   __shared__ float s_score_buf[B_C_VALUE];
   __shared__ float s_lm[2];               // {global_m, global_l}
@@ -372,22 +373,16 @@ __global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
 
   // 归一化: s_o[d_tid] / global_l
   float final_out = 0.0f;
-  // if (global_l != 0.0f) {  // 防止除零
-  //   final_out = s_o[d_tid] / global_l;
-  // }
-
-  final_out = s_o[d_tid];  // 合并版本，不归一化
+  if (global_l != 0.0f) {  // 防止除零
+    final_out = s_o[d_tid] / global_l;
+  }
 
   // 写回 global memory
   if (threadIdx.y == 0) {  // 让 y=0 的线程负责写回
     // 假设 att_output 指向当前 head 的输出位置
     // 需要正确的输出偏移量
-    int out_offset = head_id * (dqkv + 2);  // 或者其他基于 blockIdx 的偏移
+    int out_offset = head_id * dqkv;  // 或者其他基于 blockIdx 的偏移
     att_output[out_offset + d_tid] = static_cast<T>(final_out);
-    if (d_tid == 0) {
-      att_output[out_offset + dqkv] = static_cast<T>(global_m);
-      att_output[out_offset + dqkv + 1] = static_cast<T>(global_l);
-    }
   }
   // kernel 末尾隐式同步
 }
@@ -994,8 +989,8 @@ __global__ void flash_attention_kernel_v2(T* q, const T* k, const T* v,
 // host 端调用：设置 grid/block、使用静态共享内存（因此 shmem_bytes
 // 设为0），并发起 kernel 调用
 template <typename T>
-void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
-                     Tensor<T>& att_output, cudaStream_t stream) {
+void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
+                     Tensor<T>& att_output) {
   int dqkv = K.sizes()[2];  // 每个 head 内维度
   if (dqkv != DQKV_VALUE) {
     throw std::runtime_error("dqkv 不匹配预定义的值");
@@ -1004,7 +999,9 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
   int n_q_h = Q.sizes()[1];         // query head 数
   int cache_length = K.sizes()[0];  // 总的 kv token 数
   int n_kv_h = K.sizes()[1];
-  int n_groups = n_q_h / n_kv_h;
+  int n_groups = n_q_h / n_kv_h;  // GQA 中的分组数
+
+  // decode 模式下 query 长度为 1
   int B_r = 1;
   int T_r = 1;
 
@@ -1018,7 +1015,7 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
   int threads_y = B_c;   // B_c = B_C_VALUE
   dim3 block(threads_x, threads_y);
 
-  // 只有v5适应于新的分块fa模式
+  // 使用静态共享内存，故 shmem_bytes = 0
   flash_attention_kernel_v5<T><<<grid, block, 0>>>(
       Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
       cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
@@ -1026,11 +1023,9 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
 }
 
 // 显式实例化
-template void flash_attention<float>(Tensor<float>&, const Tensor<float>&&,
-                                     const Tensor<float>&&, Tensor<float>&,
-                                     cudaStream_t stream);
-template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&&,
-                                      const Tensor<nvbf16>&&, Tensor<nvbf16>&,
-                                      cudaStream_t stream);
+template void flash_attention<float>(Tensor<float>&, const Tensor<float>&,
+                                     const Tensor<float>&, Tensor<float>&);
+template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&,
+                                      const Tensor<nvbf16>&, Tensor<nvbf16>&);
 
 }  // namespace cuda_OP
