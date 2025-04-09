@@ -130,8 +130,8 @@ class Tensor {
       data_.reset();
       T* gpu_ptr = static_cast<T*>(
           GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
-      checkCudaError(cudaMemcpy(gpu_ptr, data.data(), length_ * sizeof(T),
-                                cudaMemcpyHostToDevice));
+      checkCudaError(cudaMemcpyAsync(gpu_ptr, data.data(), length_ * sizeof(T),
+                                     cudaMemcpyHostToDevice));
       gpu_data_ = std::shared_ptr<T>(
           gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
