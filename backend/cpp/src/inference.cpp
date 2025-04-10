@@ -1,121 +1,25 @@
+
 #include "inference.hpp"
 
-#include <chrono>  // 用于计时
-#include <cmath>
-#include <condition_variable>
-#include <exception>
-#include <functional>  // 添加以使用 std::function
-#include <iostream>
-#include <mutex>
-#include <optional>
-#include <queue>
-#include <stdexcept>
-#include <variant>
+#include <pybind11/numpy.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+
 
 #include "base_model.hpp"
+#include "common.hpp"
 #include "cudaOP.cuh"
 #include "llama.hpp"
 #include "operators.hpp"
 #include "qwen.hpp"
-// ------------------------
-// KVCache 实现
-// ------------------------
-#include <iostream>
-#include <stdexcept>
 
-// 构造函数：分配连续内存并预计算各个位置的视图
-#include <pybind11/stl.h>
-
-#include <iostream>
-#include <stdexcept>
-template <typename T>
-class ThreadSafeQueue {
- public:
-  void push(T value) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    queue_.push(std::move(value));
-    cv_.notify_one();
-  }
-
-  T pop() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return !queue_.empty(); });
-    T value = std::move(queue_.front());
-    queue_.pop();
-    return value;
-  }
-  // ... (其他成员函数，如 empty, clear, try_pop 可选) ...
-
- private:
-  mutable std::mutex mutex_;
-  std::queue<T> queue_;
-  std::condition_variable cv_;
-};
 
 // 定义用于结果队列的类型
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
 using GenerationResult =
     std::variant<uint32_t, Signal, std::exception_ptr>;  // 定义类型别名
 namespace py = pybind11;
-template <typename T>
-void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
-                      size_t num_to_print = 10) {
-  std::cout << "[Debug] " << tensor_name << ":\n";
 
-  // 1) Print shape
-  std::cout << "  shape: [";
-  for (auto s : tensor.sizes()) {
-    std::cout << s << " ";
-  }
-  std::cout << "]\n";
-
-  // 2) Print strides
-  std::cout << "  strides: [";
-  for (auto st : tensor.strides()) {
-    std::cout << st << " ";
-  }
-  std::cout << "]\n";
-
-  // 3) Print device
-  std::cout << "  device: ";
-  if (tensor.device() == Device::CPU) {
-    std::cout << "CPU";
-  } else if (tensor.device() == Device::CUDA) {
-    std::cout << "CUDA";
-  } else {
-    std::cout << "UNKNOWN";
-  }
-  std::cout << "\n";
-
-  // 4) Print elements starting from offset 0
-  size_t offset = 0;  // 从开始处打印
-  size_t total_elements = tensor.numel();
-  size_t n_print = std::min(num_to_print, total_elements - offset);
-
-  std::cout << "  elements from offset " << offset << " (" << n_print
-            << " element(s)): ";
-  if (tensor.device() == Device::CPU) {
-    const T* ptr = tensor.data_ptr();
-    for (size_t i = 0; i < n_print; i++) {
-      std::cout << ptr[offset + i] << " ";
-    }
-    std::cout << "\n";
-  } else {
-    // Copy from GPU to CPU, then print
-    std::vector<T> host_buffer(n_print);
-    cudaError_t err = cudaMemcpy(host_buffer.data(), tensor.data_ptr() + offset,
-                                 n_print * sizeof(T), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      std::cout << "  [Error] cudaMemcpy failed\n";
-      return;
-    }
-    for (size_t i = 0; i < n_print; i++) {
-      std::cout << host_buffer[i] << " ";
-    }
-    std::cout << "\n";
-  }
-}
-// 构造函数：分配连续内存并预先构造所有 slice（保存在一维 vector 中）
 template <typename T>
 KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim,
                     Device device, size_t initial_size)
@@ -134,8 +38,6 @@ KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim,
       Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_);
   v_cache_contiguous_ =
       Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_);
-
-  // （可选）初始化连续内存数据，比如 memset 为 0
 
   // 分配一维 vector 存储所有 slice
   k_cache_slices_.resize(n_layers_ * max_seq_len_);
@@ -297,20 +199,17 @@ uint32_t InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
   // std::cout << "[InferenceEngine::generate_next_token] 开始生成下一个 token"
   //           << std::endl;
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
-
   Tensor<uint32_t> input({input_ids}, {1}, device_);
   // std::cout << "[InferenceEngine::generate_next_token] 输入 token: "
   //           << input_ids.back() << std::endl;
-
   // 更新 KV 缓存长度（为新 token 分配缓存空间）
   try {
     kv_cache_.resize(kv_cache_.size() + 1);
-    // std::cout << "[InferenceEngine::generate_next_token] KVCache 成功扩容"
-    //           << std::endl;
   } catch (const std::runtime_error& e) {
     std::cerr << "Error resizing KV cache: " << e.what() << std::endl;
     throw;
   }
+
   uint32_t next_token;
   // 前向计算，传入 KVCache 的地址
   if (device_ == Device::CUDA) {
@@ -381,6 +280,7 @@ uint32_t InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
 //     }
 //   }
 // }
+
 namespace py = pybind11;
 
 template <typename T>
@@ -392,6 +292,7 @@ void InferenceEngine<T>::generate_with_callback(
 
   std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
     try {
+      // bind_this_thread_to_core(31);
       // --- 在 try 块开始处声明 next_token ---
       uint32_t next_token;
 
@@ -428,21 +329,21 @@ void InferenceEngine<T>::generate_with_callback(
       }
 
       // 统计 prefill 结束时间并计算耗时
-      auto prefill_end = std::chrono::high_resolution_clock::now();
-      auto prefill_elapsed_ms =
-          std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end -
-                                                                prefill_start)
-              .count();
+      // auto prefill_end = std::chrono::high_resolution_clock::now();
+      // auto prefill_elapsed_ms =
+      //     std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end -
+      //                                                           prefill_start)
+      //         .count();
 
       // 如果是 EOS，就直接返回
       if (next_token == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
         // 打印 prefill 耗时
-        std::cout << std::endl;
-        std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
-                  << std::endl;
-        std::cout << "[decode 耗时] 0 ms" << std::endl;
-        std::cout << std::endl;
+        // std::cout << std::endl;
+        // std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
+        //           << std::endl;
+        // std::cout << "[decode 耗时] 0 ms" << std::endl;
+        // std::cout << std::endl;
         return;
       }
 

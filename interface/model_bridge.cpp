@@ -16,6 +16,7 @@
 
 namespace py = pybind11;
 class infer_base;
+
 // 模型类型枚举
 enum class ModelType {
   LLAMA,
@@ -54,18 +55,18 @@ class ModelFactory {
   }
 };
 
-// 全局模型与推理引擎实例
+// 全局模型与推理引擎实例 便于维护生命周期
 std::shared_ptr<BaseModel> g_model;
 std::unique_ptr<infer_base> g_engine;
 
-//
 // 辅助函数：将 PyTorch 张量转换为 __nv_bfloat16 类型的 Tensor
-//
+
 Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
   try {
     py::object torch_module = py::module::import("torch");
 
     // 确保张量在CPU上，便于数据访问
+    // attr是一种运行时反射
     py::object cpu_tensor = tensor.attr("detach")().attr("cpu")();
 
     // 获取形状
@@ -85,33 +86,28 @@ Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
     std::vector<__nv_bfloat16> data;
     data.reserve(numel);
 
-    // 使用PyTorch的低级接口直接获取原始数据
     if (py::hasattr(cpu_tensor, "element_size") &&
         py::hasattr(cpu_tensor, "data_ptr")) {
+      // 这里使用pytorch的接口获取字节长度
       size_t element_size = cpu_tensor.attr("element_size")().cast<size_t>();
 
-      // 确认是否为bfloat16类型（2字节）
+      // 确认是否为bfloat16类型 其实也可能是fp16 但先不管
       if (element_size == 2) {
         // 获取数据指针，这会返回一个整数，表示内存地址
         uintptr_t data_ptr = cpu_tensor.attr("data_ptr")().cast<uintptr_t>();
-        const uint16_t* ptr = reinterpret_cast<const uint16_t*>(data_ptr);
-
+        const __nv_bfloat16* ptr =
+            reinterpret_cast<const __nv_bfloat16*>(data_ptr);
         // 每个元素直接拷贝二进制数据
         for (size_t i = 0; i < numel; ++i) {
-          __nv_bfloat16 value;
-          // 使用位模式直接转换
-          uint16_t bits = ptr[i];
-          // 这里可以直接赋值，因为bfloat16内存表示是兼容的
-          std::memcpy(&value, &bits, sizeof(uint16_t));
-          data.push_back(value);
+          __nv_bfloat16 bits = ptr[i];
+          data.push_back(bits);
         }
       } else {
-        // 如果不是2字节元素，先转换为float再处理
+        // 如果不是2字节元素，先转换为float再处理 以防万一
         std::cerr
             << "Warning: Input tensor is not bfloat16, converting through float"
             << std::endl;
 
-        // 转为float32
         py::object float_tensor =
             cpu_tensor.attr("to")(torch_module.attr("float"));
 
@@ -129,7 +125,6 @@ Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
       // 备选方案：使用循环直接访问每个元素
       std::cerr << "Warning: Using fallback element-wise access for conversion"
                 << std::endl;
-
       // 转为float32
       py::object float_tensor =
           cpu_tensor.attr("to")(torch_module.attr("float"));
@@ -229,7 +224,8 @@ std::unordered_map<std::string, Tensor<float>> process_llama_weights(
           }
           std::vector<float> data(np_array.data(),
                                   np_array.data() + np_array.size());
-          // 对部分矩阵需要转置
+          // 对部分矩阵需要转置 但本质上没有转置
+          // 这里是为了适配cpu算子（支持stride） 然而cuda没有支持
           if (dst_prefix == "wq" || dst_prefix == "wk" || dst_prefix == "wv" ||
               dst_prefix == "wo" || dst_prefix == "w_up" ||
               dst_prefix == "w_down" || dst_prefix == "w_gate") {
@@ -246,9 +242,8 @@ std::unordered_map<std::string, Tensor<float>> process_llama_weights(
   return cpp_weights;
 }
 
-//
 // 辅助函数：处理 Qwen 模型权重（FP32）
-//
+
 std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
     const py::dict& weights) {
   std::unordered_map<std::string, Tensor<float>> cpp_weights;
@@ -279,7 +274,7 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
       }
     }
   }
-  // 处理层级权重（权重与偏置）
+  // 处理层级权重
   const std::vector<std::pair<std::string, std::string>>
       qwen_layer_key_mapping = {
           {"input_layernorm.weight", "input_layernorm.weight"},
@@ -298,6 +293,7 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
           {"self_attn.k_proj.bias", "self_attn.k_proj.bias"},
           {"self_attn.v_proj.bias", "self_attn.v_proj.bias"},
           {"self_attn.o_proj.bias", "self_attn.o_proj.bias"}};
+
   for (auto item : weights) {
     std::string key = py::str(item.first).cast<std::string>();
     if (key.find("model.layers.") == 0) {
@@ -366,43 +362,12 @@ std::unordered_map<std::string, Tensor<float>> process_qwen_weights_fp32(
         std::cerr << "Error creating lm_head: " << e.what() << std::endl;
         throw;
       }
-    } else {
-      std::cerr << "Error: token_embeddings.weight not found" << std::endl;
-      // 尝试直接查找模型中可能的embedding键
-      for (auto item : weights) {
-        std::string key = py::str(item.first).cast<std::string>();
-        std::cout << "Available key: " << key << std::endl;
-        if (key.find("embed") != std::string::npos ||
-            key.find("wte") != std::string::npos) {
-          std::cout << "Found potential embedding key: " << key << std::endl;
-          py::array_t<float> np_array = item.second.cast<py::array_t<float>>();
-          std::vector<size_t> shape;
-          for (int i = 0; i < np_array.ndim(); i++) {
-            shape.push_back(np_array.shape(i));
-          }
-          std::vector<float> data(np_array.data(),
-                                  np_array.data() + np_array.size());
-          cpp_weights.emplace("token_embeddings.weight",
-                              Tensor<float>(std::move(data), shape));
-          try {
-            Tensor<float> lm_head =
-                cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
-            cpp_weights.emplace("lm_head", std::move(lm_head));
-            break;
-          } catch (const std::exception& e) {
-            std::cerr << "Error creating lm_head from found key: " << e.what()
-                      << std::endl;
-          }
-        }
-      }
     }
   }
   return cpp_weights;
 }
 
-//
-// 辅助函数：处理 Qwen 模型权重（BF16）
-//
+// 处理 Qwen 模型权重（BF16）
 std::unordered_map<std::string, Tensor<__nv_bfloat16>>
 process_qwen_weights_bf16(const py::dict& weights) {
   std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_bf16_weights;
@@ -506,9 +471,6 @@ process_qwen_weights_bf16(const py::dict& weights) {
   return cpp_bf16_weights;
 }
 
-//
-// 模型初始化函数：根据传入的配置、权重（PyTorch 格式）和模型类型构造模型
-//
 bool init_model(py::dict config, py::dict weights,
                 const std::string& model_type) {
   try {
@@ -556,7 +518,7 @@ bool init_model(py::dict config, py::dict weights,
           static_cast<int>(config["rope_theta"].cast<float>());
       // 处理 Llama 权重（FP32）
       cpp_weights_fp32 = process_llama_weights(weights);
-      // 创建 Llama 模型（在 CUDA 上运行）
+      // 创建 Llama 模型（默认在 CUDA 上运行 支持CPU）
       g_model = ModelFactory::create_model(type, cpp_weights_fp32, cpp_config);
       g_model->cuda();
       g_engine =
@@ -606,23 +568,16 @@ bool init_model(py::dict config, py::dict weights,
           static_cast<int>(config["rope_theta"].cast<float>());
       // 处理 Qwen BF16 权重（输入必须为 PyTorch bf16 类型）
       cpp_weights_bf16 = process_qwen_weights_bf16(weights);
-      // 直接构造 BF16 模型
+
       g_model = std::make_shared<QwenModel<__nv_bfloat16>>(cpp_weights_bf16,
                                                            cpp_config);
       g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(g_model,
                                                                   Device::CUDA);
-
-      if (!g_model->verify_params()) {
-        std::cerr << "BF16 Model parameter verification failed" << std::endl;
-        throw std::runtime_error("BF16 Model parameter verification failed");
-      }
-      // Qwen 模型仅支持 CUDA
       g_model->cuda();
     } else {
       throw std::runtime_error("Unsupported model type: " + model_type);
     }
     g_model->print_model_info();
-
     return true;
   } catch (const std::exception& e) {
     std::cerr << "Error initializing model: " << e.what() << std::endl;
@@ -630,9 +585,8 @@ bool init_model(py::dict config, py::dict weights,
   }
 }
 
-//
-// 流式生成函数：在每生成一个 token 时通过回调返回
-//
+// 每生成一个 token 时通过回调返回
+
 void generate_text_stream(const std::vector<uint32_t>& input_ids,
                           py::function callback, size_t max_length = 100,
                           float temperature = 1.0f, float top_p = 0.9f,
@@ -640,6 +594,7 @@ void generate_text_stream(const std::vector<uint32_t>& input_ids,
   if (!g_engine) {
     throw std::runtime_error("Model not initialized");
   }
+
   g_engine->generate_with_callback(input_ids, max_length, temperature, top_p,
                                    top_k, [callback](uint32_t token) {
                                      py::gil_scoped_acquire acquire;
@@ -647,9 +602,8 @@ void generate_text_stream(const std::vector<uint32_t>& input_ids,
                                    });
 }
 
-//
 // Pybind11 模块定义
-//
+
 PYBIND11_MODULE(model_bridge, m) {
   m.def("init_model", &init_model, py::arg("config"), py::arg("weights"),
         py::arg("model_type") = "llama", "Initialize and verify the model");

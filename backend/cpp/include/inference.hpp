@@ -2,17 +2,48 @@
 #include <cuda_bf16.h>
 #include <curand_kernel.h>  // 用于设备端随机数生成
 
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <exception>
 #include <functional>
+#include <iostream>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <queue>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "kvcache_base.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
+template <typename T>
+class ThreadSafeQueue {
+ public:
+  void push(T value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(std::move(value));
+    cv_.notify_one();
+  }
+  T pop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return !queue_.empty(); });
+    T value = std::move(queue_.front());
+    queue_.pop();
+    return value;
+  }
+
+ private:
+  std::mutex mutex_;
+
+  std::queue<T> queue_;
+  std::condition_variable cv_;
+};
 
 // 前向声明 BaseModel
 class BaseModel;

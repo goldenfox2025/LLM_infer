@@ -143,6 +143,7 @@ def main():
     else:
         print(f"Unsupported model type: {args.model_type}")
         exit(1)
+
     
     tokenizer = load_tokenizer(args.model_path, model_type)
 

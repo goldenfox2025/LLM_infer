@@ -11,8 +11,8 @@ set(pybind11_DIR "/root/miniconda3/lib/python3.12/site-packages/pybind11/share/c
 find_package(pybind11 REQUIRED)
 
 # 设置 Torch 的 cmake 配置路径
-set(Torch_DIR "/home/libtorch/libtorch/share/cmake/Torch")
-find_package(Torch REQUIRED)
+# set(Torch_DIR "/home/libtorch/libtorch/share/cmake/Torch")
+# find_package(Torch REQUIRED)
 
 
 # include_directories(backend/cpp/include)
@@ -33,8 +33,6 @@ pybind11_add_module(model_bridge
     backend/cpp/src/inference.cpp
     backend/cpp/src/thread_pool.cpp
     backend/cpp/src/qwen.cpp
-
-    
 )
 
 
@@ -42,33 +40,28 @@ pybind11_add_module(model_bridge
 
 
 
+target_link_libraries(model_bridge PRIVATE operators)
+target_link_libraries(model_bridge PRIVATE -lcublas -lcudart)
 
-target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES} operators)
 
-
-# 将 backend/cpp/include 添加到 model_bridge 的包含路径
-# PUBLIC: 如果其他目标链接 model_bridge，它们也能看到这个目录（虽然此例中没有）
+# PUBLIC: 如果其他目标链接 model_bridge
 # INTERFACE: 只让链接 model_bridge 的目标看到
 # PRIVATE: 只有 model_bridge 自身编译时能看到
+
 # 对于头文件目录，通常用 PUBLIC 或 INTERFACE
 target_include_directories(model_bridge PUBLIC backend/cpp/include)
 
 # 如果 operators 库也需要这个目录
-# (假设 operators 库在子目录 CMakeLists.txt 中定义)
 # 在 backend/cpp/src/CUDAoperators/CMakeLists.txt 中添加:
 # target_include_directories(operators PUBLIC ../../include) # 相对于子目录的路径
 
-# 为 g++ (CXX) 添加 Release 优化参数
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -funroll-loops -flto")
+# 优化参数
 
-# 为 nvcc 添加 Release 优化参数
-# 注意：CUDA_NVCC_FLAGS_RELEASE 变量可能需要根据你的 CUDA 版本确认
-set(CUDA_NVCC_FLAGS_RELEASE "${CUDA_NVCC_FLAGS_RELEASE} -O3 --use_fast_math  -arch=sm_89")
 
 # 修改 target 的编译选项，使用生成器表达式针对 CXX 与 CUDA 分别设置
 target_compile_options(model_bridge PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-O3 -march=native -funroll-loops -flto -mavx2 -mfma>
-  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math -arch=sm_89>
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math -arch=sm_89 --expt-relaxed-constexpr> 
 )
 
 # 启用 CUDA 分离式编译

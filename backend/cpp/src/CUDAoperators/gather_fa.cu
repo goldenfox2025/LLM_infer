@@ -1,3 +1,5 @@
+#include <float.h>
+
 #include <cmath>   // For std::isfinite, fmaxf, __expf
 #include <limits>  // For std::numeric_limits
 
@@ -30,7 +32,7 @@ __global__ void gather_fa_kernel_3_inputs_optimized(const T* T1_ptr,
   float o1 = static_cast<float>(T1_ptr[base_in + tid]);
 
   // 初始化归约变量（全局归约：global_m, global_l, global_o）
-  float global_m = -std::numeric_limits<float>::infinity();
+  float global_m = -FLT_MAX;
   float global_l = 0.0f;
   float global_o = 0.0f;
   if (std::isfinite(m1)) {
