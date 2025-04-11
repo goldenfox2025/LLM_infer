@@ -7,7 +7,7 @@ set(PYBIND11_PYTHON_VERSION 3.12)
 # set(CMAKE_CXX_FLAGS_DEBUG "-g") # 为 Debug 构建类型添加 -g
 # set(CMAKE_BUILD_TYPE Debug) # 默认或显式设置为 Debug 类型以启用 -g
 # 设置 pybind11 的 cmake 配置路径
-set(pybind11_DIR "/root/miniconda3/lib/python3.12/site-packages/pybind11/share/cmake/pybind11")
+# set(pybind11_DIR "/root/miniconda3/lib/python3.12/site-packages/pybind11/share/cmake/pybind11")
 find_package(pybind11 REQUIRED)
 
 # 设置 Torch 的 cmake 配置路径
@@ -61,8 +61,9 @@ target_include_directories(model_bridge PUBLIC backend/cpp/include)
 # 修改 target 的编译选项，使用生成器表达式针对 CXX 与 CUDA 分别设置
 target_compile_options(model_bridge PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-O3 -march=native -funroll-loops -flto -mavx2 -mfma>
-  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math -arch=sm_89 --expt-relaxed-constexpr> 
+  $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-O3 --use_fast_math --expt-relaxed-constexpr -arch=sm_89>
 )
+
 
 # 启用 CUDA 分离式编译
 set_target_properties(model_bridge PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
