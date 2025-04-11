@@ -1,0 +1,1 @@
+cd frontend && python3 chat.py
