@@ -3,7 +3,7 @@ project(llm_infer LANGUAGES CXX CUDA)
 set(CMAKE_CUDA_ARCHITECTURES 89)
 
 set(CMAKE_CXX_STANDARD 17)
-set(PYBIND11_PYTHON_VERSION 3.12)
+set(PYBIND11_PYTHON_VERSION 3.10)
 # set(CMAKE_CXX_FLAGS_DEBUG "-g") # 为 Debug 构建类型添加 -g
 # set(CMAKE_BUILD_TYPE Debug) # 默认或显式设置为 Debug 类型以启用 -g
 # 设置 pybind11 的 cmake 配置路径
@@ -50,6 +50,8 @@ target_link_libraries(model_bridge PRIVATE -lcublas -lcudart)
 
 # 对于头文件目录，通常用 PUBLIC 或 INTERFACE
 target_include_directories(model_bridge PUBLIC backend/cpp/include)
+
+target_include_directories(model_bridge PRIVATE /usr/local/cuda/include)
 
 # 如果 operators 库也需要这个目录
 # 在 backend/cpp/src/CUDAoperators/CMakeLists.txt 中添加:
