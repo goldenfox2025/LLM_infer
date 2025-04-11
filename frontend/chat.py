@@ -164,7 +164,7 @@ def main():
     print(f"Head Dimension: {config['hidden_size'] // config['num_attention_heads']}")
 
     # 导入 C++ 模型桥接接口
-    sys.path.append("/home/LLM_infer/build")
+    sys.path.append("../build")
     from model_bridge import init_model, generate_text_stream
 
     # 初始化模型
@@ -203,6 +203,9 @@ def main():
                 add_generation_prompt=True
             )
             model_inputs = tokenizer([text], return_tensors="pt")
+            # print("Type of text returned by apply_chat_template:", type(text))
+            # print("Content:", text)
+
             input_ids = model_inputs["input_ids"][0].tolist()
         else:  # llama
             if first_chat:

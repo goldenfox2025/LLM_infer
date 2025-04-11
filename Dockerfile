@@ -35,7 +35,7 @@ COPY frontend/ frontend/
 COPY interface/ interface/
 
 # 拉取 CUTLASS（固定版本更稳定）
-RUN git clone --recursive https://github.com/NVIDIA/cutlass.git --depth=1
+RUN git clone --recursive https://github.com/NVIDIA/cutlass.git 
 
 # 编译阶段：自动获取 pybind11 的 CMake 配置路径传给 cmake，然后编译工程
 RUN mkdir build && cd build && \

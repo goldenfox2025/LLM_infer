@@ -60,10 +60,9 @@ target_include_directories(model_bridge PRIVATE /usr/local/cuda/include)
 # 优化参数
 
 
-# 修改 target 的编译选项，使用生成器表达式针对 CXX 与 CUDA 分别设置
 target_compile_options(model_bridge PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-O3 -march=native -funroll-loops -flto -mavx2 -mfma>
-  $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-O3 --use_fast_math --expt-relaxed-constexpr -arch=sm_89>
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math --expt-relaxed-constexpr -gencode arch=compute_89,code=sm_89>
 )
 
 
