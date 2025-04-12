@@ -5,7 +5,24 @@ echo ">> Starting Nsight Compute profiling..."
 
 # 记录原始目录 (父目录)
 original_dir=$(pwd)
-echo ">> Original (parent) directory: ${original_dir}"
+echo ">> Original directory: ${original_dir}"
+
+# --- New: Define and ensure the 'data' directory exists ---
+data_dir_name="data"
+data_dir_path="${original_dir}/${data_dir_name}"
+
+if [ ! -d "${data_dir_path}" ]; then
+    echo ">> Data directory '${data_dir_path}' not found. Creating it..."
+    mkdir -p "${data_dir_path}"
+    if [ $? -ne 0 ]; then
+        echo ">> Error: Failed to create data directory '${data_dir_path}'!"
+        exit 1
+    fi
+    echo ">> Created data directory: ${data_dir_path}"
+else
+    echo ">> Using existing data directory: ${data_dir_path}"
+fi
+# --- End New ---
 
 # 设置 perf_event_paranoid (保持之前的健壮性检查)
 if [ -w /proc/sys/kernel/perf_event_paranoid ]; then
@@ -26,23 +43,21 @@ fi
 
 # 检查 frontend 目录是否存在于当前 (父) 目录
 if [ -d "frontend" ]; then
-    # 定义输出报告文件名 (将在父目录创建)
+    # 定义输出报告文件名 (包含时间戳)
     report_filename="chat_profile_$(date +%Y%m%d_%H%M%S).ncu-rep"
-    # 定义报告文件在父目录的完整路径
-    report_full_path="${original_dir}/${report_filename}"
+    # 定义报告文件在 'data' 目录中的完整路径
+    report_full_path="${data_dir_path}/${report_filename}"
 
     # 切换到 frontend 目录
     cd frontend
     echo ">> Changed directory to $(pwd)."
 
     echo ">> Running Nsight Compute on chat.py..."
-    # *** 关键修改：使用绝对路径或相对路径指定父目录作为输出位置 ***
-    # 方法一：使用绝对路径 (更安全)
-    # ncu -o "${report_full_path}" ...
-    # 方法二：使用相对路径 ".." (简洁，但在复杂场景下可能略脆弱)
-    echo ">> Report file will be saved to: ${report_full_path}" # 指向父目录
+    # *** 关键修改：指定输出路径为父目录下的 'data' 目录 ***
+    # 使用相对路径 "../data/" 指向原始目录下的 data 文件夹
+    echo ">> Report file will be saved to: ${report_full_path}"
     ncu \
-      -o "../${report_filename}" \
+      -o "../${data_dir_name}/${report_filename}" \
       --set full \
       --target-processes all \
       --replay-mode kernel \
@@ -58,9 +73,11 @@ if [ -d "frontend" ]; then
     # 根据 ncu 退出状态进行判断和报告
     if [ $ncu_exit_status -eq 0 ]; then
         echo ">> Nsight Compute profiling finished successfully."
-        # 报告已经在父目录，路径正确
+        # 报告已经在父目录的 data 子目录中，路径正确
         echo ">> Report saved to: ${report_full_path}"
-        echo ">> You can view the report using the Nsight Compute GUI: ncu-ui ${report_full_path}" # 或者 ncu-ui "${report_filename}" 因为已经在该目录
+        # 提供查看命令，可以使用相对路径 data/ 或完整路径
+        echo ">> You can view the report using the Nsight Compute GUI: ncu-ui \"${report_full_path}\""
+        # 或者: echo ">> You can view the report using the Nsight Compute GUI: ncu-ui \"${data_dir_name}/${report_filename}\""
     else
         echo ">> Nsight Compute profiling failed with exit code ${ncu_exit_status}."
         # 报告文件可能未生成或不完整，但仍提示预期路径
