@@ -94,6 +94,23 @@ class Tensor {
     }
   }
 
+  // 这个仅限gpu_ptr已经被分配了内存，用于sample返回gpu指针的从尝试版本
+  Tensor(T* gpu_ptr,const std::vector<size_t>& shape,Device device)
+      : shape_(shape),
+        offset_(0),
+        length_(1),
+        device_(Device::CUDA),
+        data_(nullptr),
+        gpu_data_(gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); }) {
+    if(device == Device::CPU){
+      throw std::runtime_error("Invalid device specified in Tensor constructor");
+    }
+    for (size_t dim : shape_) {
+      length_ *= dim;
+    }
+    strides_ = compute_strides(shape_);
+
+  }
   // 从右值 vector 数据和形状构造（CPU 模式）
   Tensor(std::vector<T>&& data, const std::vector<size_t>& shape)
       : data_(std::make_shared<std::vector<T>>(std::move(data))),

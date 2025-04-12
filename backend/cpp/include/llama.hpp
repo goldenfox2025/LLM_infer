@@ -16,10 +16,10 @@ class LlamaModel : public BaseModel {
   void print_model_info() const override;
 
   // 前向计算
-  uint32_t forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+  uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                    KVCacheBase* kv_cache, size_t top_k, float temperature,
                    float top_p, curandState* d_states = nullptr) override;
-  uint32_t prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+  uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                    KVCacheBase* kv_cache, size_t top_k, float temperature,
                    float top_p, curandState* d_states = nullptr) override;
   Tensor<float> prefill_cpu(const Tensor<uint32_t>* input,

@@ -24,7 +24,7 @@ class QwenModel : public BaseModel {
 
   // Implementation of BaseModel interface:
   // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
-  uint32_t forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+  uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                    KVCacheBase* kv_cache, size_t top_k, float temperature,
                    float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
@@ -32,7 +32,7 @@ class QwenModel : public BaseModel {
     return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
                            top_k, d_states);
   }
-  uint32_t prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
+  uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                    KVCacheBase* kv_cache, size_t top_k, float temperature,
                    float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);

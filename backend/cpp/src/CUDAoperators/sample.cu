@@ -173,7 +173,7 @@ struct ConvertToFloatFunctor {
 };
 
 template <typename T>
-uint32_t sample(Tensor<T>&& logits, float temperature,
+uint32_t* sample(Tensor<T>&& logits, float temperature,
                 float top_p,  // top_p still unused
                 size_t top_k, curandState* d_states) {
   if (logits.device() != Device::CUDA) {
@@ -306,9 +306,9 @@ uint32_t sample(Tensor<T>&& logits, float temperature,
   CUDA_CHECK(cudaGetLastError());
 
   // --- Copy result back ---
-  uint32_t h_result = 0;
-  CUDA_CHECK(cudaMemcpy(&h_result, d_sampled_index, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost));
+  // uint32_t h_result = 0;
+  // CUDA_CHECK(cudaMemcpy(&h_result, d_sampled_index, sizeof(uint32_t),
+  //                       cudaMemcpyDeviceToHost));
 
   // --- Free Memory ---
   pool.free(d_scaled_logits);
@@ -316,17 +316,17 @@ uint32_t sample(Tensor<T>&& logits, float temperature,
   pool.free(d_indices);
   pool.free(d_sorted_logits);
   pool.free(d_sorted_indices);
-  pool.free(d_sampled_index);
+  // pool.free(d_sampled_index);
   pool.free(d_reduce_temp_storage);
   pool.free(d_sort_temp_storage);
 
-  return h_result;
+  return d_sampled_index;
 }
 
 // Template instantiations
-template uint32_t sample<float>(Tensor<float>&&, float, float, size_t,
+template uint32_t* sample<float>(Tensor<float>&&, float, float, size_t,
                                 curandState*);
-template uint32_t sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float,
+template uint32_t* sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float,
                                         size_t, curandState*);
 
 }  // namespace cuda_OP

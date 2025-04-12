@@ -473,7 +473,7 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
   return logits.cpu();
 }
 
-uint32_t LlamaModel::prefill(const Tensor<uint32_t>* input,
+uint32_t* LlamaModel::prefill(const Tensor<uint32_t>* input,
                              ThreadPool& thread_pool, KVCacheBase* kv_cache,
                              size_t top_k, float temperature, float top_p,
                              curandState* d_states) {

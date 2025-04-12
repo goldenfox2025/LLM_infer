@@ -25,11 +25,11 @@ class BaseModel {
   virtual ~BaseModel() = default;
 
   // Core inference methods that must be implemented by derived classes
-  virtual uint32_t forward(const Tensor<uint32_t>* input,
+  virtual uint32_t* forward(const Tensor<uint32_t>* input,
                            ThreadPool& thread_pool, KVCacheBase* kv_cache,
                            size_t top_k, float temperature, float top_p,
                            curandState* d_states = nullptr) = 0;
-  virtual uint32_t prefill(const Tensor<uint32_t>* input,
+  virtual uint32_t* prefill(const Tensor<uint32_t>* input,
                            ThreadPool& thread_pool, KVCacheBase* kv_cache,
                            size_t top_k, float temperature, float top_p,
                            curandState* d_states = nullptr) = 0;

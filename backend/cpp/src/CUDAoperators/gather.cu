@@ -115,7 +115,7 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA gather kernel launch failed");
   }
-  err = cudaDeviceSynchronize();
+  // err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA gather synchronization failed");
   }

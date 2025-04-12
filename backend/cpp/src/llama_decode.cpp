@@ -553,7 +553,7 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
   return logits.cpu();
 }
 
-uint32_t LlamaModel::forward(const Tensor<uint32_t>* input,
+uint32_t* LlamaModel::forward(const Tensor<uint32_t>* input,
                              ThreadPool& thread_pool, KVCacheBase* kv_cache,
                              size_t top_k, float temperature, float top_p,
                              curandState* d_states) {
@@ -573,11 +573,11 @@ uint32_t LlamaModel::forward(const Tensor<uint32_t>* input,
   }
   if (device_ == Device::CUDA) {
     Tensor<float> logits = forward_cuda(input, typed_kv_cache);
-    uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
+    uint32_t* next_token = OP::sample(&logits, temperature, top_p, top_k);
     return next_token;
   } else {
     Tensor<float> logits = forward_cpu(input, thread_pool, typed_kv_cache);
-    uint32_t next_token = OP::sample(&logits, temperature, top_p, top_k);
+    uint32_t* next_token = OP::sample(&logits, temperature, top_p, top_k);
     return next_token;
   }
 }

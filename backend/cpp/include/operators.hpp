@@ -80,7 +80,7 @@ void silu(Tensor<T>* out, const Tensor<T>* x) {
 // - temperature: 温度缩放因子。
 // - top_p: nucleus 采样参数（累计概率阈值，取值通常小于 1.0，如 0.9）。
 // - top_k: 仅保留概率最高的 top_k 个候选（若为 0 则不进行 top-k 过滤）。
-inline uint32_t sample(const Tensor<float>* logits, float temperature,
+inline uint32_t* sample(const Tensor<float>* logits, float temperature,
                        float top_p, size_t top_k) {
   if (logits->device() == Device::CUDA) {
     throw std::runtime_error("sample: logits must be on CPU");
@@ -203,7 +203,7 @@ inline uint32_t sample(const Tensor<float>* logits, float temperature,
   std::random_device rd;
   std::mt19937 gen(rd());
   std::discrete_distribution<> dist(renorm_probs.begin(), renorm_probs.end());
-  uint32_t chosen = indices[dist(gen)];
+  uint32_t* chosen = new uint32_t(indices[dist(gen)]);
   // std::cout << "[OP::sample] 采样结果: " << chosen << std::endl;
   // std::cout << "[OP::sample] ====== 采样完成 ======\n" << std::endl;
   return chosen;

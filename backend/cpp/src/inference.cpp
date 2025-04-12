@@ -18,6 +18,7 @@
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
 using GenerationResult =
     std::variant<uint32_t, Signal, std::exception_ptr>;  // 定义类型别名
+// using GenerationResult = uint32_t*;
 namespace py = pybind11;
 
 template <typename T>
@@ -192,14 +193,14 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
 }
 
 template <typename T>
-uint32_t InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
-                                                 uint32_t input_ids,
+uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
+                                                 uint32_t* input_ids,
                                                  float temperature, float top_p,
                                                  size_t top_k) {
   // std::cout << "[InferenceEngine::generate_next_token] 开始生成下一个 token"
   //           << std::endl;
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
-  Tensor<uint32_t> input({input_ids}, {1}, device_);
+  Tensor<uint32_t> input(input_ids, {1}, device_);
   // std::cout << "[InferenceEngine::generate_next_token] 输入 token: "
   //           << input_ids.back() << std::endl;
   // 更新 KV 缓存长度（为新 token 分配缓存空间）
@@ -210,7 +211,7 @@ uint32_t InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
     throw;
   }
 
-  uint32_t next_token;
+  uint32_t* next_token;
   // 前向计算，传入 KVCache 的地址
   if (device_ == Device::CUDA) {
     next_token = model_->forward(&input, thread_pool, &kv_cache_, top_k,
@@ -294,7 +295,7 @@ void InferenceEngine<T>::generate_with_callback(
     try {
       // bind_this_thread_to_core(31);
       // --- 在 try 块开始处声明 next_token ---
-      uint32_t next_token;
+      uint32_t* next_token_;
 
       // --- 在移动 input_ids_copy 之前获取其大小 ---
       size_t input_size = input_ids_copy.size();
@@ -318,11 +319,11 @@ void InferenceEngine<T>::generate_with_callback(
                                       this->device_);
 
         if (this->device_ == Device::CPU) {
-          next_token = this->model_->prefill(&input_tensor, this->thread_pool_,
+          next_token_ = this->model_->prefill(&input_tensor, this->thread_pool_,
                                              &this->kv_cache_, top_k,
                                              temperature, top_p);
         } else {
-          next_token = this->model_->prefill(
+          next_token_ = this->model_->prefill(
               &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
               temperature, top_p, this->d_states);
         }
@@ -334,7 +335,9 @@ void InferenceEngine<T>::generate_with_callback(
       //     std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end -
       //                                                           prefill_start)
       //         .count();
-
+      uint32_t next_token = -1;
+      cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    
       // 如果是 EOS，就直接返回
       if (next_token == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
@@ -346,12 +349,14 @@ void InferenceEngine<T>::generate_with_callback(
         // std::cout << std::endl;
         return;
       }
+      
+
 
       // 首先将 prefill 得到的第一个 token 推入队列
       result_queue.push(next_token);
 
       size_t current_total_length = input_size + 1;
-      uint32_t last_token = next_token;
+      uint32_t* last_token = next_token_;
 
       // 统计 decode（也就是正式推理循环）的开始时间
       // auto decode_start = std::chrono::high_resolution_clock::now();
@@ -363,9 +368,9 @@ void InferenceEngine<T>::generate_with_callback(
         // 每次 decode 一个 token，可以统计单次 forward 的耗时
         // auto step_start = std::chrono::high_resolution_clock::now();
 
-        next_token = this->generate_next_token(this->thread_pool_, last_token,
+        next_token_ = this->generate_next_token(this->thread_pool_, last_token,
                                                temperature, top_p, top_k);
-
+        cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t), cudaMemcpyDeviceToHost);
         // auto step_end = std::chrono::high_resolution_clock::now();
         // auto step_elapsed_ms =
         //     std::chrono::duration_cast<std::chrono::milliseconds>(step_end -
@@ -373,11 +378,11 @@ void InferenceEngine<T>::generate_with_callback(
         //         .count();
         // total_decode_elapsed_ms += step_elapsed_ms;
 
-        last_token = next_token;
+        last_token = next_token_;
         current_total_length++;
 
         bool is_eos = (next_token == this->model_->get_eos_token_id());
-
+        // bool is_eos = false;
         if (is_eos) {
           result_queue.push(Signal::EndOfStream);
 

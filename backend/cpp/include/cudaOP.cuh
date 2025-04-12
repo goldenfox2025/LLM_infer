@@ -86,7 +86,7 @@ void add(Tensor<T>* output, Tensor<T>* A, Tensor<T>* B,
          cudaStream_t stream = 0);
 
 template <typename T>
-uint32_t sample(Tensor<T>&& input, float temperature, float top_p, size_t top_k,
+uint32_t *sample(Tensor<T>&& input, float temperature, float top_p, size_t top_k,
                 curandState* d_states);
 
 // 计算注意力分数（多头注意力机制相关算子）
