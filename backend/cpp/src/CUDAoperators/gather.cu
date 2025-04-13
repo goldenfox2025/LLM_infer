@@ -81,7 +81,7 @@ __global__ void gather_kernel_v1(const uint32_t* input,
 // 模板化的 host 端 gather 函数
 template <typename T>
 void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
-            const Tensor<T>* embedding_table) {
+            const Tensor<T>* embedding_table, cudaStream_t stream) {
   int seq_len = static_cast<int>(input->numel());
   int embed_dim = static_cast<int>(output->sizes()[1]);
   int vocab_size = static_cast<int>(embedding_table->sizes()[0]);
@@ -107,7 +107,7 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
   int blocks = (total + threadsPerBlock - 1) / threadsPerBlock;
 
   // 启动 CUDA kernel
-  gather_kernel_v2<T><<<blocks, threadsPerBlock>>>(
+  gather_kernel_v2<T><<<blocks, threadsPerBlock, 0, stream>>>(
       input->data_ptr(), embedding_table->data_ptr(), output->data_ptr(),
       seq_len, embed_dim, vocab_size);
 
@@ -121,7 +121,7 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input,
   }
 }
 template void gather<nvbf16>(Tensor<nvbf16>*, const Tensor<uint32_t>*,
-                             const Tensor<nvbf16>*);
+                             const Tensor<nvbf16>*, cudaStream_t);
 template void gather<float>(Tensor<float>*, const Tensor<uint32_t>*,
-                            const Tensor<float>*);
+                            const Tensor<float>*, cudaStream_t);
 }  // namespace cuda_OP

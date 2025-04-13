@@ -249,7 +249,7 @@ __global__ void softmax_3d_kernel_v1(T* data, int seq_len, int n_heads,
 // false），要求输出张量与输入张量形状一致
 template <typename T>
 void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
-             int offset) {
+             int offset, cudaStream_t stream) {
   // 如果 output 与 input 不同，则先复制数据（设备内拷贝）
   if (output != input) {
     size_t total = 1;
@@ -267,7 +267,7 @@ void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
     int total_rows = seq_len * n_heads;
     int THREADS_PER_BLOCK = 64;  // 可根据具体情况调节
     // int shared_mem_size = THREADS_PER_BLOCK * sizeof(T);
-    softmax_3d_kernel_v2<T><<<total_rows, THREADS_PER_BLOCK>>>(
+    softmax_3d_kernel_v2<T><<<total_rows, THREADS_PER_BLOCK, 0, stream>>>(
         output->data_ptr(), seq_len, n_heads, total_seq_len, mask, offset);
   } else if (shape.size() == 2 && dim == 1) {
     int seq_len = 1;
@@ -277,7 +277,7 @@ void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
     int THREADS_PER_BLOCK = 64;  // 可根据具体情况调节
     // int shared_mem_size = THREADS_PER_BLOCK * sizeof(T);
 
-    softmax_3d_kernel_v2<T><<<total_rows, THREADS_PER_BLOCK>>>(
+    softmax_3d_kernel_v2<T><<<total_rows, THREADS_PER_BLOCK, 0, stream>>>(
         output->data_ptr(), seq_len, n_heads, total_seq_len, mask, offset);
 
   } else {
@@ -289,9 +289,9 @@ void softmax(Tensor<T>* output, const Tensor<T>* input, int dim, bool mask,
 }
 
 template void softmax<nvbf16>(Tensor<nvbf16>*, const Tensor<nvbf16>*, int, bool,
-                              int);
+                              int, cudaStream_t);
 
 template void softmax<float>(Tensor<float>*, const Tensor<float>*, int, bool,
-                             int);
+                             int, cudaStream_t);
 
 }  // namespace cuda_OP

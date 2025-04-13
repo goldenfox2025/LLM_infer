@@ -86,14 +86,14 @@ __global__ void gather_fa_kernel_3_inputs_optimized(const T* T1_ptr,
 // Host 端启动函数；注意 T4 参数已移除
 template <typename T>
 void gather_fa(const Tensor<T>& T1, const Tensor<T>& T2, const Tensor<T>& T3,
-               Tensor<T>& T5) {
+               Tensor<T>& T5, cudaStream_t stream) {
   int dqkv = T5.sizes()[1];
   int q_h = T5.sizes()[0];
 
   dim3 grid(q_h);
   dim3 block(dqkv);
 
-  gather_fa_kernel_3_inputs_optimized<T><<<grid, block>>>(
+  gather_fa_kernel_3_inputs_optimized<T><<<grid, block, 0, stream>>>(
       T1.data_ptr(), T2.data_ptr(), T3.data_ptr(), T5.data_ptr(), q_h, dqkv);
 
   // 可选：添加错误检测或 cudaDeviceSynchronize() 调用
@@ -101,10 +101,12 @@ void gather_fa(const Tensor<T>& T1, const Tensor<T>& T2, const Tensor<T>& T3,
 
 // 模板实例化
 template void gather_fa<float>(const Tensor<float>& T1, const Tensor<float>& T2,
-                               const Tensor<float>& T3, Tensor<float>& T5);
+                               const Tensor<float>& T3, Tensor<float>& T5,
+                               cudaStream_t stream);
 template void gather_fa<__nv_bfloat16>(const Tensor<__nv_bfloat16>& T1,
                                        const Tensor<__nv_bfloat16>& T2,
                                        const Tensor<__nv_bfloat16>& T3,
-                                       Tensor<__nv_bfloat16>& T5);
+                                       Tensor<__nv_bfloat16>& T5,
+                                       cudaStream_t stream);
 
 }  // namespace cuda_OP

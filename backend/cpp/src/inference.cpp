@@ -5,14 +5,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-
 #include "base_model.hpp"
 #include "common.hpp"
 #include "cudaOP.cuh"
 #include "llama.hpp"
 #include "operators.hpp"
 #include "qwen.hpp"
-
 
 // 定义用于结果队列的类型
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
@@ -184,7 +182,7 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
   //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
   if (device_ == Device::CUDA) {
     cudaMalloc(&d_states, sizeof(curandState));
-    cuda_OP::init_curand(d_states, 42, 0);
+    cuda_OP::init_curand(d_states, 42, 0, nullptr);
     std::cout
         << "[InferenceEngine::InferenceEngine] Moving InferenceEngine to CUDA"
         << std::endl;
@@ -194,9 +192,9 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
 
 template <typename T>
 uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
-                                                 uint32_t* input_ids,
-                                                 float temperature, float top_p,
-                                                 size_t top_k) {
+                                                  uint32_t* input_ids,
+                                                  float temperature,
+                                                  float top_p, size_t top_k) {
   // std::cout << "[InferenceEngine::generate_next_token] 开始生成下一个 token"
   //           << std::endl;
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
@@ -320,8 +318,8 @@ void InferenceEngine<T>::generate_with_callback(
 
         if (this->device_ == Device::CPU) {
           next_token_ = this->model_->prefill(&input_tensor, this->thread_pool_,
-                                             &this->kv_cache_, top_k,
-                                             temperature, top_p);
+                                              &this->kv_cache_, top_k,
+                                              temperature, top_p);
         } else {
           next_token_ = this->model_->prefill(
               &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
@@ -336,8 +334,9 @@ void InferenceEngine<T>::generate_with_callback(
       //                                                           prefill_start)
       //         .count();
       uint32_t next_token = -1;
-      cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-    
+      cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t),
+                      cudaMemcpyDeviceToHost);
+
       // 如果是 EOS，就直接返回
       if (next_token == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
@@ -349,8 +348,6 @@ void InferenceEngine<T>::generate_with_callback(
         // std::cout << std::endl;
         return;
       }
-      
-
 
       // 首先将 prefill 得到的第一个 token 推入队列
       result_queue.push(next_token);
@@ -369,8 +366,9 @@ void InferenceEngine<T>::generate_with_callback(
         // auto step_start = std::chrono::high_resolution_clock::now();
 
         next_token_ = this->generate_next_token(this->thread_pool_, last_token,
-                                               temperature, top_p, top_k);
-        cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+                                                temperature, top_p, top_k);
+        cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t),
+                        cudaMemcpyDeviceToHost);
         // auto step_end = std::chrono::high_resolution_clock::now();
         // auto step_elapsed_ms =
         //     std::chrono::duration_cast<std::chrono::milliseconds>(step_end -

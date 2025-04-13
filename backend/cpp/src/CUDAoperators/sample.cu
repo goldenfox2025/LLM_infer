@@ -174,8 +174,8 @@ struct ConvertToFloatFunctor {
 
 template <typename T>
 uint32_t* sample(Tensor<T>&& logits, float temperature,
-                float top_p,  // top_p still unused
-                size_t top_k, curandState* d_states) {
+                 float top_p,  // top_p still unused
+                 size_t top_k, curandState* d_states, cudaStream_t stream) {
   if (logits.device() != Device::CUDA) {
     throw std::runtime_error("Input tensor must be on CUDA device");
   }
@@ -230,7 +230,7 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
   void* d_sort_temp_storage = nullptr;
   size_t sort_temp_storage_bytes = 0;
 
-  cudaStream_t stream = nullptr;
+  // cudaStream_t stream = nullptr;
 
   // --- Step 1 (Fused): Scale Logits and Initialize Indices ---
   const int scale_init_block_size = 256;
@@ -325,9 +325,9 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
 
 // Template instantiations
 template uint32_t* sample<float>(Tensor<float>&&, float, float, size_t,
-                                curandState*);
+                                 curandState*, cudaStream_t);
 template uint32_t* sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float,
-                                        size_t, curandState*);
+                                         size_t, curandState*, cudaStream_t);
 
 }  // namespace cuda_OP
 

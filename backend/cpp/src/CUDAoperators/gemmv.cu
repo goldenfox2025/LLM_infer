@@ -152,29 +152,30 @@ void launch_gemmv(const T *x,              // 矩阵
                   const int channel_size,  // 矩阵的列数 ratio之前
                   const int channel_ratio,  // q头除以ratio得到对应的kv头
                   const int row_size,       // 需要多少行乘法 totalseqlen
-                  const int stride_channel_x,   // 矩阵的行步长
-                  const int stride_channel_y,   // 向量的行步长
-                  const int stride_channel_dst  // 输出的行步长
-) {
+                  const int stride_channel_x,    // 矩阵的行步长
+                  const int stride_channel_y,    // 向量的行步长
+                  const int stride_channel_dst,  // 输出的行步长
+                  cudaStream_t stream) {
   dim3 grid(row_size, channel_size);
   constexpr int block_size = 128;
   dim3 block(block_size);
   gemmv<T, AccT, block_size>
-      <<<grid, block>>>(x, y, dst, channel_ratio, stride_channel_x,
-                        stride_channel_y, stride_channel_dst);
+      <<<grid, block, 0, stream>>>(x, y, dst, channel_ratio, stride_channel_x,
+                                   stride_channel_y, stride_channel_dst);
 }
 template void launch_gemmv<float, float>(
     const float *x, const float *y, float *dst, const int channel_size,
     const int channel_ratio, const int row_size, const int stride_channel_x,
-    const int stride_channel_y, const int stride_channel_dst);
+    const int stride_channel_y, const int stride_channel_dst,
+    cudaStream_t stream);
 template void launch_gemmv<nv_bfloat16, nv_bfloat16>(
     const nv_bfloat16 *x, const nv_bfloat16 *y, nv_bfloat16 *dst,
     const int channel_size, const int channel_ratio, const int row_size,
     const int stride_channel_x, const int stride_channel_y,
-    const int stride_channel_dst);
+    const int stride_channel_dst, cudaStream_t stream);
 template void launch_gemmv<nv_bfloat16, float>(
     const nv_bfloat16 *x, const nv_bfloat16 *y, float *dst,
     const int channel_size, const int channel_ratio, const int row_size,
     const int stride_channel_x, const int stride_channel_y,
-    const int stride_channel_dst);
+    const int stride_channel_dst, cudaStream_t stream);
 }  // namespace cuda_OP

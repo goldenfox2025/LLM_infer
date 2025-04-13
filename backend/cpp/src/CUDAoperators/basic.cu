@@ -205,7 +205,7 @@ __global__ void rms_norm_kernel(const T *input, T *output, const T *weight,
 
 template <typename T>
 void rms_norm(Tensor<T> *output, const Tensor<T> *input,
-              const Tensor<T> *weight, float eps) {
+              const Tensor<T> *weight, float eps, cudaStream_t stream) {
   // input/output shape 均为 [seq_len, d]
   size_t seq_len = input->sizes()[0];
   size_t d = input->sizes()[1];  // row_size
@@ -233,13 +233,15 @@ void rms_norm(Tensor<T> *output, const Tensor<T> *input,
   dim3 block_dim(threads_per_block);
   dim3 grid_dim(seq_len);  // grid_dim.x = seq_len
 
-  rms_norm_kernel_v2<T><<<grid_dim, block_dim>>>(
+  rms_norm_kernel_v2<T><<<grid_dim, block_dim, 0, stream>>>(
       input->data_ptr(), output->data_ptr(), weight->data_ptr(), eps, d);
 
   // --- 错误检查和同步 ---
   checkCudaError(cudaGetLastError());
   // 对于性能分析或确保后续 CPU 操作能看到结果，需要同步
-  // checkCudaError(cudaDeviceSynchronize());
+  // if (stream == nullptr) {
+  //   checkCudaError(cudaDeviceSynchronize());
+  // }
 }
 
 // Helper function (optional, if you want dynamic adjustment based on d)
@@ -550,7 +552,7 @@ __global__ void silu_kernel(T *data, int total) {
 }
 
 template <typename T>
-void silu(Tensor<T> *output, const Tensor<T> *input) {
+void silu(Tensor<T> *output, const Tensor<T> *input, cudaStream_t stream) {
   size_t total = 1;
   for (auto s : input->sizes()) total *= s;
   if (output->data_ptr() != input->data_ptr()) {
@@ -559,9 +561,11 @@ void silu(Tensor<T> *output, const Tensor<T> *input) {
   }
   int threads = 256;
   int blocks = (total + threads - 1) / threads;
-  silu_kernel<<<blocks, threads>>>(output->data_ptr(), total);
+  silu_kernel<<<blocks, threads, 0, stream>>>(output->data_ptr(), total);
   checkCudaError(cudaGetLastError());
-  // checkCudaError(cudaDeviceSynchronize());
+  // if (stream == nullptr) {
+  //   checkCudaError(cudaDeviceSynchronize());
+  // }
 }
 
 // --------------------------------------------------
@@ -662,7 +666,7 @@ __global__ void attention_scores_kernel(
 template <typename T>
 void compute_attention_scores(const Tensor<T> &Q, const Tensor<T> &K,
                               size_t n_q_h, size_t dqkv, Tensor<T> &att_scores,
-                              size_t n_kv_h) {
+                              size_t n_kv_h, cudaStream_t stream) {
   // --- 输入检查 ---
   if (n_q_h == 0 || dqkv == 0 || n_kv_h == 0) {
     throw std::runtime_error(
@@ -790,7 +794,7 @@ void compute_attention_scores(const Tensor<T> &Q, const Tensor<T> &K,
   // }
 
   // 启动内核
-  attention_scores_kernel<<<gridDim, blockDim>>>(
+  attention_scores_kernel<<<gridDim, blockDim, 0, stream>>>(
       Q.data_ptr(),  // 直接传递 Q 的数据指针
       static_cast<int>(n_q_h), static_cast<int>(dqkv), K.data_ptr(),
       static_cast<int>(cache_length), att_scores.data_ptr(),
@@ -880,7 +884,7 @@ __global__ void att_output_kernel(
 template <typename T>
 void compute_att_output(const Tensor<T> &att_probs, const Tensor<T> &V,
                         size_t n_q_h, size_t dqkv, Tensor<T> &att_output,
-                        size_t n_kv_h) {
+                        size_t n_kv_h, cudaStream_t stream) {
   // --- 输入检查 ---
   // 检查维度信息是否匹配
   if (n_q_h == 0 || dqkv == 0 || n_kv_h == 0) {
@@ -954,7 +958,7 @@ void compute_att_output(const Tensor<T> &att_probs, const Tensor<T> &V,
   dim3 blockDim(block_dim_d, 1, 1);
 
   // 启动内核
-  att_output_kernel<<<gridDim, blockDim>>>(
+  att_output_kernel<<<gridDim, blockDim, 0, stream>>>(
       att_probs.data_ptr(), static_cast<int>(n_q_h),
       static_cast<int>(cache_length), static_cast<int>(dqkv), V.data_ptr(),
       att_output.data_ptr(), static_cast<int>(n_kv_h));
@@ -993,7 +997,8 @@ __global__ void attention_scores_prefill_kernel(const T *Q, const T *K,
 
 template <typename T>
 void compute_attention_scores_prefill(const Tensor<T> &Q, const Tensor<T> &K,
-                                      Tensor<T> &att_scores, size_t dqkv) {
+                                      Tensor<T> &att_scores, size_t dqkv,
+                                      cudaStream_t stream) {
   // Q [seq_len, n_q_h, dqkv]
   // K [cache_length, n_kv_h, dqkv]
   // att_scores [seq_len, n_q_h, cache_length]
@@ -1015,7 +1020,7 @@ void compute_attention_scores_prefill(const Tensor<T> &Q, const Tensor<T> &K,
   size_t total_q = seq_len * n_q_h;
   int threads = std::min(static_cast<int>(cache_length), 4096);
   int blocks = static_cast<int>(total_q);
-  attention_scores_prefill_kernel<<<blocks, threads>>>(
+  attention_scores_prefill_kernel<<<blocks, threads, 0, stream>>>(
       Q.data_ptr(), K.data_ptr(), att_scores.data_ptr(),
       static_cast<int>(total_q), static_cast<int>(cache_length),
       static_cast<int>(dqkv), static_cast<int>(n_q_h),
@@ -1055,7 +1060,7 @@ template <typename T>
 void compute_att_output_prefill(const Tensor<T> &att_probs, const Tensor<T> &V,
                                 Tensor<T> &att_output, size_t n_q_h,
                                 size_t dqkv, size_t total_seq_len,
-                                size_t n_kv_h) {
+                                size_t n_kv_h, cudaStream_t stream) {
   // att_probs: [batch_size, n_q_h, cache_length]
   // V: [cache_length, n_kv_h, dqkv]
   // att_output: [batch_size, n_q_h, dqkv]
@@ -1077,7 +1082,7 @@ void compute_att_output_prefill(const Tensor<T> &att_probs, const Tensor<T> &V,
   size_t total_q = batch_size * n_q_h_int;
   int threads = std::min(static_cast<int>(dqkv), 1024);
   int blocks = static_cast<int>(total_q);
-  att_output_prefill_kernel<<<blocks, threads>>>(
+  att_output_prefill_kernel<<<blocks, threads, 0, stream>>>(
       att_probs.data_ptr(), V.data_ptr(), att_output.data_ptr(),
       static_cast<int>(total_q), static_cast<int>(cache_length),
       static_cast<int>(dqkv), static_cast<int>(n_kv_h),
@@ -1093,53 +1098,62 @@ __global__ void init_curand_state_kernel(curandState *states,
     curand_init(seed, 0, offset, &states[0]);
   }
 }
-void init_curand(curandState *d_states, unsigned long long seed, int offset) {
+void init_curand(curandState *d_states, unsigned long long seed, int offset,
+                 cudaStream_t stream) {
   int blocks = 1;
   int threads = 1;
-  init_curand_state_kernel<<<blocks, threads>>>(d_states, seed, offset);
+  init_curand_state_kernel<<<blocks, threads, 0, stream>>>(d_states, seed,
+                                                           offset);
   checkCudaError(cudaGetLastError());
-  // checkCudaError(cudaDeviceSynchronize());
+  // if (stream == nullptr) {
+  //   checkCudaError(cudaDeviceSynchronize());
+  // }
 }
 
 template void rope<float>(Tensor<float> *, size_t, float, cudaStream_t);
 template void rms_norm<float>(Tensor<float> *, const Tensor<float> *,
-                              const Tensor<float> *, float);
-template void silu<float>(Tensor<float> *, const Tensor<float> *);
+                              const Tensor<float> *, float, cudaStream_t);
+template void silu<float>(Tensor<float> *, const Tensor<float> *, cudaStream_t);
 
 template void compute_attention_scores<float>(const Tensor<float> &,
                                               const Tensor<float> &, size_t,
-                                              size_t, Tensor<float> &, size_t);
+                                              size_t, Tensor<float> &, size_t,
+                                              cudaStream_t);
 template void compute_att_output<float>(const Tensor<float> &,
                                         const Tensor<float> &, size_t, size_t,
-                                        Tensor<float> &, size_t);
+                                        Tensor<float> &, size_t, cudaStream_t);
 template void compute_attention_scores_prefill<float>(const Tensor<float> &,
                                                       const Tensor<float> &,
-                                                      Tensor<float> &, size_t);
+                                                      Tensor<float> &, size_t,
+                                                      cudaStream_t);
 template void compute_att_output_prefill<float>(const Tensor<float> &,
                                                 const Tensor<float> &,
                                                 Tensor<float> &, size_t, size_t,
-                                                size_t, size_t);
+                                                size_t, size_t, cudaStream_t);
 
 // 对 nvbf16 类型的实例化
 
 template void rope<nvbf16>(Tensor<nvbf16> *, size_t, float, cudaStream_t);
 template void rms_norm<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *,
-                               const Tensor<nvbf16> *, float);
-template void silu<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *);
+                               const Tensor<nvbf16> *, float, cudaStream_t);
+template void silu<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *,
+                           cudaStream_t);
 
 template void compute_attention_scores<nvbf16>(const Tensor<nvbf16> &,
                                                const Tensor<nvbf16> &, size_t,
-                                               size_t, Tensor<nvbf16> &,
-                                               size_t);
+                                               size_t, Tensor<nvbf16> &, size_t,
+                                               cudaStream_t);
 template void compute_att_output<nvbf16>(const Tensor<nvbf16> &,
                                          const Tensor<nvbf16> &, size_t, size_t,
-                                         Tensor<nvbf16> &, size_t);
+                                         Tensor<nvbf16> &, size_t,
+                                         cudaStream_t);
 template void compute_attention_scores_prefill<nvbf16>(const Tensor<nvbf16> &,
                                                        const Tensor<nvbf16> &,
-                                                       Tensor<nvbf16> &,
-                                                       size_t);
+                                                       Tensor<nvbf16> &, size_t,
+                                                       cudaStream_t);
 template void compute_att_output_prefill<nvbf16>(const Tensor<nvbf16> &,
                                                  const Tensor<nvbf16> &,
                                                  Tensor<nvbf16> &, size_t,
-                                                 size_t, size_t, size_t);
+                                                 size_t, size_t, size_t,
+                                                 cudaStream_t);
 }  // namespace cuda_OP

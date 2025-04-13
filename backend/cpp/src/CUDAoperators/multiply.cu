@@ -72,18 +72,21 @@ __global__ void multiply_kernel_v1(const T *A, const T *B, T *out, int total) {
 // 输入张量 A 与 B 均为 Tensor<T> 类型，输出张量 output 用于存储结果。
 // --------------------------------------------------
 template <typename T>
-void multiply(Tensor<T> *output, const Tensor<T> *A, const Tensor<T> *B) {
+void multiply(Tensor<T> *output, const Tensor<T> *A, const Tensor<T> *B,
+              cudaStream_t stream) {
   size_t total = A->numel();
   int threads = 256;
   int blocks = (total + threads - 1) / threads;
-  multiply_kernel_v3<T><<<blocks, threads>>>(A->data_ptr(), B->data_ptr(),
-                                             output->data_ptr(), total);
+  multiply_kernel_v3<T><<<blocks, threads, 0, stream>>>(
+      A->data_ptr(), B->data_ptr(), output->data_ptr(), total);
   checkCudaError(cudaGetLastError());
-  // checkCudaError(cudaDeviceSynchronize());
+  // if (stream == nullptr) {
+  //   checkCudaError(cudaDeviceSynchronize());
+  // }
 }
 template void multiply<float>(Tensor<float> *, const Tensor<float> *,
-                              const Tensor<float> *);
+                              const Tensor<float> *, cudaStream_t);
 
 template void multiply<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *,
-                               const Tensor<nvbf16> *);
+                               const Tensor<nvbf16> *, cudaStream_t);
 }  // namespace cuda_OP

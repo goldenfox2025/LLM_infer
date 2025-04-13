@@ -990,7 +990,7 @@ __global__ void flash_attention_kernel_v2(T* q, const T* k, const T* v,
 // 设为0），并发起 kernel 调用
 template <typename T>
 void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
-                     Tensor<T>& att_output) {
+                     Tensor<T>& att_output, cudaStream_t stream) {
   int dqkv = K.sizes()[2];  // 每个 head 内维度
   if (dqkv != DQKV_VALUE) {
     throw std::runtime_error("dqkv 不匹配预定义的值");
@@ -1016,7 +1016,7 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
   dim3 block(threads_x, threads_y);
 
   // 使用静态共享内存，故 shmem_bytes = 0
-  flash_attention_kernel_v5<T><<<grid, block, 0>>>(
+  flash_attention_kernel_v5<T><<<grid, block, 0, stream>>>(
       Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
       cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
       static_cast<T>(softmax_scale));
@@ -1024,8 +1024,10 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
 
 // 显式实例化
 template void flash_attention<float>(Tensor<float>&, const Tensor<float>&,
-                                     const Tensor<float>&, Tensor<float>&);
+                                     const Tensor<float>&, Tensor<float>&,
+                                     cudaStream_t);
 template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&,
-                                      const Tensor<nvbf16>&, Tensor<nvbf16>&);
+                                      const Tensor<nvbf16>&, Tensor<nvbf16>&,
+                                      cudaStream_t);
 
 }  // namespace cuda_OP
