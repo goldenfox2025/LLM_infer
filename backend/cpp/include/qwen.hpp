@@ -1,15 +1,19 @@
 #pragma once
 #include <cuda_bf16.h>  // For __nv_bfloat16 support
-#include <unordered_map>
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+
 #include <stdexcept>
 #include <string>
-
+#include <unordered_map>
+#include <vector>
 
 #include "base_model.hpp"
 #include "cudaOP.cuh"
 #include "inference.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
+
 constexpr int kNumStreams = 5;
 
 template <typename T>
@@ -22,38 +26,29 @@ class QwenModel : public BaseModel {
   bool verify_params() const override;
   void print_model_info() const override;
 
-  // Implementation of BaseModel interface:
-  // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
+  // BaseModel 接口实现
   uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                   KVCacheBase* kv_cache, size_t top_k, float temperature,
-                   float top_p, curandState* d_states = nullptr) override {
-    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-
-    return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
-                           top_k, d_states);
-  }
+                    KVCacheBase* kv_cache, size_t top_k, float temperature,
+                    float top_p, curandState* d_states = nullptr) override;
   uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                   KVCacheBase* kv_cache, size_t top_k, float temperature,
-                   float top_p, curandState* d_states = nullptr) override {
+                    KVCacheBase* kv_cache, size_t top_k, float temperature,
+                    float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-
     return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p,
                            top_k, d_states);
   }
 
-  // Token generation
+  // Token 生成接口（暂未实现）
   std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
                                  size_t max_length, float temperature = 1.0f,
                                  float top_p = 0.9f, size_t top_k = 50);
 
-  // Getter methods
+  // Getter 方法
   size_t get_n_layers() const override { return n_layers_; }
   size_t get_max_seq_len() const override { return max_position_embeddings_; }
   size_t get_head_dim() const override { return head_dim_; }
   size_t get_n_kv_heads() const override { return n_kv_heads_; }
   uint32_t get_eos_token_id() const override { return eos_token_id_; }
-
-  // Additional getter methods for qwen_decode.cpp
   size_t get_n_heads() const { return n_heads_; }
   size_t get_hidden_size() const { return hidden_size_; }
   size_t get_intermediate_size() const { return intermediate_size_; }
@@ -64,19 +59,24 @@ class QwenModel : public BaseModel {
     return params_;
   }
 
-  // CUDA versions of forward and prefill.
-  // Their implementations can be filled in later (currently as stubs mimicking
-  // Llama).
-  Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+  // CUDA 前向接口，支持传入流参数。
+  // 当 used_stream 非空时要求使用预先分配的 workspace 避免动态内存分配
+  Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache,
+                         Tensor<T>* p_output,
+                         cudaStream_t used_stream = nullptr);
   Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
-  // Device management
+  // 设备管理接口
   QwenModel& cuda() override;
   QwenModel& cpu() override;
   Device device() const override { return device_; }
 
+  // 控制 CUDA 图优化开关
+  void setGraphEnabled(bool enabled) { graph_enabled_ = enabled; }
+  bool getGraphEnabled() const { return graph_enabled_; }
+
  private:
-  cudaEvent_t eventQ, eventK, eventV;
+  // 模型参数
   size_t vocab_size_;
   size_t n_layers_;
   size_t n_heads_;
@@ -94,14 +94,28 @@ class QwenModel : public BaseModel {
   Device device_;
 
   std::array<cudaStream_t, kNumStreams> compute_streams_;
+
+  // 预分配工作区（用于 forward_cuda capture 阶段复用，避免动态内存分配）
+  Tensor<T> workspace_residual_;  // shape: [1, hidden_size_]
+  Tensor<T> workspace_hidden_;    // shape: [1, hidden_size_]
+
+  // 专用捕获/执行流
+  cudaStream_t graph_stream_;
+
+  // 预分配的 forward 输出（固定 shape: [1, vocab_size_]）
+  Tensor<T> forward_logits_;
+
+  // 捕获期间使用的 CUDA 图对象
+  cudaGraph_t forward_graph_;
+
+  // 单个图执行实例（我们每次 forward 重新捕获，只维护一个实例）
+  cudaGraphExec_t forward_graph_exec_;
+
+  bool graph_enabled_ = true;
 };
 
-// 使用 extern template 声明已在别处定义的模板特化
-// QwenModel<float> 特化
 extern template class QwenModel<float>;
-// QwenModel<__nv_bfloat16> 特化
 extern template class QwenModel<__nv_bfloat16>;
 
-// Helper function to convert weights from float to __nv_bfloat16
 std::unordered_map<std::string, Tensor<__nv_bfloat16>> convert_weights_to_bf16(
     const std::unordered_map<std::string, Tensor<float>>& float_weights);
