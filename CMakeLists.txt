@@ -31,7 +31,6 @@ pybind11_add_module(model_bridge
     backend/cpp/src/llama_decode.cpp
     backend/cpp/src/llama_prefill.cpp
     backend/cpp/src/inference.cpp
-    backend/cpp/src/thread_pool.cpp
     backend/cpp/src/qwen.cpp
 )
 

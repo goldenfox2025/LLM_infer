@@ -2,12 +2,12 @@
 #include <cuda_bf16.h>  // For __nv_bfloat16 support
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
-
+#include <future>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
+#include <mutex>
 #include "base_model.hpp"
 #include "cudaOP.cuh"
 #include "inference.hpp"
@@ -77,6 +77,8 @@ class QwenModel : public BaseModel {
 
  private:
   // 模型参数
+  std::future<cudaGraphExec_t> next_graph_future_;
+  std::mutex graph_mutex_;  // 可选，用于保护对 next_graph_future_ 的访问
   size_t vocab_size_;
   size_t n_layers_;
   size_t n_heads_;

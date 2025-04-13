@@ -202,12 +202,12 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
   // std::cout << "[InferenceEngine::generate_next_token] 输入 token: "
   //           << input_ids.back() << std::endl;
   // 更新 KV 缓存长度（为新 token 分配缓存空间）
-  try {
-    kv_cache_.resize(kv_cache_.size() + 1);
-  } catch (const std::runtime_error& e) {
-    std::cerr << "Error resizing KV cache: " << e.what() << std::endl;
-    throw;
-  }
+  // try {
+  //   kv_cache_.resize(kv_cache_.size() + 1);
+  // } catch (const std::runtime_error& e) {
+  //   std::cerr << "Error resizing KV cache: " << e.what() << std::endl;
+  //   throw;
+  // }
 
   uint32_t* next_token;
   // 前向计算，传入 KVCache 的地址

@@ -461,65 +461,116 @@ std::vector<uint32_t> QwenModel<T>::generate(
 // -------------------------------
 // forward 对外接口，支持 CUDA 图优化（预热 + 每次 forward 重新捕获）
 // -------------------------------
+#include <chrono>  // 用于 std::chrono
+
 template <typename T>
 uint32_t* QwenModel<T>::forward(const Tensor<uint32_t>* input,
                                 ThreadPool& thread_pool, KVCacheBase* kv_cache,
                                 size_t top_k, float temperature, float top_p,
                                 curandState* d_states) {
+  // 尝试在函数一开始打印一些基本信息
+  // std::cout << "[forward] Entering QwenModel::forward..." << std::endl;
+
   KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-  if (graph_enabled_) {
-    // 预热：dummy 调用预热 cuBLAS 内部缓存，避免 capture 中动态分配
-    {
-      Tensor<T> dummy_A({1, 1}, Device::CUDA);
-      Tensor<T> dummy_B({1, 1}, Device::CUDA);
-      Tensor<T> dummy_C({1, 1}, Device::CUDA);
-      // 显式转换 nullptr 为 (const Tensor<T>*)
-      cuda_OP::matmul(dummy_A, dummy_B, &dummy_C, graph_stream_,
-                      (const Tensor<T>*)(nullptr), 1);
-      cudaStreamSynchronize(graph_stream_);
-    }
-    // 使用 relaxed 模式捕获
-    cudaError_t err =
-        cudaStreamBeginCapture(graph_stream_, cudaStreamCaptureModeRelaxed);
-    if (err != cudaSuccess)
-      throw std::runtime_error(
-          "Failed to begin CUDA graph capture in forward()");
-    forward_cuda(input, typed_cache, &forward_logits_, graph_stream_);
-    err = cudaStreamEndCapture(graph_stream_, &forward_graph_);
-    if (err != cudaSuccess)
-      throw std::runtime_error("Failed to end CUDA graph capture in forward()");
-    err = cudaGraphInstantiate(&forward_graph_exec_, forward_graph_, 0);
-    if (err != cudaSuccess)
-      throw std::runtime_error("Failed to instantiate CUDA graph in forward()");
-    cudaGraphLaunch(forward_graph_exec_, graph_stream_);
-    cudaStreamSynchronize(graph_stream_);
-    uint32_t* result = cuda_OP::sample(std::move(forward_logits_), temperature,
-                                       top_p, top_k, d_states);
-
-    // 重新捕获下一轮图，保证最新的 offset 被使用
-    err = cudaStreamBeginCapture(graph_stream_, cudaStreamCaptureModeRelaxed);
-    if (err != cudaSuccess)
-      throw std::runtime_error(
-          "Failed to begin CUDA graph capture for next round");
-    forward_cuda(input, typed_cache, &forward_logits_, graph_stream_);
-    err = cudaStreamEndCapture(graph_stream_, &forward_graph_);
-    if (err != cudaSuccess)
-      throw std::runtime_error(
-          "Failed to end CUDA graph capture for next round");
-    // 销毁先前的图执行实例
-    cudaGraphExecDestroy(forward_graph_exec_);
-    err = cudaGraphInstantiate(&forward_graph_exec_, forward_graph_, 0);
-    if (err != cudaSuccess)
-      throw std::runtime_error(
-          "Failed to instantiate CUDA graph for next round");
-
-    return result;
-  } else {
-    Tensor<T> logits = forward_cuda(input, typed_cache, nullptr, nullptr);
-    return cuda_OP::sample(std::move(logits), temperature, top_p, top_k,
-                           d_states);
+  if (!typed_cache) {
+    std::cerr << "[forward] Error: typed_cache is null or invalid cast." << std::endl;
+    return nullptr;
   }
+
+  // 加锁保护图相关操作
+  // std::lock_guard<std::mutex> lock(graph_mutex_);
+
+  // 打印当前 KVCache size
+  // std::cout << "[forward] KVCache current size: " << typed_cache->size() << std::endl;
+  // 也可以打印 input 的指针地址和 input->sizes()[0] 等
+  // std::cout << "[forward] input data_ptr: " << (void*)input->data_ptr() 
+  //           << "  input size: " << (input->sizes().size() > 0 ? input->sizes()[0] : 0)
+  //           << std::endl;
+
+  bool usePreCaptured = false;
+
+  // 如果上一轮预捕获已经完成（阻塞检查），则使用它
+  if (next_graph_future_.valid()) {
+    try {
+      // std::cout << "[forward] Blocking wait for next_graph_future_..." << std::endl;
+      forward_graph_exec_ = next_graph_future_.get();  
+      // 这将阻塞，直到后台捕获真正完成
+      usePreCaptured = true;
+      // std::cout << "[forward] Got pre-captured forward_graph_exec_ from future!" << std::endl;
+    } catch (const std::exception &e) {
+      throw std::runtime_error(std::string("Error in async graph capture: ") + e.what());
+    }
+  }
+    // 如果没有预捕获或未准备好，则同步捕获当前轮图
+    if (!usePreCaptured) {
+      // std::cout << "[forward] Begin synchronous capture for this round..." << std::endl;
+      cudaError_t err = cudaStreamBeginCapture(graph_stream_, cudaStreamCaptureModeRelaxed);
+      if (err != cudaSuccess)
+        throw std::runtime_error("[forward] Failed to begin CUDA graph capture in forward()");
+  
+      // std::cout << "[forward] >> calling forward_cuda (sync capture)..." << std::endl;
+      forward_cuda(input, typed_cache, &forward_logits_, graph_stream_);
+  
+      // std::cout << "[forward] >> end of forward_cuda, now calling cudaStreamEndCapture..." << std::endl;
+      err = cudaStreamEndCapture(graph_stream_, &forward_graph_);
+      if (err != cudaSuccess)
+        throw std::runtime_error("[forward] Failed to end CUDA graph capture in forward()");
+  
+      // std::cout << "[forward] >> cudaGraphInstantiate..." << std::endl;
+      err = cudaGraphInstantiate(&forward_graph_exec_, forward_graph_, 0);
+      if (err != cudaSuccess)
+        throw std::runtime_error("[forward] Failed to instantiate CUDA graph in forward()");
+    }
+
+
+
+  // 执行当前轮捕获好的图，并等待执行完成
+  // std::cout << "[forward] Launching current round graph..." << std::endl;
+  cudaGraphLaunch(forward_graph_exec_, graph_stream_);
+  // cudaStreamSynchronize(graph_stream_);
+  // std::cout << "[forward] Current round graph execution done, now sampling..." << std::endl;
+
+  uint32_t* result = cuda_OP::sample(std::move(forward_logits_), temperature, top_p, top_k, d_states);
+  // 这里暂时演示：把 KVCache size +1
+  // （真实逻辑中你必须确保 sample 出的 token 已写入 input，下次 forward 才是真正的下一轮）
+  typed_cache->resize(typed_cache->size() + 1);
+
+  // std::cout << "[forward] sample done, new KVCache size=" << typed_cache->size() << std::endl;
+  // std::cout << "[forward] start async capturing next round..." << std::endl;
+  
+  // 异步启动下一轮图捕获任务：
+  next_graph_future_ = thread_pool.enqueue([this, input, typed_cache]() -> cudaGraphExec_t {
+    // std::cout << "[async capture] begin capture..." << std::endl;
+    cudaError_t err = cudaStreamBeginCapture(graph_stream_, cudaStreamCaptureModeRelaxed);
+    if (err != cudaSuccess) {
+      std::cerr << "[async capture] cudaStreamBeginCapture error code=" << err << std::endl;
+      throw std::runtime_error("[async capture] Failed to begin CUDA graph capture for next round");
+    }
+    // std::cout << "[async capture] calling forward_cuda for next round..." << std::endl;
+    // 这里调用 forward_cuda()，应确保 input 与 KVCache 均为最新状态
+    forward_cuda(input, typed_cache, &forward_logits_, graph_stream_);
+
+    // std::cout << "[async capture] endCapture..." << std::endl;
+    err = cudaStreamEndCapture(graph_stream_, &forward_graph_);
+    if (err != cudaSuccess) {
+      std::cerr << "[async capture] cudaStreamEndCapture error code=" << err << std::endl;
+      throw std::runtime_error("[async capture] Failed to end CUDA graph capture for next round (async)");
+    }
+    cudaGraphExec_t new_exec;
+    // std::cout << "[async capture] cudaGraphInstantiate..." << std::endl;
+    err = cudaGraphInstantiate(&new_exec, forward_graph_, 0);
+    if (err != cudaSuccess) {
+      std::cerr << "[async capture] cudaGraphInstantiate error code=" << err << std::endl;
+      throw std::runtime_error("[async capture] Failed to instantiate CUDA graph for next round (async)");
+    }
+    // std::cout << "[async capture] next round capture success, returning new_exec" << std::endl;
+    return new_exec;
+  });
+
+  // std::cout << "[forward] done launching async capture task, returning result pointer." << std::endl;
+  return result;
 }
+
 
 // -------------------------------
 // 辅助函数：FP32 到 __nv_bfloat16 权重转换
