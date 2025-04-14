@@ -33,7 +33,7 @@ inline void checkCublasStatus(cublasStatus_t status, const char *file,
 #define CHECK_CUBLAS(call) checkCublasStatus(call, __FILE__, __LINE__)
 
 namespace cuda_OP {
-// 定义类型转换 traits（可扩展支持更多类型）
+// 定义类型转换 （可扩展支持更多类型）
 template <typename T>
 struct to_cutlass_type {
   using type = T;
