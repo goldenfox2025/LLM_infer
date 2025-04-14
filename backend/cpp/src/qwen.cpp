@@ -363,21 +363,21 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     //   cudaStreamSynchronize(compute_streams_[j]);
     // }
 
-    cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads);
+    // cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads);
 
-    // Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
+    Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
     // // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_, head_dim_,
     // //                                   att_scores, n_kv_heads_);
 
-    // cuda_OP::launch_gemmv(total_K.data_ptr(), Q_3d.data_ptr(),
-    //                       att_scores.data_ptr(), n_heads_, ratio,
-    //                       total_seq_len, head_dim_, head_dim_,
-    //                       total_seq_len);
+    cuda_OP::launch_gemmv_scores(total_K.data_ptr(), Q_3d.data_ptr(),
+                          att_scores.data_ptr(), n_heads_, ratio,
+                          total_seq_len, head_dim_, head_dim_,
+                          total_seq_len);
 
-    // cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false, offset);
+    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/1, false, offset);
 
-    // cuda_OP::compute_att_output(att_scores, total_V, n_heads_, head_dim_,
-    //                             att_heads, n_kv_heads_);
+    cuda_OP::compute_att_output(att_scores, total_V, n_heads_, head_dim_,
+                                att_heads, n_kv_heads_);
 
     Tensor<T> att_heads_reshaped = att_heads.view({1, n_heads_ * head_dim_});
     Tensor<T> att_proj({1, hidden_size_}, Device::CUDA);

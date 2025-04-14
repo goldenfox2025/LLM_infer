@@ -146,7 +146,7 @@ static __global__ void gemmv(
 //----------------------------------------------------------------------------//
 
 template <typename T, typename AccT>
-void launch_gemmv(const T *x,              // 矩阵
+void launch_gemmv_scores(const T *x,              // 矩阵
                   const T *y,              // 向量
                   AccT *dst,               // 输出
                   const int channel_size,  // 矩阵的列数 ratio之前
@@ -163,17 +163,17 @@ void launch_gemmv(const T *x,              // 矩阵
       <<<grid, block, 0, stream>>>(x, y, dst, channel_ratio, stride_channel_x,
                                    stride_channel_y, stride_channel_dst);
 }
-template void launch_gemmv<float, float>(
+template void launch_gemmv_scores<float, float>(
     const float *x, const float *y, float *dst, const int channel_size,
     const int channel_ratio, const int row_size, const int stride_channel_x,
     const int stride_channel_y, const int stride_channel_dst,
     cudaStream_t stream);
-template void launch_gemmv<nv_bfloat16, nv_bfloat16>(
+template void launch_gemmv_scores<nv_bfloat16, nv_bfloat16>(
     const nv_bfloat16 *x, const nv_bfloat16 *y, nv_bfloat16 *dst,
     const int channel_size, const int channel_ratio, const int row_size,
     const int stride_channel_x, const int stride_channel_y,
     const int stride_channel_dst, cudaStream_t stream);
-template void launch_gemmv<nv_bfloat16, float>(
+template void launch_gemmv_scores<nv_bfloat16, float>(
     const nv_bfloat16 *x, const nv_bfloat16 *y, float *dst,
     const int channel_size, const int channel_ratio, const int row_size,
     const int stride_channel_x, const int stride_channel_y,

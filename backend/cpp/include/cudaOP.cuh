@@ -54,7 +54,7 @@ void rms_norm(Tensor<T>* output, const Tensor<T>* input,
               cudaStream_t stream = nullptr);
 
 template <typename T, typename AccT = float>
-void launch_gemmv(const T* x, const T* y, AccT* dst, const int channel_size,
+void launch_gemmv_scores(const T* x, const T* y, AccT* dst, const int channel_size,
                   const int channel_ratio, const int row_size,
                   const int stride_channel_x, const int stride_channel_y,
                   const int stride_channel_dst, cudaStream_t stream = nullptr);
@@ -110,6 +110,8 @@ void compute_att_output(const Tensor<T>& att_probs, const Tensor<T>& V,
 template <typename T>
 void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
                      Tensor<T>& att_output, cudaStream_t stream = nullptr);
+
+
 
 // prefill 版本：计算注意力分数
 template <typename T>
