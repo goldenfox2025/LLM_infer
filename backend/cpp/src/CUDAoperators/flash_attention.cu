@@ -99,16 +99,38 @@ namespace cuda_OP {
 
 
 template <typename T>
-__global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
-                                          T* att_output,  // v4 输出是 T 类型
-                                          int n_q_h, int cache_length,
+__global__ void flash_attention_kernel_v5(T* q, const T* k1,const T* k2,const T* k3, const T* v1,const T* v2,const T* v3,
+                                          T* att_output1, T* att_output2,T* att_output3, // v4 输出是 T 类型
+                                          int n_q_h, int cache_length1,int cache_length2,int cache_length3,
                                           int n_kv_h,
                                           int dqkv,  // 运行时 dqkv，用于验证
                                           int B_c,  // 运行时 B_c，用于验证
                                           int B_r, int n_groups, int T_r,
-                                          int T_c, T softmax_scale) {
+                                          int T_c1,int T_c2,int T_c3, T softmax_scale) {
   // 1. 检查运行时参数是否与预期（或编译时常量）一致
   //    如果 B_c 或 dqkv 不匹配，DQKV_VALUE 的计算和共享内存大小会错误
+  int T_c, cache_length;
+  const T *k, *v;
+  T*att_output;
+  if(blockIdx.y == 0){
+    k = k1;
+    v = v1;
+    att_output = att_output1;
+    cache_length = cache_length1;
+    T_c = T_c1;
+  }else if(blockIdx.y == 1){
+    k = k2;
+    v = v2;
+    att_output = att_output2;
+    cache_length = cache_length2;
+    T_c = T_c2;
+  }else if(blockIdx.y == 2){
+    k = k3;
+    v = v3;
+    att_output = att_output3;
+    cache_length = cache_length3;
+    T_c = T_c3;
+  }
   if (dqkv != DQKV_VALUE || B_c != B_C_VALUE) return;
 
   // 2. 共享内存声明
@@ -957,43 +979,46 @@ __global__ void flash_attention_kernel_v2(T* q, const T* k, const T* v,
 // 设为0），并发起 kernel 调用
 
 template <typename T>
-void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
-                     Tensor<T>& att_output, cudaStream_t stream) {
-  int dqkv = K.sizes()[2];  // 每个 head 内维度
+void flash_attention(Tensor<T>& Q, const Tensor<T>&& K1,const Tensor<T>&& K2,const Tensor<T>&& K3, const Tensor<T>&& V1,const Tensor<T>&& V2,const Tensor<T>&& V3,
+                     Tensor<T>& att_output1, Tensor<T>& att_output2,Tensor<T>& att_output3,cudaStream_t stream) {
+  int dqkv = Q.sizes()[2];  // 每个 head 内维度
   if (dqkv != DQKV_VALUE) {
     throw std::runtime_error("dqkv 不匹配预定义的值");
   }
   float softmax_scale = 1.0f / sqrtf(static_cast<float>(dqkv));
   int n_q_h = Q.sizes()[1];         // query head 数
-  int cache_length = K.sizes()[0];  // 总的 kv token 数
-  int n_kv_h = K.sizes()[1];
+  int cache_length1 = K1.sizes()[0];  // 总的 kv token 数
+  int cache_length2 = K2.sizes()[0];  // 总的 kv token 数
+  int cache_length3 = K3.sizes()[0];  // 总的 kv token 数
+  int n_kv_h = K1.sizes()[1];
   int n_groups = n_q_h / n_kv_h;
   int B_r = 1;
   int T_r = 1;
 
   // 每个 chunk 读取的 kv token 数（预设为偶数 B_C_VALUE）
   int B_c = B_C_VALUE;
-  int T_c = (cache_length + B_c - 1) / B_c;
-
+  int T_c1 = (cache_length1 + B_c - 1) / B_c;
+  int T_c2 = (cache_length2 + B_c - 1) / B_c;
+  int T_c3 = (cache_length3 + B_c - 1) / B_c;
   // 每个 block 处理一个 query head
-  dim3 grid(n_q_h);
+  dim3 grid(n_q_h, 3);
   int threads_x = dqkv;  // dqkv = DQKV_VALUE
   int threads_y = B_c;   // B_c = B_C_VALUE
   dim3 block(threads_x, threads_y);
 
   // 只有v5适应于新的分块fa模式
   flash_attention_kernel_v5<T><<<grid, block, 0,stream>>>(
-      Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
-      cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
+      Q.data_ptr(), K1.data_ptr(), K2.data_ptr(), K3.data_ptr(), V1.data_ptr(),V2.data_ptr(),V3.data_ptr(),att_output1.data_ptr(), att_output2.data_ptr(),att_output3.data_ptr(),n_q_h,
+      cache_length1,cache_length2,cache_length3, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c1,T_c2,T_c3,
       static_cast<T>(softmax_scale));
 }
 
 // 显式实例化
 template void flash_attention<float>(Tensor<float>&, const Tensor<float>&&,
-                                     const Tensor<float>&&, Tensor<float>&,
+                                     const Tensor<float>&&,const Tensor<float>&&,const Tensor<float>&&,const Tensor<float>&&,const Tensor<float>&&, Tensor<float>&,Tensor<float>&,Tensor<float>&,
                                      cudaStream_t stream);
-template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&&,
-                                      const Tensor<nvbf16>&&, Tensor<nvbf16>&,
+template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&&,const Tensor<nvbf16>&&,const Tensor<nvbf16>&&,const Tensor<nvbf16>&&,const Tensor<nvbf16>&&,
+                                      const Tensor<nvbf16>&&, Tensor<nvbf16>&,Tensor<nvbf16>&,Tensor<nvbf16>&,
                                       cudaStream_t stream);
 
 // template <typename T>

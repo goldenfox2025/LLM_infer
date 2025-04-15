@@ -108,8 +108,8 @@ void compute_att_output(const Tensor<T>& att_probs, const Tensor<T>& V,
 
 // flahattention实现
 template <typename T>
-void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V ,
-                     Tensor<T>& att_output, cudaStream_t stream = nullptr);
+void flash_attention(Tensor<T>& Q, const Tensor<T>&& K1,const Tensor<T>&& K2,const Tensor<T>&& K3, const Tensor<T>&& V1 ,const Tensor<T>&& V2 ,const Tensor<T>&& V3 ,
+                     Tensor<T>& att_output1, Tensor<T>& att_output2, Tensor<T>& att_output3, cudaStream_t stream = nullptr);
 
 
 
