@@ -190,7 +190,8 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
   //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
   if (device_ == Device::CUDA) {
     cudaMalloc(&d_states, sizeof(curandState));
-    cuda_OP::init_curand(d_states, 42, 0, nullptr);
+    int seed = std::chrono::system_clock::now().time_since_epoch().count(); 
+    cuda_OP::init_curand(d_states, seed, 0, nullptr);
     std::cout
         << "[InferenceEngine::InferenceEngine] Moving InferenceEngine to CUDA"
         << std::endl;
