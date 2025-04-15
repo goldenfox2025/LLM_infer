@@ -61,8 +61,8 @@ if [ -d "frontend" ]; then
     # *** 关键修改：指定输出路径为父目录下的 'data' 目录，并使用带时间戳的文件名 ***
     echo ">> Report file will be saved to: ${report_full_path}"
     nsys profile \
-      --trace=cuda,osrt,nvtx \
-      --gpu-metrics-device=0 \
+      --trace=cuda,osrt,nvtx,cudnn,cublas,oshmem \
+      --gpu-metrics-devices=0 \
       --output "../${data_dir_name}/${report_filename}" \
       --force-overwrite true \
       python3 chat.py

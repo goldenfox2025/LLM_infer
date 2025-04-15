@@ -11,7 +11,15 @@
 #include "llama.hpp"
 #include "operators.hpp"
 #include "qwen.hpp"
-
+#define checkCudaErrors(call)                                           \
+  do {                                                                  \
+    cudaError_t err = call;                                             \
+    if (err != cudaSuccess) {                                           \
+      fprintf(stderr, "CUDA Error at %s:%d - %s\n", __FILE__, __LINE__, \
+              cudaGetErrorString(err));                                 \
+      throw std::runtime_error(cudaGetErrorString(err));                \
+    }                                                                   \
+  } while (0)
 // 定义用于结果队列的类型
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
 using GenerationResult =
@@ -288,140 +296,143 @@ void InferenceEngine<T>::generate_with_callback(
     float temperature, float top_p, size_t top_k,
     std::function<void(uint32_t)> callback) {
   ThreadSafeQueue<GenerationResult> result_queue;
-
+  bind_this_thread_to_core(30);
   std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
     try {
-      // bind_this_thread_to_core(31);
-      // --- 在 try 块开始处声明 next_token ---
-      uint32_t* next_token_;
+      using duration_unit = std::chrono::microseconds;
+      const char* time_unit_str = "us"; // 用于打印
+    
+      // --- 初始化累加器 ---
+      long long total_step_gpu_compute_us = 0;
+      long long total_d2h_sync_us = 0;
+      long long total_push_us = 0;
+      long long total_loop_overhead_us = 0; // 估算循环本身开销
+      bind_this_thread_to_core(31);
+      uint32_t* next_token_gpu_ptr; // 指向 GPU 上的 next_token
+      uint32_t next_token_host = -1; // CPU 上的 next_token 副本
 
-      // --- 在移动 input_ids_copy 之前获取其大小 ---
       size_t input_size = input_ids_copy.size();
 
-      // 统计 prefill 开始时间
       auto prefill_start = std::chrono::high_resolution_clock::now();
-
-      // --- KV Cache Resize ---
-      try {
-        kv_cache_.resize(kv_cache_.size() + input_size);
-      } catch (const std::runtime_error& e) {
-        std::cerr << "Error resizing KV cache (prefill): " << e.what()
-                  << std::endl;
-        throw;
-      }
-
-      {
-        std::vector<uint32_t> prefill_input =
-            input_ids_copy;  // 创建真正的拷贝给 Tensor
-        Tensor<uint32_t> input_tensor(std::move(prefill_input), {input_size},
-                                      this->device_);
-
-        if (this->device_ == Device::CPU) {
-          next_token_ = this->model_->prefill(&input_tensor, this->thread_pool_,
-                                              &this->kv_cache_, top_k,
-                                              temperature, top_p);
-        } else {
-          next_token_ = this->model_->prefill(
+      // --- Prefill ---
+      { // Prefill scope
+          kv_cache_.resize(kv_cache_.size() + input_size); // 调整大小移到 prefill 前
+          std::vector<uint32_t> prefill_input = input_ids_copy;
+          Tensor<uint32_t> input_tensor(std::move(prefill_input), {input_size}, this->device_);
+          next_token_gpu_ptr = this->model_->prefill(
               &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
               temperature, top_p, this->d_states);
-        }
       }
+      auto prefill_end = std::chrono::high_resolution_clock::now();
+      auto prefill_elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start)
+              .count();
 
-      // 统计 prefill 结束时间并计算耗时
-      // auto prefill_end = std::chrono::high_resolution_clock::now();
-      // auto prefill_elapsed_ms =
-      //     std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end -
-      //                                                           prefill_start)
-      //         .count();
-      uint32_t next_token = -1;
-      cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t),
-                      cudaMemcpyDeviceToHost);
+      // --- 处理 Prefill 的第一个 Token ---
+      // 显式同步等待 Prefill 的 GPU 计算完成 (如果 prefill 是异步的)
+      // 如果 prefill 函数内部保证同步返回，则不需要这句
+      checkCudaErrors(cudaDeviceSynchronize()); // 确保 prefill 的 GPU 操作完成
 
-      // 如果是 EOS，就直接返回
-      if (next_token == this->model_->get_eos_token_id()) {
+      auto d2h_prefill_start = std::chrono::high_resolution_clock::now();
+      // 从 GPU 获取 prefill 产生的第一个 token
+      // 假设 prefill 返回的是设备指针，需要在默认流上拷贝回来
+      checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
+                                       cudaMemcpyDeviceToHost, cudaStreamDefault));
+      // 为了计时准确，同步等待 D2H 完成 (!!! 仅用于计时 !!!)
+      checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
+      auto d2h_prefill_end = std::chrono::high_resolution_clock::now();
+      auto d2h_prefill_us = std::chrono::duration_cast<duration_unit>(d2h_prefill_end - d2h_prefill_start).count();
+
+
+      if (next_token_host == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
-        // 打印 prefill 耗时
-        // std::cout << std::endl;
-        // std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
-        //           << std::endl;
-        // std::cout << "[decode 耗时] 0 ms" << std::endl;
-        // std::cout << std::endl;
+        std::cout << "\n[Prefill Only Details]\n";
+        std::cout << "  Prefill GPU + Sync Time (ms): " << prefill_elapsed_ms << "\n";
+        std::cout << "  Prefill D2H + Sync Time (" << time_unit_str << "): " << d2h_prefill_us << "\n";
+        std::cout << "[decode 耗时] 0 " << time_unit_str << std::endl << std::endl;
         return;
       }
 
-      // 首先将 prefill 得到的第一个 token 推入队列
-      result_queue.push(next_token);
+      result_queue.push(next_token_host);
 
       size_t current_total_length = input_size + 1;
-      uint32_t* last_token = next_token_;
+      uint32_t* last_token_gpu_ptr = next_token_gpu_ptr; // 下一轮的输入是 GPU 指针
 
-      // 统计 decode（也就是正式推理循环）的开始时间
-      // auto decode_start = std::chrono::high_resolution_clock::now();
-
-      // 我们可以再开一个累加器，用于累积每次 step 的耗时
-      // long long total_decode_elapsed_ms = 0;
+      auto decode_start = std::chrono::high_resolution_clock::now();
+      auto last_step_end_time = decode_start; // 用于计算循环开销
 
       while (current_total_length < max_length) {
-        // 每次 decode 一个 token，可以统计单次 forward 的耗时
-        // auto step_start = std::chrono::high_resolution_clock::now();
+        auto loop_overhead_start = std::chrono::high_resolution_clock::now();
+        total_loop_overhead_us += std::chrono::duration_cast<duration_unit>(loop_overhead_start - last_step_end_time).count();
 
-        next_token_ = this->generate_next_token(this->thread_pool_, last_token,
+        auto step_gpu_compute_start = std::chrono::high_resolution_clock::now();
+        // --- 生成下一个 token (主要是 GPU 计算) ---
+        next_token_gpu_ptr = this->generate_next_token(this->thread_pool_, last_token_gpu_ptr,
                                                 temperature, top_p, top_k);
-        cudaMemcpyAsync(&next_token, next_token_, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost);
-        // auto step_end = std::chrono::high_resolution_clock::now();
-        // auto step_elapsed_ms =
-        //     std::chrono::duration_cast<std::chrono::milliseconds>(step_end -
-        //                                                           step_start)
-        //         .count();
-        // total_decode_elapsed_ms += step_elapsed_ms;
+        // 显式同步，确保 generate_next_token 的 GPU 计算完成 (!!! 仅用于计时 !!!)
+        // 假设 generate_next_token 在其使用的流上完成所有工作
+        // 如果它内部使用了特定流 stream_x, 则同步 cudaStreamSynchronize(stream_x)
+        checkCudaErrors(cudaDeviceSynchronize()); // 或者同步特定流
+        auto step_gpu_compute_end = std::chrono::high_resolution_clock::now();
+        total_step_gpu_compute_us += std::chrono::duration_cast<duration_unit>(step_gpu_compute_end - step_gpu_compute_start).count();
 
-        last_token = next_token_;
+
+        auto step_d2h_sync_start = std::chrono::high_resolution_clock::now();
+        // --- 异步拷贝结果回 CPU ---
+        checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
+                                        cudaMemcpyDeviceToHost, cudaStreamDefault)); // 假设用默认流
+        // 为了计时准确，同步等待 D2H 完成 (!!! 仅用于计时 !!!)
+        checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
+        auto step_d2h_sync_end = std::chrono::high_resolution_clock::now();
+        total_d2h_sync_us += std::chrono::duration_cast<duration_unit>(step_d2h_sync_end - step_d2h_sync_start).count();
+
+
+        auto step_logic_push_start = std::chrono::high_resolution_clock::now();
+        // --- CPU 逻辑和 Push ---
+        last_token_gpu_ptr = next_token_gpu_ptr; // 更新下一轮的输入指针
         current_total_length++;
+        bool is_eos = (next_token_host == this->model_->get_eos_token_id());
 
-        bool is_eos = (next_token == this->model_->get_eos_token_id());
-        // bool is_eos = false;
         if (is_eos) {
+          // 在 push 前记录结束时间
+          auto push_start = std::chrono::high_resolution_clock::now();
           result_queue.push(Signal::EndOfStream);
-
-          // decode 结束时间
-          // auto decode_end = std::chrono::high_resolution_clock::now();
-          // auto decode_elapsed_ms =
-          //     std::chrono::duration_cast<std::chrono::milliseconds>(
-          //         decode_end - decode_start)
-          //         .count();
-
-          // std::cout << std::endl;
-          // std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
-          //           << std::endl;
-          // std::cout << "[decode 循环总耗时(循环外计算)] " <<
-          // decode_elapsed_ms
-          //           << " ms" << std::endl;
-          // std::cout << "[decode 每 step 累计耗时(循环内累加)] "
-          //           << total_decode_elapsed_ms << " ms" << std::endl;
-          // std::cout << std::endl;
-          return;
+          auto push_end = std::chrono::high_resolution_clock::now();
+          total_push_us += std::chrono::duration_cast<duration_unit>(push_end - push_start).count();
+          last_step_end_time = push_end; // 更新最后结束时间点
+          break; // 跳出循环
         }
-        result_queue.push(next_token);
-      }
 
-      // 如果正常跑完 max_length
+        auto push_start = std::chrono::high_resolution_clock::now();
+        result_queue.push(next_token_host);
+        auto push_end = std::chrono::high_resolution_clock::now();
+        total_push_us += std::chrono::duration_cast<duration_unit>(push_end - push_start).count();
+        last_step_end_time = push_end; // 更新最后结束时间点
+      } // end while loop
+
+      auto decode_end = std::chrono::high_resolution_clock::now();
+      auto decode_elapsed_us = std::chrono::duration_cast<duration_unit>(decode_end - decode_start).count();
+      auto post_loop_us = std::chrono::duration_cast<duration_unit>(decode_end - last_step_end_time).count();
+
+      // --- 打印详细计时信息 ---
+      std::cout << "\n[Detailed Timing (" << time_unit_str << ")]\n";
+      std::cout << "  Prefill GPU + Sync Time (ms):       " << prefill_elapsed_ms << "\n"; // Prefill 仍用 ms
+      std::cout << "  Prefill D2H + Sync Time:            " << d2h_prefill_us << "\n";
+      std::cout << "  Total Decode Time (Outer Loop):     " << decode_elapsed_us << "\n";
+      std::cout << "  --- Inside Decode Loop Breakdown ---\n";
+      std::cout << "  Accumulated GPU Compute + Sync Time:" << total_step_gpu_compute_us << "\n";
+      std::cout << "  Accumulated D2H Copy + Sync Time:   " << total_d2h_sync_us << "\n";
+      std::cout << "  Accumulated Push to Queue Time:     " << total_push_us << "\n";
+      std::cout << "  Accumulated Loop Overhead Est.:     " << total_loop_overhead_us << "\n"; // 循环本身开销+CPU逻辑
+      std::cout << "  Sum of Loop Components:             "
+                << (total_step_gpu_compute_us + total_d2h_sync_us + total_push_us + total_loop_overhead_us) << "\n";
+      std::cout << "  Post-Loop Overhead:                 " << post_loop_us << "\n"; // 循环结束后到 decode_end 的时间
+      std::cout << "  (Loop Comp. + Post-Loop Overhead):  "
+                << (total_step_gpu_compute_us + total_d2h_sync_us + total_push_us + total_loop_overhead_us + post_loop_us) << "\n";
+      std::cout << "  Discrepancy (Outer - Inner Sum):    "
+                << (decode_elapsed_us - (total_step_gpu_compute_us + total_d2h_sync_us + total_push_us + total_loop_overhead_us + post_loop_us)) << "\n";
+      std::cout << std::endl;
       result_queue.push(Signal::EndOfStream);
-
-      // // 统计 decode 完成时间
-      // auto decode_end = std::chrono::high_resolution_clock::now();
-      // auto decode_elapsed_ms =
-      //     std::chrono::duration_cast<std::chrono::milliseconds>(decode_end -
-      //                                                           decode_start)
-      //         .count();
-
-      // // 打印时间信息
-      // std::cout << "[prefill 耗时] " << prefill_elapsed_ms << " ms"
-      //           << std::endl;
-      // std::cout << "[decode 循环总耗时(循环外计算)] " << decode_elapsed_ms
-      //           << " ms" << std::endl;
-      // std::cout << "[decode 每 step 累计耗时(循环内累加)] "
-      //           << total_decode_elapsed_ms << " ms" << std::endl;
 
     } catch (...) {
       // 如果发生异常，把异常推入队列

@@ -97,15 +97,27 @@ QwenModel<T>::QwenModel(
       throw std::runtime_error("Failed to create CUDA stream in constructor");
     }
   }
+  for (int i = 0; i < 3; ++i) {
+    // 使用 cudaEventDisableTiming 可以获得微小的性能提升，因为我们只关心完成状态，不测量时间
+    cudaEventCreateWithFlags(&fa_done_events_[i], cudaEventDisableTiming);
+  }
 }
 
 template <typename T>
 QwenModel<T>::~QwenModel() {
-  // 在析构函数中销毁流
+
   for (cudaStream_t stream : compute_streams_) {
     if (stream) {
+      // 最好在销毁流之前同步它，确保所有工作完成
+      cudaStreamSynchronize(stream);
       cudaStreamDestroy(stream);
     }
+  }
+
+  for (int i = 0; i < 3; ++i) {
+      if (fa_done_events_[i]) {
+          cudaEventDestroy(fa_done_events_[i]);
+      }
   }
 }
 
@@ -358,10 +370,71 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
     Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
 
+  //   Tensor<T> att_heads_1({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+  //   Tensor<T> att_heads_2({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+  //   Tensor<T> att_heads_3({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+  //   // Tensor<T> att_heads_4({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+
+  //   // Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
+  //   int seq_divide = total_seq_len / 3;
     int ratio = n_heads_ / n_kv_heads_;
-    // for (int j = 0; j < 3; ++j) {
-    //   cudaStreamSynchronize(compute_streams_[j]);
-    // }
+  //   // for (int j = 0; j < 3; ++j) {
+  //   //   cudaStreamSynchronize(compute_streams_[j]);
+  //   // }
+  //   cuda_OP::flash_attention(
+  //     Q_3d, total_K.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+  //     total_V.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+  //     att_heads_1, compute_streams_[0]);
+  // // 在 stream 0 完成 FA后记录事件 0
+  //   cudaEventRecord(fa_done_events_[0], compute_streams_[0]);
+    
+  //   // Kernel 2 on stream 1
+  //   cuda_OP::flash_attention(
+  //       Q_3d,
+  //       total_K.slice({seq_divide, 0, 0},
+  //                     {2 * seq_divide, n_kv_heads_, head_dim_}),
+  //       total_V.slice({seq_divide, 0, 0},
+  //                     {2 * seq_divide, n_kv_heads_, head_dim_}),
+  //       att_heads_2, compute_streams_[1]);
+  //   // 在 stream 1 完成 FA后记录事件 1
+  //   cudaEventRecord(fa_done_events_[1], compute_streams_[1]);
+    
+  //   // Kernel 3 on stream 2
+  //   cuda_OP::flash_attention(
+  //       Q_3d,
+  //       total_K.slice({2 * seq_divide, 0, 0},
+  //                     {total_seq_len, n_kv_heads_, head_dim_}),
+  //       total_V.slice({2 * seq_divide, 0, 0},
+  //                     {total_seq_len, n_kv_heads_, head_dim_}),
+  //       att_heads_3, compute_streams_[2]);
+  //   // 在 stream 2 完成 FA后记录事件 2
+  //   cudaEventRecord(fa_done_events_[2], compute_streams_[2]);
+    
+    
+  //   // --- 删除 CPU 同步代码 ---
+  //   // for (int j = 0; j < 3; ++j) {
+  //   //   cudaStreamSynchronize(compute_streams_[j]); // <--- 彻底删除这部分
+  //   // }
+    
+    
+  //   // --- 准备执行 Gather 操作 ---
+  //   // 选择一个流来执行 gather，这里我们用默认流 (0) 作为例子
+  //   // 你也可以选择 compute_streams_[0] 或其他流
+  //   // cudaStream_t gather_stream = 0;
+    
+  //   // --- 让 gather_stream 等待三个 FA 事件完成 (非阻塞 CPU) ---
+  //   (cudaStreamWaitEvent(nullptr, fa_done_events_[0], 0));
+  //   (cudaStreamWaitEvent(nullptr, fa_done_events_[1], 0));
+  //   (cudaStreamWaitEvent(nullptr, fa_done_events_[2], 0));
+    
+  //   // --- 立即在 gather_stream 上启动 gather 操作 ---
+  //   // GPU 会在执行这个 Kernel 前自动等待上面三个事件完成
+  //   // 假设 gather_fa 函数现在接受一个 stream 参数
+  //   // 如果它不接受，你可能需要修改它，或者它内部使用了默认流（那 gather_stream 必须是 0）
+  //   cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads, nullptr);
 
     // cuda_OP::flash_attention(Q_3d, total_K, total_V, att_heads);
 

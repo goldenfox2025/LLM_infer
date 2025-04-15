@@ -94,19 +94,9 @@ namespace cuda_OP {
 #include <cuda_fp16.h>  // For Vec definition if needed (assuming Vec is defined elsewhere as per user)
 #include <float.h>  // For FLT_MAX
 
-// --- 假设常量已定义或从模板参数推断 ---
-// constexpr int DQKV_VALUE = 128;
-// constexpr int B_C_VALUE = 64; // 示例
-// constexpr int WARP_SIZE = 32;
 
-// --- 添加 Padded 维度 ---
-// dqkv = 128. 增加 8 个 float (32 bytes) 的 Padding
-// 注意：实际的 DQKV_VALUE 应从模板参数或运行时参数获取，这里仅作示例
-#define PADDED_DQKV (DQKV_VALUE + 8)  // 128 + 8 = 136
 
-// 假设 Vec 结构已定义 (来自 V4)
-// template <typename T, int N> struct Vec { T t[N]; };
-// using float4 = Vec<float, 4>; // 假设
+
 
 template <typename T>
 __global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
@@ -118,137 +108,106 @@ __global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
                                           int B_r, int n_groups, int T_r,
                                           int T_c, T softmax_scale) {
   // 1. 检查运行时参数是否与预期（或编译时常量）一致
-  //    如果 B_c 或 dqkv 不匹配，PADDED_DQKV 的计算和共享内存大小会错误
+  //    如果 B_c 或 dqkv 不匹配，DQKV_VALUE 的计算和共享内存大小会错误
   if (dqkv != DQKV_VALUE || B_c != B_C_VALUE) return;
 
   // 2. 共享内存声明
   __shared__ float s_qi[DQKV_VALUE];
-  // **** 修改点 1: 使用 PADDED_DQKV 定义 s_vj ****
-  __shared__ float s_vj[B_C_VALUE * PADDED_DQKV];  // 使用 Padded 维度
-  __shared__ float s_score_buf[B_C_VALUE];
-  __shared__ float s_lm[2];               // {global_m, global_l}
-  __shared__ float s_s_score[B_C_VALUE];  // v4 中计算 exp(score - max) 时写入
-  __shared__ float s_o[DQKV_VALUE];  // v4 中用于累加输出，大小是 DQKV_VALUE
 
-  // 线程内变量 (与 v4 保持一致)
+  __shared__ float s_vj[B_C_VALUE * DQKV_VALUE];  
+  __shared__ float s_score_buf[B_C_VALUE];
+  __shared__ float s_lm[2];               
+  __shared__ float s_s_score[B_C_VALUE];  
+  __shared__ float s_o[DQKV_VALUE];  
+
+
   const int d_tid = threadIdx.x;
   const int token_tid = threadIdx.y;
   const int head_id = blockIdx.x;
   const int q_offset = head_id * dqkv;
   const int kv_head = head_id / n_groups;
 
-  // 向量化加载单位 (与 v4 保持一致)
   constexpr int vec_unit =
-      16 / sizeof(T);  // 假设 T 是 float 或 __half (4 or 8)
-  // 假设 float4 定义存在
-  using VecLoadFloat4 = float4;  // 明确使用 float4 类型
+      16 / sizeof(T);  
+
+
   Vec<T, vec_unit> vq, vk, vv;
 
   // --------------------------
-  // (A) 加载 Q (与 v4 保持一致)
+  // (A) 加载 Q 
   // --------------------------
+
   if (token_tid == 0) {
-    const int vecCount = dqkv / vec_unit;  // vecCount 计算移到这里更合适
+    const int vecCount = dqkv / vec_unit; 
     for (int i = d_tid; i < vecCount; i += blockDim.x) {
-      // **注意**: v4 这里直接用了 float4*，假设 T 就是 float
-      // 如果 T 是 __half，这里需要不同的 reinterpret_cast
-      if constexpr (sizeof(T) == 4) {
-        vq.f4 = *reinterpret_cast<const VecLoadFloat4*>(
-            &q[q_offset + i * vec_unit]);
+      vq.f4 = *reinterpret_cast<const float4*>(
+          &q[q_offset + i * vec_unit]);
 #pragma unroll
-        for (int j = 0; j < vec_unit; j++) {
-          s_qi[i * vec_unit + j] = static_cast<float>(vq.t[j]);
-        }
-      } else {
-// 处理 T 不是 float 的情况，例如 __half
-// 需要适配的加载和转换逻辑 (v4 未明确展示)
-// 假设简单逐个加载转换
-#pragma unroll
-        for (int j = 0; j < vec_unit; ++j) {
-          s_qi[i * vec_unit + j] =
-              static_cast<float>(q[q_offset + i * vec_unit + j]);
-        }
+      for (int j = 0; j < vec_unit; j++) {
+        s_qi[i * vec_unit + j] = static_cast<float>(vq.t[j]);
       }
     }
   }
-  __syncthreads();  // v4 的同步点
+  __syncthreads();  
 
-  // 引用全局 softmax 递归变量 (与 v4 一致)
+  // 引用全局 softmax 递归变量
   float& global_m = s_lm[0];
   float& global_l = s_lm[1];
 
-  // --- v4 没有显式初始化 s_o, global_m, global_l ---
-  // --- 保持 v4 行为，不添加初始化 (如果 v4 能跑，说明逻辑依赖后续写入覆盖) ---
-  // 初始化 O, m, l (假设由第一个 chunk 的 E 步骤隐式完成)
-  if (threadIdx.x == 0 && threadIdx.y == 0) {
-    // 这里不初始化，依赖 E 步骤的 j==0 分支
-  }
-  // 初始化 s_o (假设由 E 步骤的 j==0 分支完成)
-  if (token_tid == 0) {
-    // 不在此处初始化 s_o
-  }
+  // --------------------------
+  // (B) 遍历 KV 分块 
+  // --------------------------
 
-  // --------------------------
-  // (B) 遍历 KV 分块 (与 v4 保持一致)
-  // --------------------------
-  const int vecCount = dqkv / vec_unit;  // vecCount 移到循环外
+  const int vecCount = dqkv / vec_unit;  
 
   for (int j = 0; j < T_c; ++j) {
     int token_index = j * B_c + token_tid;
     bool valid = (token_index < cache_length);
-
-    // (B1) 加载 K/V & QK^T (与 v4 一致，但 s_vj 写入地址修改)
     float local_score = 0.0f;
     for (int i = d_tid; i < vecCount; i += blockDim.x) {
       int index = (token_index * n_kv_h + kv_head) * dqkv + i * vec_unit;
+   
       if (valid) {
-        // 假设 T 是 float 或 half，并且 VecLoadFloat4 / Vec 适用
-        if constexpr (sizeof(T) == 4) {
-          vk.f4 = *reinterpret_cast<const VecLoadFloat4*>(&k[index]);
-          vv.f4 = *reinterpret_cast<const VecLoadFloat4*>(&v[index]);
+          vk.f4 = *reinterpret_cast<const float4*>(&k[index]);
+          vv.f4 = *reinterpret_cast<const float4*>(&v[index]);
+          // *reinterpret_cast<float4*>(&s_vj[token_tid * DQKV_VALUE + i * vec_unit + l]) = *reinterpret_cast<const float4*>(&v[index]);
+
+  
 #pragma unroll
           for (int l = 0; l < vec_unit; l++) {
             float k_val = static_cast<float>(vk.t[l]);
             float v_val = static_cast<float>(vv.t[l]);
             local_score += s_qi[i * vec_unit + l] * k_val;
-            // **** 修改点 2: 使用 PADDED_DQKV 作为写入 stride ****
-            s_vj[token_tid * PADDED_DQKV + i * vec_unit + l] = v_val;
-          }
-        } else {
-// 处理 T 不是 float 的情况 (如 __half)
-#pragma unroll
-          for (int l = 0; l < vec_unit; l++) {
-            float k_val = static_cast<float>(k[index + l]);
-            float v_val = static_cast<float>(v[index + l]);
-            local_score += s_qi[i * vec_unit + l] * k_val;
-            // **** 修改点 2: 使用 PADDED_DQKV 作为写入 stride ****
-            s_vj[token_tid * PADDED_DQKV + i * vec_unit + l] = v_val;
-          }
-        }
 
+            s_vj[token_tid * DQKV_VALUE + i * vec_unit + l] = v_val;
+          }
       } else {
-// 无效位置填零 (v4 逻辑)
+            // float4 zero_vec = {0.0f, 0.0f, 0.0f, 0.0f}; // 需要确保 float4 类型可用
+     
+            // *reinterpret_cast<float4*>(&s_vj[base_idx_sm]) = zero_vec;
+// 无效位置填零 
 #pragma unroll
         for (int l = 0; l < vec_unit; l++) {
-          // **** 修改点 3: 零填充也用 PADDED_DQKV ****
-          s_vj[token_tid * PADDED_DQKV + i * vec_unit + l] = 0.0f;
+          s_vj[token_tid * DQKV_VALUE + i * vec_unit + l] = 0.0f;
         }
       }
+    
     }
-    __syncthreads();  // v4 的同步点
 
-    // (B2) Warp 内归约 QK Score (与 v4 一致)
+
+    __syncthreads();  
+
+    // (B2) Warp 内归约 QK Score
     if (valid) {
-      unsigned int mask = 0xFFFFFFFF;  // 使用全 mask 保证 warp 内同步
-      // TODO: 检查 v4 的 __activemask() 是否在所有情况下都正确，0xFFFFFFFF
-      // 更安全
+      unsigned int mask = 0xFFFFFFFF;  
       for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         local_score += __shfl_down_sync(mask, local_score, offset);
       }
-      if (d_tid == 0) {  // v4 使用 d_tid == 0 判断 lane 0
+      if (d_tid == 0) {  
         s_score_buf[token_tid] =
             local_score * static_cast<float>(softmax_scale);
       }
+
     } else {
       if (d_tid == 0) {
         s_score_buf[token_tid] = -FLT_MAX;
@@ -302,16 +261,14 @@ __global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
     float cur_l = cur_l_s;  // 所有线程读取 cur_l
 
     // --------------------------
-    // (D) 计算部分输出 (与 v4 一致，但 s_vj 读取地址修改)
+    // (D) 计算部分输出 
     // --------------------------
-    float partial_out = 0.0f;  // 寄存器累加器
+    float partial_out = 0.0f;  
+    if(token_tid == 0)
     for (int i = 0; i < B_c; ++i) {
-      float exp_score = s_s_score[i];  // 从 s_s_score 读取 exp 值
-      // **** 修改点 4: 使用 PADDED_DQKV 作为读取 stride ****
-      float v_val = s_vj[i * PADDED_DQKV + d_tid];
-      // v4 的实现是直接用 exp_score * v_val，最后 online update 才合并 l
-      // partial_out += (exp_score / cur_l) * v_val; // v4 不是这样做的
-      partial_out = fmaf(exp_score, v_val, partial_out);  // 累加 exp(score-m)*V
+      float exp_score = s_s_score[i]; 
+      float v_val = s_vj[i * DQKV_VALUE + d_tid];
+      partial_out = fmaf(exp_score, v_val, partial_out); 
     }
     // 注意：此时 partial_out 存储的是 sum(exp(score-m)*V)
 
@@ -366,25 +323,37 @@ __global__ void flash_attention_kernel_v5(T* q, const T* k, const T* v,
   // --------------------------
   // (F) 写回 att_output (与 v4 逻辑一致)
   // --------------------------
-  // **重要**: v4 的 s_o 存储的是 sum(exp(score-m_final)*V)
-  // 需要除以最终的 global_l 进行归一化
-  // v4 代码段没有显式包含最后的归一化和写回 global memory 的部分
-  // 假设 v4 的逻辑是在 kernel 末尾完成归一化和写回:
-
-  // 归一化: s_o[d_tid] / global_l
-  float final_out = 0.0f;
-  if (global_l != 0.0f) {  // 防止除零
-    final_out = s_o[d_tid] / global_l;
-  }
+  float final_out = s_o[d_tid];  // 合并版本，不归一化
 
   // 写回 global memory
   if (threadIdx.y == 0) {  // 让 y=0 的线程负责写回
     // 假设 att_output 指向当前 head 的输出位置
     // 需要正确的输出偏移量
-    int out_offset = head_id * dqkv;  // 或者其他基于 blockIdx 的偏移
+    int out_offset = head_id * (dqkv + 2);  // 或者其他基于 blockIdx 的偏移
     att_output[out_offset + d_tid] = static_cast<T>(final_out);
+    if (d_tid == 0) {
+      att_output[out_offset + dqkv] = static_cast<T>(global_m);
+      att_output[out_offset + dqkv + 1] = static_cast<T>(global_l);
+    }
   }
-  // kernel 末尾隐式同步
+
+
+
+
+  // // 归一化
+  // float final_out = 0.0f;
+  // if (global_l != 0.0f) {  // 防止除零
+  //   final_out = s_o[d_tid] / global_l;
+  // }
+
+  // // 写回 global memory
+  // if (threadIdx.y == 0) {  // 让 y=0 的线程负责写回
+  //   // 假设 att_output 指向当前 head 的输出位置
+  //   // 需要正确的输出偏移量
+  //   int out_offset = head_id * dqkv;  // 或者其他基于 blockIdx 的偏移
+  //   att_output[out_offset + d_tid] = static_cast<T>(final_out);
+  // }
+  // // kernel 末尾隐式同步
 }
 
 template <typename T>
@@ -695,14 +664,12 @@ __global__ void flash_attention_kernel_v3(T* q, const T* k, const T* v,
     for (int i = d_tid; i < vecCount; i += blockDim.x) {
       if (valid) {
         int index = (token_index * n_kv_h + kv_head) * dqkv + i * vec_unit;
-        // 加载 key
         v1.f4 = *reinterpret_cast<const float4*>(&k[index]);
 #pragma unroll
         for (int l = 0; l < vec_unit; l++) {
           s_kj[token_tid * dqkv + i * vec_unit + l] =
               static_cast<float>(v1.t[l]);
         }
-        // 加载 value
         v2.f4 = *reinterpret_cast<const float4*>(&v[index]);
 #pragma unroll
         for (int l = 0; l < vec_unit; l++) {
@@ -988,8 +955,9 @@ __global__ void flash_attention_kernel_v2(T* q, const T* k, const T* v,
 // -------------------------------
 // host 端调用：设置 grid/block、使用静态共享内存（因此 shmem_bytes
 // 设为0），并发起 kernel 调用
+
 template <typename T>
-void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
+void flash_attention(Tensor<T>& Q, const Tensor<T>&& K, const Tensor<T>&& V,
                      Tensor<T>& att_output, cudaStream_t stream) {
   int dqkv = K.sizes()[2];  // 每个 head 内维度
   if (dqkv != DQKV_VALUE) {
@@ -999,9 +967,7 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
   int n_q_h = Q.sizes()[1];         // query head 数
   int cache_length = K.sizes()[0];  // 总的 kv token 数
   int n_kv_h = K.sizes()[1];
-  int n_groups = n_q_h / n_kv_h;  // GQA 中的分组数
-
-  // decode 模式下 query 长度为 1
+  int n_groups = n_q_h / n_kv_h;
   int B_r = 1;
   int T_r = 1;
 
@@ -1015,19 +981,63 @@ void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
   int threads_y = B_c;   // B_c = B_C_VALUE
   dim3 block(threads_x, threads_y);
 
-  // 使用静态共享内存，故 shmem_bytes = 0
-  flash_attention_kernel_v5<T><<<grid, block, 0, stream>>>(
+  // 只有v5适应于新的分块fa模式
+  flash_attention_kernel_v5<T><<<grid, block, 0,stream>>>(
       Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
       cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
       static_cast<T>(softmax_scale));
 }
 
 // 显式实例化
-template void flash_attention<float>(Tensor<float>&, const Tensor<float>&,
-                                     const Tensor<float>&, Tensor<float>&,
-                                     cudaStream_t);
-template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&,
-                                      const Tensor<nvbf16>&, Tensor<nvbf16>&,
-                                      cudaStream_t);
+template void flash_attention<float>(Tensor<float>&, const Tensor<float>&&,
+                                     const Tensor<float>&&, Tensor<float>&,
+                                     cudaStream_t stream);
+template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&&,
+                                      const Tensor<nvbf16>&&, Tensor<nvbf16>&,
+                                      cudaStream_t stream);
 
+// template <typename T>
+// void flash_attention(Tensor<T>& Q, const Tensor<T>& K, const Tensor<T>& V,
+//                      Tensor<T>& att_output, cudaStream_t stream) {
+//   int dqkv = K.sizes()[2];  // 每个 head 内维度
+//   if (dqkv != DQKV_VALUE) {
+//     throw std::runtime_error("dqkv 不匹配预定义的值");
+//   }
+//   float softmax_scale = 1.0f / sqrtf(static_cast<float>(dqkv));
+//   int n_q_h = Q.sizes()[1];         // query head 数
+//   int cache_length = K.sizes()[0];  // 总的 kv token 数
+//   int n_kv_h = K.sizes()[1];
+//   int n_groups = n_q_h / n_kv_h;  // GQA 中的分组数
+
+//   // decode 模式下 query 长度为 1
+//   int B_r = 1;
+//   int T_r = 1;
+
+//   // 每个 chunk 读取的 kv token 数（预设为偶数 B_C_VALUE）
+//   int B_c = B_C_VALUE;
+//   int T_c = (cache_length + B_c - 1) / B_c;
+
+//   // 每个 block 处理一个 query head
+//   dim3 grid(n_q_h);
+//   int threads_x = dqkv;  // dqkv = DQKV_VALUE
+//   int threads_y = B_c;   // B_c = B_C_VALUE
+//   dim3 block(threads_x, threads_y);
+
+//   // 使用静态共享内存，故 shmem_bytes = 0
+//   flash_attention_kernel_v5<T><<<grid, block, 0, stream>>>(
+//       Q.data_ptr(), K.data_ptr(), V.data_ptr(), att_output.data_ptr(), n_q_h,
+//       cache_length, n_kv_h, dqkv, B_c, B_r, n_groups, T_r, T_c,
+//       static_cast<T>(softmax_scale));
+// }
+
+// // 显式实例化
+// template void flash_attention<float>(Tensor<float>&, const Tensor<float>&,
+//                                      const Tensor<float>&, Tensor<float>&,
+//                                      cudaStream_t);
+// template void flash_attention<nvbf16>(Tensor<nvbf16>&, const Tensor<nvbf16>&,
+//                                       const Tensor<nvbf16>&, Tensor<nvbf16>&,
+//                                       cudaStream_t);
+
+
+                                      
 }  // namespace cuda_OP

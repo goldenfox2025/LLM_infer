@@ -76,7 +76,7 @@ class QwenModel : public BaseModel {
   Device device() const override { return device_; }
 
  private:
-  cudaEvent_t eventQ, eventK, eventV;
+  std::array<cudaEvent_t, 3> fa_done_events_;
   size_t vocab_size_;
   size_t n_layers_;
   size_t n_heads_;

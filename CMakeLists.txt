@@ -62,7 +62,7 @@ target_include_directories(model_bridge PRIVATE /usr/local/cuda/include)
 
 target_compile_options(model_bridge PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-O3 -march=native -funroll-loops -flto -mavx2 -mfma>
-  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math --expt-relaxed-constexpr -gencode arch=compute_89,code=sm_89>
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math --expt-relaxed-constexpr -lineinfo -gencode arch=compute_89,code=sm_89>
 )
 
 

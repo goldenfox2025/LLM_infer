@@ -1,13 +1,14 @@
 #!/bin/bash
-set -e
+set -e # Exit immediately if a command exits with a non-zero status.
 
-echo ">> Starting Nsight Compute profiling..."
+echo ">> Starting Nsight Compute profiling (with --set full)..."
+echo ">> Ensure this is run from a TTY (Ctrl+Alt+F3) or SSH to avoid desktop freeze."
 
-# 记录原始目录 (父目录)
+# Record the original directory (parent directory)
 original_dir=$(pwd)
 echo ">> Original directory: ${original_dir}"
 
-# --- New: Define and ensure the 'data' directory exists ---
+# --- Define and ensure the 'data' directory exists ---
 data_dir_name="data"
 data_dir_path="${original_dir}/${data_dir_name}"
 
@@ -22,76 +23,93 @@ if [ ! -d "${data_dir_path}" ]; then
 else
     echo ">> Using existing data directory: ${data_dir_path}"
 fi
-# --- End New ---
+# --- End Data Dir ---
 
-# 设置 perf_event_paranoid (保持之前的健壮性检查)
-if [ -w /proc/sys/kernel/perf_event_paranoid ]; then
-    if sudo -n sh -c 'echo 1 > /proc/sys/kernel/perf_event_paranoid' 2>/dev/null; then
-        echo ">> Set perf_event_paranoid to 1."
+# --- Set perf_event_paranoid (using robust check) ---
+paranoid_path="/proc/sys/kernel/perf_event_paranoid"
+current_paranoid_value=$(cat "$paranoid_path" 2>/dev/null || echo "unknown")
+echo ">> Current perf_event_paranoid value: ${current_paranoid_value}"
+
+# Attempt to set only if it's currently > 1
+if [ "$current_paranoid_value" != "unknown" ] && [ "$current_paranoid_value" -gt 1 ]; then
+    echo ">> Attempting to set perf_event_paranoid to 1..."
+    # Try direct write first (if running as root or have direct permission)
+    if echo 1 > "$paranoid_path" 2>/dev/null; then
+        echo ">> Successfully set perf_event_paranoid to 1 (direct write)."
+    # If direct write fails, try sudo without password prompt
+    elif sudo -n sh -c "echo 1 > $paranoid_path" 2>/dev/null; then
+        echo ">> Successfully set perf_event_paranoid to 1 using sudo -n."
     else
-        echo ">> Warning: Could not set perf_event_paranoid without interaction, attempting without sudo..."
-        if sh -c 'echo 1 > /proc/sys/kernel/perf_event_paranoid' 2>/dev/null; then
-           echo ">> Set perf_event_paranoid to 1 (without sudo)."
-        else
-           echo ">> Warning: Could not write to /proc/sys/kernel/perf_event_paranoid. Profiling might be limited if kernel events are needed."
-        fi
+        echo ">> Warning: Could not set perf_event_paranoid to 1 automatically."
+        echo ">> Profiling might be limited if kernel events are needed."
+        echo ">> Consider running 'sudo sysctl kernel.perf_event_paranoid=1' manually if issues arise."
+        # Don't exit, let ncu try anyway
     fi
-elif [ -e /proc/sys/kernel/perf_event_paranoid ]; then
-     echo ">> Warning: No write permission for /proc/sys/kernel/perf_event_paranoid. Profiling might be limited if kernel events are needed."
+elif [ "$current_paranoid_value" == "unknown" ]; then
+    echo ">> Warning: Could not read $paranoid_path. Cannot check or set paranoia level."
+else
+    echo ">> perf_event_paranoid is already at 1 or lower. No change needed."
 fi
+# --- End perf_event_paranoid ---
 
-
-# 检查 frontend 目录是否存在于当前 (父) 目录
+# Check if frontend directory exists in the current (parent) directory
 if [ -d "frontend" ]; then
-    # 定义输出报告文件名 (包含时间戳)
-    report_filename="chat_profile_$(date +%Y%m%d_%H%M%S).ncu-rep"
-    # 定义报告文件在 'data' 目录中的完整路径
+    # Define output report filename (including timestamp)
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    report_filename="chat_profile_${timestamp}_full.ncu-rep" # Added _full suffix
+    # Define full path for the report file within the 'data' directory
     report_full_path="${data_dir_path}/${report_filename}"
 
-    # 切换到 frontend 目录
+    # Change to the frontend directory
     cd frontend
     echo ">> Changed directory to $(pwd)."
 
-    echo ">> Running Nsight Compute on chat.py..."
-    # *** 关键修改：指定输出路径为父目录下的 'data' 目录 ***
-    # 使用相对路径 "../data/" 指向原始目录下的 data 文件夹
-    echo ">> Report file will be saved to: ${report_full_path}"
-    ncu \
-      -o "../${data_dir_name}/${report_filename}" \
-      --set full \
-      --target-processes all \
-      --replay-mode kernel \
-      python3 chat.py
-      # 如果 chat.py 需要参数，在这里加上: python3 chat.py arg1 arg2 ...
+    echo ">> Running Nsight Compute on chat.py with --set full for kernel 'gemmv'..."
+    echo ">> This WILL take a long time and consume significant resources."
 
-    ncu_exit_status=$? # 保存 ncu 的退出状态
+    # Construct the ncu command arguments
+    # Using the options that caused the freeze in the GUI, but should work in TTY/SSH
+    ncu_args=(
+    ncu
+    -o "../${data_dir_name}/${report_filename}"
+    --set full
+    --target-processes all
+    --replay-mode kernel
+    --kernel-name 'flash_attention_kernel_v5'
+    python3 chat.py
+    # ... chat.py 的参数 ...
+    )
 
-    # *** 返回上一级目录 (原始目录) ***
-    cd "${original_dir}" # 使用保存的原始目录路径更安全
+
+    echo ">> Executing: ${ncu_args[*]}"
+
+    # Execute ncu command
+    "${ncu_args[@]}"
+
+    ncu_exit_status=$? # Save ncu's exit status
+
+    # Return to the original directory
+    cd "${original_dir}"
     echo ">> Returned to directory: $(pwd)"
 
-    # 根据 ncu 退出状态进行判断和报告
+    # Report based on ncu exit status
     if [ $ncu_exit_status -eq 0 ]; then
-        echo ">> Nsight Compute profiling finished successfully."
-        # 报告已经在父目录的 data 子目录中，路径正确
+        echo ">> Nsight Compute profiling (--set full) finished successfully."
         echo ">> Report saved to: ${report_full_path}"
-        # 提供查看命令，可以使用相对路径 data/ 或完整路径
-        echo ">> You can view the report using the Nsight Compute GUI: ncu-ui \"${report_full_path}\""
-        # 或者: echo ">> You can view the report using the Nsight Compute GUI: ncu-ui \"${data_dir_name}/${report_filename}\""
+        echo ">> You can view the report later using the Nsight Compute GUI:"
+        echo "   ncu-ui \"${report_full_path}\""
     else
         echo ">> Nsight Compute profiling failed with exit code ${ncu_exit_status}."
-        # 报告文件可能未生成或不完整，但仍提示预期路径
-        echo ">> Expected report location: ${report_full_path}"
-        exit 1 # 以失败状态退出
+        echo ">> Check the output above for specific errors from ncu or the application."
+        echo ">> Expected report location (may be incomplete or not generated): ${report_full_path}"
+        exit 1 # Exit with failure status
     fi
 
 else
     echo ">> Error: frontend directory not found in ${original_dir}!"
-    # 已经在父目录，直接退出
+    # Already in the parent directory, just exit
     exit 1
 fi
 
-# 可选：恢复 perf_event_paranoid 设置
-# ...
-
+echo ">> Script finished."
 exit 0
