@@ -130,7 +130,7 @@ def main():
     parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=200+23, help='生成文本的最大长度')
-    parser.add_argument('--temperature', type=float, default=0.7, help='生成温度')
+    parser.add_argument('--temperature', type=float, default=1, help='生成温度')
     parser.add_argument('--top_p', type=float, default=1, help='top-p 采样阈值')
     parser.add_argument('--top_k', type=int, default=20, help='top-k 采样阈值')
     args = parser.parse_args()
