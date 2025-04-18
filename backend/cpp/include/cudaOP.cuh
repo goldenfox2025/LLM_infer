@@ -40,7 +40,9 @@ void init_curand(curandState* d_states, unsigned long long seed, int offset,
 void checkCudaError(cudaError_t err);
 void print_cuda_memory_usage(const char* location);
 
-// 模板化算子函数声明
+template <typename T>
+void add_rms(Tensor<T> *output,  Tensor<T> *input, const Tensor<T> *add_,
+             const Tensor<T> *weight, float eps, cudaStream_t stream = nullptr);
 
 // 从 embedding_table 中根据 input 索引取值写入 output
 template <typename T>

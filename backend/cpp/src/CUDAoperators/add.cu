@@ -18,8 +18,8 @@ namespace cuda_OP {
 // v1: Grid-Stride Loop Kernel (No __ldg - Benchmark vs original!)
 // --------------------------------------------------
 template <typename T>
-__global__ void add_kernel_v1(const T *__restrict__ A, const T *__restrict__ B,
-                              T *__restrict__ out, size_t total) {
+__global__ void add_kernel_v1(const T * A, const T * B,
+                              T * out, size_t total) {
   size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
 
@@ -35,8 +35,8 @@ __global__ void add_kernel_v1(const T *__restrict__ A, const T *__restrict__ B,
 
 // v2 Kernel for float (using float2)
 __global__ void add_kernel_float_v2(
-    const float2 *__restrict__ A, const float2 *__restrict__ B,
-    float2 *__restrict__ out,
+    const float2 * A, const float2 * B,
+    float2 * out,
     size_t total_vec2)  // total number of float2 elements
 {
   size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -54,8 +54,8 @@ __global__ void add_kernel_float_v2(
 
 // v2 Kernel for bfloat16 (using nv_bfloat162)
 __global__ void add_kernel_bf16_v2(
-    const nv_bfloat162 *__restrict__ A, const nv_bfloat162 *__restrict__ B,
-    nv_bfloat162 *__restrict__ out,
+    const nv_bfloat162 * A, const nv_bfloat162 * B,
+    nv_bfloat162 * out,
     size_t total_vec2)  // total number of nv_bfloat162 elements
 {
   size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;

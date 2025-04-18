@@ -237,7 +237,9 @@ class Tensor {
       return tensor_convert<T, float>(*this);
     }
   }
-
+  int nbytes() const {
+    return sizeof(T)*length_;
+  }
   // 返回数据指针（const 版本）
   const T* data_ptr() const {
     if (device_ == Device::CPU) {

@@ -61,7 +61,7 @@ __device__ inline float warp_reduce_sum(float val) {
 // GEMMV Kernel                                                        //
 //----------------------------------------------------------------------------//
 template <typename T, typename type_acc, int block_size>
-static __global__ void gemmv(
+static __global__ void gemmv_s(
     const T *x,               // 矩阵
     const T *y,               // 向量
     type_acc *dst,            // 输出
@@ -159,7 +159,7 @@ void launch_gemmv_scores(const T *x,              // 矩阵
   dim3 grid(row_size, channel_size);
   constexpr int block_size = 128;
   dim3 block(block_size);
-  gemmv<T, AccT, block_size>
+  gemmv_s<T, AccT, block_size>
       <<<grid, block, 0, stream>>>(x, y, dst, channel_ratio, stride_channel_x,
                                    stride_channel_y, stride_channel_dst);
 }

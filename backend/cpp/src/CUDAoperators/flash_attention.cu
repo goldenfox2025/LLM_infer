@@ -12,7 +12,7 @@
 #include "cudaOP.cuh"
 
 #define DQKV_VALUE 128
-#define B_C_VALUE 16
+#define B_C_VALUE 32
 
 constexpr int WARP_SIZE = 32;
 
@@ -29,7 +29,6 @@ namespace cuda_OP
                                             int B_r, int n_groups, int T_r,
                                             int T_c1, int T_c2, int T_c3, T softmax_scale)
   {
-
     int T_c, cache_length;
     const T *k, *v;
     T *att_output;

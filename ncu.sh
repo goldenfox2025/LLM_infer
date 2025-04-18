@@ -75,7 +75,7 @@ if [ -d "frontend" ]; then
     --set full
     --target-processes all
     --replay-mode kernel
-    --kernel-name 'flash_attention_kernel_v5'
+    --kernel-name 'rms_norm_kernel_v2'
     python3 chat.py
     # ... chat.py 的参数 ...
     )
