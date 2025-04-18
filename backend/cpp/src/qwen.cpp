@@ -294,14 +294,18 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   // cudaStreamSynchronize(compute_streams_[3]);
   // cudaStreamSynchronize(compute_streams_[4]);
   // 主循环：遍历所有Transformer层
+  std::string l= "layers." + std::to_string(0) + ".";
+  auto& attention_norm_weight =
+  params_.at(l + "input_layernorm.weight");
+  cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
+    rms_norm_eps_);
   for (size_t i = 0; i < n_layers_; i++) {
+    
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
 
-    // 1. Input LayerNorm (RMSNorm)
-    auto& attention_norm_weight =
-        params_.at(layer_prefix + "input_layernorm.weight");
-    cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
-                      rms_norm_eps_);
+
+    
+
 
     // 2. Self-Attention
     auto& wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
@@ -586,7 +590,19 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     cuda_OP::matmul(gate_buf, down_weight, &ffn_out, nullptr, down_bias);
 
     // 残差连接
-    cuda_OP::add(&residual, &residual, &ffn_out);
+    // cuda_OP::add(&residual, &residual, &ffn_out);
+    if(i == n_layers_ - 1) {
+      // 最后一层的残差连接
+      cuda_OP::add(&residual, &residual, &ffn_out);
+    } else {
+      std::string lx = "layers." + std::to_string(i+1) + ".";
+      auto& attention_norm_weight =
+
+      params_.at(lx + "input_layernorm.weight");
+      cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &attention_norm_weight,
+        rms_norm_eps_);
+    }
+
   }
 
   // 最终的LayerNorm (RMSNorm)
