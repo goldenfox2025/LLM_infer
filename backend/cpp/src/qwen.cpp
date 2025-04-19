@@ -2,118 +2,132 @@
 #include "qwen.hpp"
 
 #include <cmath>
+#include <cmath>    // For std::fabs (for tolerance comparison if needed)
+#include <cstring>  // For memcmp (binary comparison)
 #include <iostream>
+#include <limits>  // For std::numeric_limits (for tolerance comparison if needed)
+#include <vector>
 
 #include "cudaOP.cuh"
-#include <vector>
-#include <cmath> // For std::fabs (for tolerance comparison if needed)
-#include <limits> // For std::numeric_limits (for tolerance comparison if needed)
-#include <cstring> // For memcmp (binary comparison)
 
 // Assuming Tensor class and Device enum are defined as before
 // Assuming checkCudaError is available
 
 template <typename T>
-bool compareGpuTensors(const Tensor<T>& t1, const Tensor<T>& t2, const std::string& t1_name = "Tensor1", const std::string& t2_name = "Tensor2", bool verbose = true) {
-    // 1. 检查元数据
-    if (t1.device() != Device::CUDA || t2.device() != Device::CUDA) {
-        if (verbose) std::cerr << "[Compare Error] Both tensors must be on CUDA device.\n";
-        return false;
+bool compareGpuTensors(const Tensor<T>& t1, const Tensor<T>& t2,
+                       const std::string& t1_name = "Tensor1",
+                       const std::string& t2_name = "Tensor2",
+                       bool verbose = true) {
+  // 1. 检查元数据
+  if (t1.device() != Device::CUDA || t2.device() != Device::CUDA) {
+    if (verbose)
+      std::cerr << "[Compare Error] Both tensors must be on CUDA device.\n";
+    return false;
+  }
+  if (t1.sizes() != t2.sizes()) {
+    if (verbose)
+      std::cerr << "[Compare Error] Tensor shapes mismatch: " << t1_name
+                << " vs " << t2_name << "\n";
+    return false;
+  }
+  if (t1.numel() == 0) {
+    if (verbose)
+      std::cout << "[Compare Info] Both tensors are empty, considered equal.\n";
+    return true;  // Empty tensors are equal
+  }
+
+  size_t num_elements = t1.numel();
+  size_t n_bytes = num_elements * sizeof(T);
+
+  // 2. 分配 Host 内存
+  std::vector<T> h_buffer1(num_elements);
+  std::vector<T> h_buffer2(num_elements);
+
+  // 3. 拷贝数据 (使用默认流，确保拷贝完成)
+  cudaError_t err1 = cudaMemcpy(h_buffer1.data(), t1.data_ptr(), n_bytes,
+                                cudaMemcpyDeviceToHost);
+  cudaError_t err2 = cudaMemcpy(h_buffer2.data(), t2.data_ptr(), n_bytes,
+                                cudaMemcpyDeviceToHost);
+
+  // --- 强制同步以确保拷贝完成 ---
+  // 在比较前同步是安全的，尽管 cudaMemcpy 默认是同步的（对于默认流）
+  // 但显式同步更清晰
+  cudaError_t syncErr = cudaDeviceSynchronize();
+
+  if (err1 != cudaSuccess || err2 != cudaSuccess || syncErr != cudaSuccess) {
+    if (verbose) {
+      std::cerr
+          << "[Compare Error] cudaMemcpy or cudaDeviceSynchronize failed.\n";
+      if (err1 != cudaSuccess)
+        std::cerr << "  memcpy t1: " << cudaGetErrorString(err1) << std::endl;
+      if (err2 != cudaSuccess)
+        std::cerr << "  memcpy t2: " << cudaGetErrorString(err2) << std::endl;
+      if (syncErr != cudaSuccess)
+        std::cerr << "  sync: " << cudaGetErrorString(syncErr) << std::endl;
     }
-    if (t1.sizes() != t2.sizes()) {
-        if (verbose) std::cerr << "[Compare Error] Tensor shapes mismatch: " << t1_name << " vs " << t2_name << "\n";
-        return false;
-    }
-    if (t1.numel() == 0) {
-        if (verbose) std::cout << "[Compare Info] Both tensors are empty, considered equal.\n";
-        return true; // Empty tensors are equal
-    }
+    return false;  // Treat copy error as inequality
+  }
 
-    size_t num_elements = t1.numel();
-    size_t n_bytes = num_elements * sizeof(T);
+  // 4. 逐元素比较
+  bool mismatch_found = false;
+  size_t first_mismatch_idx = 0;
+  T val1_at_mismatch = T();  // Default constructor
+  T val2_at_mismatch = T();
 
-    // 2. 分配 Host 内存
-    std::vector<T> h_buffer1(num_elements);
-    std::vector<T> h_buffer2(num_elements);
-
-    // 3. 拷贝数据 (使用默认流，确保拷贝完成)
-    cudaError_t err1 = cudaMemcpy(h_buffer1.data(), t1.data_ptr(), n_bytes, cudaMemcpyDeviceToHost);
-    cudaError_t err2 = cudaMemcpy(h_buffer2.data(), t2.data_ptr(), n_bytes, cudaMemcpyDeviceToHost);
-
-    // --- 强制同步以确保拷贝完成 ---
-    // 在比较前同步是安全的，尽管 cudaMemcpy 默认是同步的（对于默认流）
-    // 但显式同步更清晰
-    cudaError_t syncErr = cudaDeviceSynchronize();
-
-
-    if (err1 != cudaSuccess || err2 != cudaSuccess || syncErr != cudaSuccess) {
-        if (verbose) {
-            std::cerr << "[Compare Error] cudaMemcpy or cudaDeviceSynchronize failed.\n";
-            if(err1 != cudaSuccess) std::cerr << "  memcpy t1: " << cudaGetErrorString(err1) << std::endl;
-            if(err2 != cudaSuccess) std::cerr << "  memcpy t2: " << cudaGetErrorString(err2) << std::endl;
-            if(syncErr != cudaSuccess) std::cerr << "  sync: " << cudaGetErrorString(syncErr) << std::endl;
+  // --- 使用 memcmp 进行快速二进制比较 (推荐) ---
+  if (memcmp(h_buffer1.data(), h_buffer2.data(), n_bytes) != 0) {
+    // 如果二进制不匹配，再逐个查找第一个不同的元素用于报告
+    mismatch_found = true;
+    for (size_t i = 0; i < num_elements; ++i) {
+      // 对于 bf16，直接比较可能不够精确，但可以先用 ==
+      if constexpr (std::is_same_v<T, cuda_OP::nvbf16>) {
+        // 转换为 float 比较更可靠
+        if (static_cast<float>(h_buffer1[i]) !=
+            static_cast<float>(h_buffer2[i])) {
+          first_mismatch_idx = i;
+          val1_at_mismatch = h_buffer1[i];
+          val2_at_mismatch = h_buffer2[i];
+          break;
         }
-        return false; // Treat copy error as inequality
-    }
-
-    // 4. 逐元素比较
-    bool mismatch_found = false;
-    size_t first_mismatch_idx = 0;
-    T val1_at_mismatch = T(); // Default constructor
-    T val2_at_mismatch = T();
-
-    // --- 使用 memcmp 进行快速二进制比较 (推荐) ---
-    if (memcmp(h_buffer1.data(), h_buffer2.data(), n_bytes) != 0) {
-        // 如果二进制不匹配，再逐个查找第一个不同的元素用于报告
-        mismatch_found = true;
-        for (size_t i = 0; i < num_elements; ++i) {
-            // 对于 bf16，直接比较可能不够精确，但可以先用 ==
-            if constexpr (std::is_same_v<T, cuda_OP::nvbf16>) {
-                 // 转换为 float 比较更可靠
-                 if (static_cast<float>(h_buffer1[i]) != static_cast<float>(h_buffer2[i])) {
-                     first_mismatch_idx = i;
-                     val1_at_mismatch = h_buffer1[i];
-                     val2_at_mismatch = h_buffer2[i];
-                     break;
-                 }
-            } else { // For float or other types where == is reasonable initially
-                if (h_buffer1[i] != h_buffer2[i]) {
-                    first_mismatch_idx = i;
-                    val1_at_mismatch = h_buffer1[i];
-                    val2_at_mismatch = h_buffer2[i];
-                    break;
-                }
-            }
-            // --- 如果需要容差比较 (以 float 为例) ---
-            // else if constexpr (std::is_same_v<T, float>) {
-            //     float diff = std::fabs(h_buffer1[i] - h_buffer2[i]);
-            //     float tolerance = 1e-6f; // 或者根据需要设置相对容差
-            //     if (diff > tolerance) {
-            //         mismatch_found = true;
-            //         first_mismatch_idx = i;
-            //         val1_at_mismatch = h_buffer1[i];
-            //         val2_at_mismatch = h_buffer2[i];
-            //         break;
-            //     }
-            // }
+      } else {  // For float or other types where == is reasonable initially
+        if (h_buffer1[i] != h_buffer2[i]) {
+          first_mismatch_idx = i;
+          val1_at_mismatch = h_buffer1[i];
+          val2_at_mismatch = h_buffer2[i];
+          break;
         }
+      }
+      // --- 如果需要容差比较 (以 float 为例) ---
+      // else if constexpr (std::is_same_v<T, float>) {
+      //     float diff = std::fabs(h_buffer1[i] - h_buffer2[i]);
+      //     float tolerance = 1e-6f; // 或者根据需要设置相对容差
+      //     if (diff > tolerance) {
+      //         mismatch_found = true;
+      //         first_mismatch_idx = i;
+      //         val1_at_mismatch = h_buffer1[i];
+      //         val2_at_mismatch = h_buffer2[i];
+      //         break;
+      //     }
+      // }
     }
+  }
 
-
-    // 5. 返回结果并打印信息
-    if (mismatch_found) {
-        if (verbose) {
-            std::cerr << "[Compare Result] Tensors differ: " << t1_name << " vs " << t2_name << "\n";
-            std::cerr << "  First mismatch at index " << first_mismatch_idx << ": "
-                      << val1_at_mismatch << " != " << val2_at_mismatch << "\n";
-        }
-        return false;
-    } else {
-        if (verbose) {
-            std::cout << "[Compare Result] Tensors are identical: " << t1_name << " vs " << t2_name << "\n";
-        }
-        return true;
+  // 5. 返回结果并打印信息
+  if (mismatch_found) {
+    if (verbose) {
+      std::cerr << "[Compare Result] Tensors differ: " << t1_name << " vs "
+                << t2_name << "\n";
+      std::cerr << "  First mismatch at index " << first_mismatch_idx << ": "
+                << val1_at_mismatch << " != " << val2_at_mismatch << "\n";
     }
+    return false;
+  } else {
+    if (verbose) {
+      std::cout << "[Compare Result] Tensors are identical: " << t1_name
+                << " vs " << t2_name << "\n";
+    }
+    return true;
+  }
 }
 // Debug print function for tensors
 template <typename T>
@@ -207,14 +221,14 @@ QwenModel<T>::QwenModel(
     }
   }
   for (int i = 0; i < 3; ++i) {
-    // 使用 cudaEventDisableTiming 可以获得微小的性能提升，因为我们只关心完成状态，不测量时间
+    // 使用 cudaEventDisableTiming
+    // 可以获得微小的性能提升，因为我们只关心完成状态，不测量时间
     cudaEventCreateWithFlags(&fa_done_events_[i], cudaEventDisableTiming);
   }
 }
 
 template <typename T>
 QwenModel<T>::~QwenModel() {
-
   for (cudaStream_t stream : compute_streams_) {
     if (stream) {
       // 最好在销毁流之前同步它，确保所有工作完成
@@ -224,9 +238,9 @@ QwenModel<T>::~QwenModel() {
   }
 
   for (int i = 0; i < 3; ++i) {
-      if (fa_done_events_[i]) {
-          cudaEventDestroy(fa_done_events_[i]);
-      }
+    if (fa_done_events_[i]) {
+      cudaEventDestroy(fa_done_events_[i]);
+    }
   }
 }
 
@@ -294,18 +308,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
   // cudaStreamSynchronize(compute_streams_[3]);
   // cudaStreamSynchronize(compute_streams_[4]);
   // 主循环：遍历所有Transformer层
-  std::string l= "layers." + std::to_string(0) + ".";
-  auto& attention_norm_weight =
-  params_.at(l + "input_layernorm.weight");
+  std::string l = "layers." + std::to_string(0) + ".";
+  auto& attention_norm_weight = params_.at(l + "input_layernorm.weight");
   cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
-    rms_norm_eps_);
+                    rms_norm_eps_);
   for (size_t i = 0; i < n_layers_; i++) {
-    
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
-
-
-    
-
 
     // 2. Self-Attention
     auto& wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
@@ -492,31 +500,31 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // Tensor<T> att_heads_4({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
 
     // Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
-    int seq_divide = total_seq_len / 3;
+    size_t seq_divide = total_seq_len / 3;
     int ratio = n_heads_ / n_kv_heads_;
     // for (int j = 0; j < 3; ++j) {
     //   cudaStreamSynchronize(compute_streams_[j]);
     // }
 
     cuda_OP::flash_attention(
-      Q_3d, total_K.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
-      total_K.slice({seq_divide, 0, 0},
-        {2 * seq_divide, n_kv_heads_, head_dim_}),
+        Q_3d, total_K.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+        total_K.slice({seq_divide, 0, 0},
+                      {2 * seq_divide, n_kv_heads_, head_dim_}),
         total_K.slice({2 * seq_divide, 0, 0},
-          {total_seq_len, n_kv_heads_, head_dim_}),
-      total_V.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
-      total_V.slice({seq_divide, 0, 0},
-        {2 * seq_divide, n_kv_heads_, head_dim_}),
+                      {total_seq_len, n_kv_heads_, head_dim_}),
+        total_V.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+        total_V.slice({seq_divide, 0, 0},
+                      {2 * seq_divide, n_kv_heads_, head_dim_}),
         total_V.slice({2 * seq_divide, 0, 0},
-          {total_seq_len, n_kv_heads_, head_dim_}),
-      att_heads_1,att_heads_2,att_heads_3);
+                      {total_seq_len, n_kv_heads_, head_dim_}),
+        att_heads_1, att_heads_2, att_heads_3);
 
-    cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads, nullptr);
-
- 
+    cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads,
+                       nullptr);
 
     // Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
-    // // // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_, head_dim_,
+    // // // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_,
+    // head_dim_,
     // // //                                   att_scores, n_kv_heads_);
 
     // cuda_OP::launch_gemmv_scores(total_K.data_ptr(), Q_3d.data_ptr(),
@@ -538,19 +546,14 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     auto& ffn_norm_weight =
         params_.at(layer_prefix + "post_attention_layernorm.weight");
 
-
     // cuda_OP::add(&residual, &residual, &att_proj);
 
-    
     // cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight,
     //                   rms_norm_eps_);
 
-
     cuda_OP::add_rms(&hidden_states, &residual, &att_proj, &ffn_norm_weight,
-      rms_norm_eps_);
+                     rms_norm_eps_);
     // debugPrintTensor(hidden_states, "hidden_states-after");
-    
-
 
     auto& gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
     auto& up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
@@ -591,18 +594,17 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
     // 残差连接
     // cuda_OP::add(&residual, &residual, &ffn_out);
-    if(i == n_layers_ - 1) {
+    if (i == n_layers_ - 1) {
       // 最后一层的残差连接
       cuda_OP::add(&residual, &residual, &ffn_out);
     } else {
-      std::string lx = "layers." + std::to_string(i+1) + ".";
+      std::string lx = "layers." + std::to_string(i + 1) + ".";
       auto& attention_norm_weight =
 
-      params_.at(lx + "input_layernorm.weight");
-      cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &attention_norm_weight,
-        rms_norm_eps_);
+          params_.at(lx + "input_layernorm.weight");
+      cuda_OP::add_rms(&hidden_states, &residual, &ffn_out,
+                       &attention_norm_weight, rms_norm_eps_);
     }
-
   }
 
   // 最终的LayerNorm (RMSNorm)

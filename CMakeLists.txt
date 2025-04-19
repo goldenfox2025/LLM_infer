@@ -4,7 +4,7 @@ project(llm_infer LANGUAGES CXX CUDA)
 # --- 基本配置 ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 89)
-
+set(CMAKE_CXX_COMPILER "/usr/bin/g++-12")
 # --- 查找依赖 ---
 find_package(CUDAToolkit REQUIRED)
 set(PYBIND11_PYTHON_VERSION 3.10)
