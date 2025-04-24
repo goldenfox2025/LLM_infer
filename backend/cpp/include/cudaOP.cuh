@@ -132,4 +132,91 @@ template <typename T>
 void gather_fa(const Tensor<T>& T1, const Tensor<T>& T2, const Tensor<T>& T3,
                Tensor<T>& T5, cudaStream_t stream = nullptr);
 
+// 可变分支数量的gather_fa实现
+template <typename T>
+void gather_fa_variable(const std::vector<Tensor<T>>& inputs, Tensor<T>& output,
+                       cudaStream_t stream = nullptr);
+
+// 特化版本的gather_fa实现 - 1分支
+template <typename T>
+void gather_fa_specialized_1branch(const std::vector<Tensor<T>>& inputs, Tensor<T>& output,
+                                 cudaStream_t stream = nullptr);
+
+// 特化版本的gather_fa实现 - 2分支
+template <typename T>
+void gather_fa_specialized_2branch(const std::vector<Tensor<T>>& inputs, Tensor<T>& output,
+                                 cudaStream_t stream = nullptr);
+
+// 特化版本的gather_fa实现 - 3分支
+template <typename T>
+void gather_fa_specialized_3branch(const std::vector<Tensor<T>>& inputs, Tensor<T>& output,
+                                 cudaStream_t stream = nullptr);
+
+// 特化版本的gather_fa实现 - 4分支
+template <typename T>
+void gather_fa_specialized_4branch(const std::vector<Tensor<T>>& inputs, Tensor<T>& output,
+                                 cudaStream_t stream = nullptr);
+
+// 特化版本的gather_fa实现 - 5分支
+template <typename T>
+void gather_fa_specialized_5branch(const std::vector<Tensor<T>>& inputs, Tensor<T>& output,
+                                 cudaStream_t stream = nullptr);
+
+// 可变分支数量的flash_attention实现
+template <typename T>
+void flash_attention_variable(Tensor<T>& Q,
+                             const std::vector<Tensor<T>>& K_slices,
+                             const std::vector<Tensor<T>>& V_slices,
+                             std::vector<Tensor<T>>& outputs,
+                             cudaStream_t stream = nullptr);
+
+// 特化版本的flash_attention实现 - 1分支
+template <typename T>
+void flash_attention_specialized_1branch(Tensor<T>& Q,
+                                       const std::vector<Tensor<T>>& K_slices,
+                                       const std::vector<Tensor<T>>& V_slices,
+                                       std::vector<Tensor<T>>& outputs,
+                                       cudaStream_t stream = nullptr);
+
+// 特化版本的flash_attention实现 - 2分支
+template <typename T>
+void flash_attention_specialized_2branch(Tensor<T>& Q,
+                                       const std::vector<Tensor<T>>& K_slices,
+                                       const std::vector<Tensor<T>>& V_slices,
+                                       std::vector<Tensor<T>>& outputs,
+                                       cudaStream_t stream = nullptr);
+
+// 特化版本的flash_attention实现 - 3分支
+template <typename T>
+void flash_attention_specialized_3branch(Tensor<T>& Q,
+                                       const std::vector<Tensor<T>>& K_slices,
+                                       const std::vector<Tensor<T>>& V_slices,
+                                       std::vector<Tensor<T>>& outputs,
+                                       cudaStream_t stream = nullptr);
+
+// 特化版本的flash_attention实现 - 4分支
+template <typename T>
+void flash_attention_specialized_4branch(Tensor<T>& Q,
+                                       const std::vector<Tensor<T>>& K_slices,
+                                       const std::vector<Tensor<T>>& V_slices,
+                                       std::vector<Tensor<T>>& outputs,
+                                       cudaStream_t stream = nullptr);
+
+// 特化版本的flash_attention实现 - 5分支
+template <typename T>
+void flash_attention_specialized_5branch(Tensor<T>& Q,
+                                       const std::vector<Tensor<T>>& K_slices,
+                                       const std::vector<Tensor<T>>& V_slices,
+                                       std::vector<Tensor<T>>& outputs,
+                                       cudaStream_t stream = nullptr);
+
+// 包装函数：根据KV缓存长度动态选择分支数量
+template <typename T>
+void dynamic_flash_attention_wrapper(Tensor<T>& Q,
+                                   const Tensor<T>& total_K,
+                                   const Tensor<T>& total_V,
+                                   Tensor<T>& att_output,
+                                   int n_kv_heads,
+                                   cudaStream_t stream = nullptr);
+
 }  // namespace cuda_OP

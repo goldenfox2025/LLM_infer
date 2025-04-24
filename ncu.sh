@@ -61,7 +61,7 @@ if [ -d "frontend" ]; then
     report_full_path="${data_dir_path}/${report_filename}"
 
     # Change to the frontend directory
-    cd frontend
+
     echo ">> Changed directory to $(pwd)."
 
     echo ">> Running Nsight Compute on chat.py with --set full for kernel 'gemmv'..."
@@ -71,12 +71,12 @@ if [ -d "frontend" ]; then
     # Using the options that caused the freeze in the GUI, but should work in TTY/SSH
     ncu_args=(
     ncu
-    -o "../${data_dir_name}/${report_filename}"
+    -o "./${data_dir_name}/${report_filename}"
     --set full
     --target-processes all
     --replay-mode kernel
-    --kernel-name 'rms_norm_kernel_v2'
-    python3 chat.py
+    --kernel-name 'flash_attention_kernel_v5'
+    python3 frontend/chat.py
     # ... chat.py 的参数 ...
     )
 
