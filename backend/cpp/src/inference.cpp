@@ -35,10 +35,7 @@ KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim,
       head_dim_(head_dim),
       current_len_(0),
       device_(device) {
-  std::cout << "[KVCache::KVCache] 初始化 KVCache, n_layers=" << n_layers_
-            << ", max_seq_len=" << max_seq_len_ << ", head_dim=" << head_dim_
-            << ", device=" << (device_ == Device::CUDA ? "CUDA" : "CPU")
-            << std::endl;
+  // 初始化 KVCache
 
   // 分配连续内存，形状为 [n_layers, max_seq_len, head_dim]
   k_cache_contiguous_ =
@@ -186,16 +183,10 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
       device_(device),
       d_states(nullptr) {  // 初始化 d_states 为 nullptr
 
-  // std::cout
-  //     << "[InferenceEngine::InferenceEngine] 初始化 InferenceEngine, device="
-  //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
   if (device_ == Device::CUDA) {
     cudaMalloc(&d_states, sizeof(curandState));
     int seed = std::chrono::system_clock::now().time_since_epoch().count();
     cuda_OP::init_curand(d_states, seed, 0, nullptr);
-    std::cout
-        << "[InferenceEngine::InferenceEngine] Moving InferenceEngine to CUDA"
-        << std::endl;
     this->cuda();
   }
 }
@@ -216,12 +207,8 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
                                                   uint32_t* input_ids,
                                                   float temperature,
                                                   float top_p, size_t top_k) {
-  // std::cout << "[InferenceEngine::generate_next_token] 开始生成下一个 token"
-  //           << std::endl;
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
   Tensor<uint32_t> input(input_ids, {1}, device_);
-  // std::cout << "[InferenceEngine::generate_next_token] 输入 token: "
-  //           << input_ids.back() << std::endl;
   // 更新 KV 缓存长度（为新 token 分配缓存空间）
   try {
     kv_cache_.resize(kv_cache_.size() + 1);
@@ -309,26 +296,15 @@ void InferenceEngine<T>::generate_with_callback(
     float temperature, float top_p, size_t top_k,
     std::function<void(uint32_t)> callback) {
   ThreadSafeQueue<GenerationResult> result_queue;
-  bind_this_thread_to_core(30);
+  bind_this_thread_to_core(3);
   std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
     try {
-      using duration_unit = std::chrono::microseconds;
-      const char* time_unit_str = "us"; // 用于打印
-
-      // --- 初始化累加器 ---
-      long long total_step_gpu_compute_us = 0;
-      long long total_d2h_sync_us = 0;
-      long long total_push_us = 0;
-      long long total_loop_overhead_us = 0; // 估算循环本身开销
-      bind_this_thread_to_core(31);
       uint32_t* next_token_gpu_ptr; // 指向 GPU 上的 next_token
       uint32_t next_token_host = -1; // CPU 上的 next_token 副本
-
       size_t input_size = input_ids_copy.size();
 
-      auto prefill_start = std::chrono::high_resolution_clock::now();
-      // --- Prefill ---
-      { // Prefill scope
+
+      { 
           kv_cache_.resize(kv_cache_.size() + input_size); // 调整大小移到 prefill 前
           std::vector<uint32_t> prefill_input = input_ids_copy;
           Tensor<uint32_t> input_tensor(std::move(prefill_input), {input_size}, this->device_);
@@ -336,33 +312,17 @@ void InferenceEngine<T>::generate_with_callback(
               &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
               temperature, top_p, this->d_states);
       }
-      auto prefill_end = std::chrono::high_resolution_clock::now();
-      auto prefill_elapsed_ms =
-          std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start)
-              .count();
 
       // --- 处理 Prefill 的第一个 Token ---
-      // 显式同步等待 Prefill 的 GPU 计算完成 (如果 prefill 是异步的)
-      // 如果 prefill 函数内部保证同步返回，则不需要这句
       checkCudaErrors(cudaDeviceSynchronize()); // 确保 prefill 的 GPU 操作完成
 
-      auto d2h_prefill_start = std::chrono::high_resolution_clock::now();
       // 从 GPU 获取 prefill 产生的第一个 token
-      // 假设 prefill 返回的是设备指针，需要在默认流上拷贝回来
       checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
                                        cudaMemcpyDeviceToHost, cudaStreamDefault));
-      // 为了计时准确，同步等待 D2H 完成 (!!! 仅用于计时 !!!)
       checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
-      auto d2h_prefill_end = std::chrono::high_resolution_clock::now();
-      auto d2h_prefill_us = std::chrono::duration_cast<duration_unit>(d2h_prefill_end - d2h_prefill_start).count();
-
 
       if (next_token_host == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);
-        std::cout << "\n[Prefill Only Details]\n";
-        std::cout << "  Prefill GPU + Sync Time (ms): " << prefill_elapsed_ms << "\n";
-        std::cout << "  Prefill D2H + Sync Time (" << time_unit_str << "): " << d2h_prefill_us << "\n";
-        std::cout << "[decode 耗时] 0 " << time_unit_str << std::endl << std::endl;
         return;
       }
 
@@ -371,80 +331,30 @@ void InferenceEngine<T>::generate_with_callback(
       size_t current_total_length = input_size + 1;
       uint32_t* last_token_gpu_ptr = next_token_gpu_ptr; // 下一轮的输入是 GPU 指针
 
-      auto decode_start = std::chrono::high_resolution_clock::now();
-      auto last_step_end_time = decode_start; // 用于计算循环开销
-
       while (current_total_length < max_length) {
-        auto loop_overhead_start = std::chrono::high_resolution_clock::now();
-        total_loop_overhead_us += std::chrono::duration_cast<duration_unit>(loop_overhead_start - last_step_end_time).count();
-
-        auto step_gpu_compute_start = std::chrono::high_resolution_clock::now();
         // --- 生成下一个 token (主要是 GPU 计算) ---
         next_token_gpu_ptr = this->generate_next_token(this->thread_pool_, last_token_gpu_ptr,
                                                 temperature, top_p, top_k);
-        // 显式同步，确保 generate_next_token 的 GPU 计算完成 (!!! 仅用于计时 !!!)
-        // 假设 generate_next_token 在其使用的流上完成所有工作
-        // 如果它内部使用了特定流 stream_x, 则同步 cudaStreamSynchronize(stream_x)
         checkCudaErrors(cudaDeviceSynchronize()); // 或者同步特定流
-        auto step_gpu_compute_end = std::chrono::high_resolution_clock::now();
-        total_step_gpu_compute_us += std::chrono::duration_cast<duration_unit>(step_gpu_compute_end - step_gpu_compute_start).count();
 
-
-        auto step_d2h_sync_start = std::chrono::high_resolution_clock::now();
         // --- 异步拷贝结果回 CPU ---
         checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
                                         cudaMemcpyDeviceToHost, cudaStreamDefault)); // 假设用默认流
-        // 为了计时准确，同步等待 D2H 完成 (!!! 仅用于计时 !!!)
         checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
-        auto step_d2h_sync_end = std::chrono::high_resolution_clock::now();
-        total_d2h_sync_us += std::chrono::duration_cast<duration_unit>(step_d2h_sync_end - step_d2h_sync_start).count();
 
-
-        auto step_logic_push_start = std::chrono::high_resolution_clock::now();
         // --- CPU 逻辑和 Push ---
         last_token_gpu_ptr = next_token_gpu_ptr; // 更新下一轮的输入指针
         current_total_length++;
         bool is_eos = (next_token_host == this->model_->get_eos_token_id());
 
         if (is_eos) {
-          // 在 push 前记录结束时间
-          auto push_start = std::chrono::high_resolution_clock::now();
           result_queue.push(Signal::EndOfStream);
-          auto push_end = std::chrono::high_resolution_clock::now();
-          total_push_us += std::chrono::duration_cast<duration_unit>(push_end - push_start).count();
-          last_step_end_time = push_end; // 更新最后结束时间点
           break; // 跳出循环
         }
 
-        auto push_start = std::chrono::high_resolution_clock::now();
         result_queue.push(next_token_host);
-        auto push_end = std::chrono::high_resolution_clock::now();
-        total_push_us += std::chrono::duration_cast<duration_unit>(push_end - push_start).count();
-        last_step_end_time = push_end; // 更新最后结束时间点
       } // end while loop
 
-      auto decode_end = std::chrono::high_resolution_clock::now();
-      auto decode_elapsed_us = std::chrono::duration_cast<duration_unit>(decode_end - decode_start).count();
-      auto post_loop_us = std::chrono::duration_cast<duration_unit>(decode_end - last_step_end_time).count();
-
-      // --- 打印详细计时信息 ---
-      std::cout << "\n[Detailed Timing (" << time_unit_str << ")]\n";
-      std::cout << "  Prefill GPU + Sync Time (ms):       " << prefill_elapsed_ms << "\n"; // Prefill 仍用 ms
-      std::cout << "  Prefill D2H + Sync Time:            " << d2h_prefill_us << "\n";
-      std::cout << "  Total Decode Time (Outer Loop):     " << decode_elapsed_us << "\n";
-      std::cout << "  --- Inside Decode Loop Breakdown ---\n";
-      std::cout << "  Accumulated GPU Compute + Sync Time:" << total_step_gpu_compute_us << "\n";
-      std::cout << "  Accumulated D2H Copy + Sync Time:   " << total_d2h_sync_us << "\n";
-      std::cout << "  Accumulated Push to Queue Time:     " << total_push_us << "\n";
-      std::cout << "  Accumulated Loop Overhead Est.:     " << total_loop_overhead_us << "\n"; // 循环本身开销+CPU逻辑
-      std::cout << "  Sum of Loop Components:             "
-                << (total_step_gpu_compute_us + total_d2h_sync_us + total_push_us + total_loop_overhead_us) << "\n";
-      std::cout << "  Post-Loop Overhead:                 " << post_loop_us << "\n"; // 循环结束后到 decode_end 的时间
-      std::cout << "  (Loop Comp. + Post-Loop Overhead):  "
-                << (total_step_gpu_compute_us + total_d2h_sync_us + total_push_us + total_loop_overhead_us + post_loop_us) << "\n";
-      std::cout << "  Discrepancy (Outer - Inner Sum):    "
-                << (decode_elapsed_us - (total_step_gpu_compute_us + total_d2h_sync_us + total_push_us + total_loop_overhead_us + post_loop_us)) << "\n";
-      std::cout << std::endl;
       result_queue.push(Signal::EndOfStream);
 
     } catch (...) {
@@ -526,11 +436,9 @@ InferenceEngine<T>& InferenceEngine<T>::cuda() {
     return *this;
   }
   if (model_->device() == Device::CPU) {
-    std::cout << "[InferenceEngine::cuda] Moving model to CUDA" << std::endl;
     model_->cuda();
   }
 
-  std::cout << "[InferenceEngine::cuda] Moving KVCache to CUDA" << std::endl;
   kv_cache_.cuda();
 
   device_ = Device::CUDA;
