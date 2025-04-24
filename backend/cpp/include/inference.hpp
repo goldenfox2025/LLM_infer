@@ -122,6 +122,9 @@ class InferenceEngine : public infer_base {
   InferenceEngine(std::shared_ptr<BaseModel> model,
                   Device device = Device::CUDA);
 
+  // 析构函数：释放CUDA资源
+  virtual ~InferenceEngine();
+
   // 生成单个 token
   uint32_t* generate_next_token(ThreadPool& thread_pool, uint32_t* input_ids,
                                float temperature = 1.0f, float top_p = 0.9f,

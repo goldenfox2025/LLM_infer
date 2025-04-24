@@ -33,7 +33,7 @@ def load_llama_model(model_path: str):
     """加载 Llama 模型及配置"""
     model_path = Path(model_path)
     weights = {}
-    
+
     # 加载模型权重
     with safe_open(model_path / "model.safetensors", framework="pt") as f:
         for key in f.keys():
@@ -43,7 +43,7 @@ def load_llama_model(model_path: str):
                 tensor = tensor.to(torch.float32)
             weights[key] = tensor
             print(f"Loaded tensor {key} with shape {weights[key].shape}")
-    
+
     # 加载配置文件
     with open(model_path / "config.json", 'r') as f:
         config = json.load(f)
@@ -52,14 +52,14 @@ def load_llama_model(model_path: str):
             config["tie_word_embeddings"] = True
             weights["model.embed_tokens.weight"] = weights["lm_head.weight"]
         print("Config loaded:", config)
-    
+
     return config, weights, "llama"
 
 def load_qwen_model(model_path: str, keep_bf16=True):
     """加载 Qwen 模型及配置，可选保持 BF16 精度"""
     model_path = Path(model_path)
     weights = {}
-    
+
     # 加载模型权重
     with safe_open(model_path / "model.safetensors", framework="pt") as f:
         for key in f.keys():
@@ -71,12 +71,12 @@ def load_qwen_model(model_path: str, keep_bf16=True):
             else:
                 weights[key] = tensor.to(torch.float32)
                 print(f"Loaded tensor {key} with shape {weights[key].shape}")
-    
+
     # 加载配置文件
     with open(model_path / "config.json", 'r') as f:
         config = json.load(f)
         expected_keys = [
-            "vocab_size", "hidden_size", "num_hidden_layers", 
+            "vocab_size", "hidden_size", "num_hidden_layers",
             "num_attention_heads", "num_key_value_heads",
             "intermediate_size", "max_position_embeddings",
             "rms_norm_eps", "rope_theta"
@@ -85,14 +85,14 @@ def load_qwen_model(model_path: str, keep_bf16=True):
             if key not in config:
                 print(f"Warning: {key} not found in config")
         print("Config loaded:", config)
-    
+
     model_type = "qwen_bf16" if keep_bf16 else "qwen"
     return config, weights, model_type
 
 def load_tokenizer(model_path: str, model_type: str):
     """根据模型类型加载对应的 tokenizer"""
     model_path = Path(model_path)
-    
+
     if model_type.startswith("qwen"):
         if not TRANSFORMERS_AVAILABLE:
             print("Error: transformers library required for Qwen models")
@@ -106,7 +106,7 @@ def load_tokenizer(model_path: str, model_type: str):
         tokenizer_path = model_path / "tokenizer.json"
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
         print(f"Llama tokenizer loaded from: {tokenizer_path}")
-    
+
     return tokenizer
 
 # -------------------------------
@@ -126,7 +126,7 @@ def create_callback(q: queue.Queue):
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen 模型聊天')
-    parser.add_argument('--model_path', type=str, default="../models/Qwen2.5-1.5B-Instruct", help='模型路径')
+    parser.add_argument('--model_path', type=str, default="./models/Qwen2.5-1.5B-Instruct", help='模型路径')
     parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=200+23, help='生成文本的最大长度')
@@ -144,7 +144,7 @@ def main():
         print(f"Unsupported model type: {args.model_type}")
         exit(1)
 
-    
+
     tokenizer = load_tokenizer(args.model_path, model_type)
 
     # 计算并打印模型大小
@@ -164,7 +164,7 @@ def main():
     print(f"Head Dimension: {config['hidden_size'] // config['num_attention_heads']}")
 
     # 导入 C++ 模型桥接接口
-    sys.path.append("../build")
+    sys.path.append("./build")
     from model_bridge import init_model, generate_text_stream
 
     # 初始化模型
@@ -175,9 +175,9 @@ def main():
 
     # 记录是否是首次对话
     first_chat = True
-    
+
     print("聊天已启动。输入'quit'或'exit'退出。\n")
-    
+
     while True:
         user_message = input("User: ").strip()
         if user_message.lower() in {"quit", "exit"}:
@@ -195,7 +195,7 @@ def main():
                 first_chat = False
             else:
                 messages = [{"role": "user", "content": user_message}]
-            
+
             # 使用 apply_chat_template 应用聊天模板
             text = tokenizer.apply_chat_template(
                 messages,
@@ -213,18 +213,18 @@ def main():
                 first_chat = False
             else:
                 conversation = f"{user_message}</s>\n:<|assistant|>\n"
-            
+
             if isinstance(tokenizer, Tokenizer):
                 encoded = tokenizer.encode(conversation)
                 input_ids = encoded.ids
             else:
                 model_inputs = tokenizer([conversation], return_tensors="pt")
                 input_ids = model_inputs["input_ids"][0].tolist()
-        
+
         # 生成回复：使用 minimal callback 只返回 token_id
         q = queue.Queue()
         callback = create_callback(q)
-        
+
         def run_generation():
             from model_bridge import generate_text_stream
             generate_text_stream(
@@ -236,12 +236,12 @@ def main():
                 top_k=args.top_k
             )
             q.put(None)  # 生成结束标记
-        
+
         thread = threading.Thread(target=run_generation)
         thread.start()
-        
+
         print("Assistant: ", end="", flush=True)
-        
+
         # 在主线程中累积 token_id 并进行解码与统计
         accumulated_tokens = []
         last_output = ""

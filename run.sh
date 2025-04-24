@@ -1,1 +1,1 @@
-cd frontend && python3 chat.py
+python3 frontend/chat.py

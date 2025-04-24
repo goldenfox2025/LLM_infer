@@ -25,6 +25,7 @@ pybind11_add_module(model_bridge SHARED
     backend/cpp/src/inference.cpp
     backend/cpp/src/thread_pool.cpp
     backend/cpp/src/qwen.cpp
+    backend/cpp/src/CudaMemoryPool.cpp
 )
 
 # --- 设置链接库 ---

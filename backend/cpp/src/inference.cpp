@@ -183,19 +183,31 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
       kv_cache_(model_->get_n_layers(), model_->get_max_seq_len(),
                 model_->get_head_dim() * model_->get_n_kv_heads(), device),
       thread_pool_(4),
-      device_(device) {  // 初始化 device_
+      device_(device),
+      d_states(nullptr) {  // 初始化 d_states 为 nullptr
 
   // std::cout
   //     << "[InferenceEngine::InferenceEngine] 初始化 InferenceEngine, device="
   //     << (device_ == Device::CUDA ? "CUDA" : "CPU") << std::endl;
   if (device_ == Device::CUDA) {
     cudaMalloc(&d_states, sizeof(curandState));
-    int seed = std::chrono::system_clock::now().time_since_epoch().count(); 
+    int seed = std::chrono::system_clock::now().time_since_epoch().count();
     cuda_OP::init_curand(d_states, seed, 0, nullptr);
     std::cout
         << "[InferenceEngine::InferenceEngine] Moving InferenceEngine to CUDA"
         << std::endl;
     this->cuda();
+  }
+}
+
+template <typename T>
+InferenceEngine<T>::~InferenceEngine() {
+  // 释放 CUDA 资源
+  if (d_states != nullptr && device_ == Device::CUDA) {
+    // 确保在释放前同步所有 CUDA 操作
+    cudaDeviceSynchronize();
+    cudaFree(d_states);
+    d_states = nullptr;
   }
 }
 
@@ -302,7 +314,7 @@ void InferenceEngine<T>::generate_with_callback(
     try {
       using duration_unit = std::chrono::microseconds;
       const char* time_unit_str = "us"; // 用于打印
-    
+
       // --- 初始化累加器 ---
       long long total_step_gpu_compute_us = 0;
       long long total_d2h_sync_us = 0;
