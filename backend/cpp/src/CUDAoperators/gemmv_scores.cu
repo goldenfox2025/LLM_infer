@@ -11,17 +11,7 @@
 
 namespace cuda_OP {
 
-//----------------------------------------------------------------------------//
-// Helper Structs and Functions                                               //
-//----------------------------------------------------------------------------//
 
-// Device function to convert bfloat16 to float (needed if not intrinsic)
-__device__ inline float bfloat16_to_float(nv_bfloat16 val) {
-  unsigned int ui;
-  ui = *reinterpret_cast<unsigned short *>(&val);
-  ui <<= 16;
-  return *reinterpret_cast<float *>(&ui);
-}
 
 // Helper to get vector type based on scalar type
 template <typename ScalarT>

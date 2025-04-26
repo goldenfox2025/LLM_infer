@@ -373,21 +373,20 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
 
     cuda_OP::matmul(hidden_states,
-                    wk,        // 参数1 (const Tensor<float>&) - OK
-                               // 参数2 (const Tensor<float>&) - OK
-                    &k_slice,  // 参数3 (Tensor<float>*) - 传递地址
-                    nullptr,   // 参数4 (cudaStream_t) - OK
-                    k_bias);   // 参数5 (const Tensor<float>*) - 直接传递指针s
+                    wk,      
+                    &k_slice,  
+                    nullptr, 
+                    k_bias);   
 
     // Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
     // cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
 
     // 假设 v_bias 是 const Tensor<float>* 类型
     cuda_OP::matmul(hidden_states,
-                    wv,        // 参数1 (const Tensor<float>&) - OK
-                    &v_slice,  // 参数3 (Tensor<float>*) - 传递地址
-                    nullptr,   // 参数4 (cudaStream_t) - OK
-                    v_bias);   // 参数5 (const Tensor<float>*) - 直接传递指针s
+                    wv,       
+                    &v_slice,  
+                    nullptr,   
+                    v_bias);  
 
     // // 同步CUDA流并销毁
     // for (int j = 0; j < 3; j++) {
@@ -481,7 +480,6 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
       // debugPrintTensor(total_K, "total_K");
 
       total_K = total_K1.view({total_seq_len, n_kv_heads_, head_dim_});
-      // debugPrintTensor(total_K, "total_K");
       total_V = total_V1.view({total_seq_len, n_kv_heads_, head_dim_});
 
     } else {
