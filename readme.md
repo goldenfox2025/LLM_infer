@@ -1,6 +1,6 @@
 # OpenCamp：大语言模型推理系统
 
-本项目基于 Python 与 C++ 重构了 OpenCamp 原基于 Rust 的版本，采用 Prefill/Decode 阶段分离策略，支持多轮对话。项目通过模块化设计实现前后端解耦，提供 Web 交互界面和高性能推理能力。整个开发及运行环境基于 WSL2 构建。
+本项目基于 Python 与 C++ 重构了 OpenCamp 原基于 Rust 的版本，采用 Prefill/Decode 阶段分离策略，支持多轮对话。项目通过模块化设计实现前后端解耦，提供 Web 交互界面和高性能推理能力。
 
 ## 一、项目概述
 
