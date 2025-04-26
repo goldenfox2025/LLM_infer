@@ -17,7 +17,7 @@ def main():
     # 准备测试用 prompt
     prompt = "讲个故事"
     messages = [
-        {"role": "system", "content": "You are a helpful AI assistant."},
+        {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": prompt},
     ]
     text = tokenizer.apply_chat_template(
