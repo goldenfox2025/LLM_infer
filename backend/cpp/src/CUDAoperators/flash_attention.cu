@@ -14,7 +14,7 @@
 #include "cudaOP.cuh"
 
 #define DQKV_VALUE 128
-#define B_C_VALUE 16
+#define B_C_VALUE 8
 
 constexpr int WARP_SIZE = 32;
 

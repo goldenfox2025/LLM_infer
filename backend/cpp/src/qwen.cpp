@@ -489,37 +489,42 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
 
     Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
 
-    Tensor<T> att_heads_1({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+    // Tensor<T> att_heads_1({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
 
-    Tensor<T> att_heads_2({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+    // Tensor<T> att_heads_2({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
 
-    Tensor<T> att_heads_3({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+    // Tensor<T> att_heads_3({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
 
-    // Tensor<T> att_heads_4({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
+    // // Tensor<T> att_heads_4({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
 
-    // Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
-    size_t seq_divide = total_seq_len / 3;
-    int ratio = n_heads_ / n_kv_heads_;
-    // for (int j = 0; j < 3; ++j) {
-    //   cudaStreamSynchronize(compute_streams_[j]);
-    // }
+    // // Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
+    // size_t seq_divide = total_seq_len / 3;
+    // int ratio = n_heads_ / n_kv_heads_;
+    // // for (int j = 0; j < 3; ++j) {
+    // //   cudaStreamSynchronize(compute_streams_[j]);
+    // // }
 
-    cuda_OP::flash_attention(
-        Q_3d, total_K.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
-        total_K.slice({seq_divide, 0, 0},
-                      {2 * seq_divide, n_kv_heads_, head_dim_}),
-        total_K.slice({2 * seq_divide, 0, 0},
-                      {total_seq_len, n_kv_heads_, head_dim_}),
-        total_V.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
-        total_V.slice({seq_divide, 0, 0},
-                      {2 * seq_divide, n_kv_heads_, head_dim_}),
-        total_V.slice({2 * seq_divide, 0, 0},
-                      {total_seq_len, n_kv_heads_, head_dim_}),
-        att_heads_1, att_heads_2, att_heads_3);
+    // cuda_OP::flash_attention(
+    //     Q_3d, total_K.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+    //     total_K.slice({seq_divide, 0, 0},
+    //                   {2 * seq_divide, n_kv_heads_, head_dim_}),
+    //     total_K.slice({2 * seq_divide, 0, 0},
+    //                   {total_seq_len, n_kv_heads_, head_dim_}),
+    //     total_V.slice({0, 0, 0}, {seq_divide, n_kv_heads_, head_dim_}),
+    //     total_V.slice({seq_divide, 0, 0},
+    //                   {2 * seq_divide, n_kv_heads_, head_dim_}),
+    //     total_V.slice({2 * seq_divide, 0, 0},
+    //                   {total_seq_len, n_kv_heads_, head_dim_}),
+    //     att_heads_1, att_heads_2, att_heads_3);
 
-    cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads,
-                       nullptr);
+    // cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads,
+    //                    nullptr);
 
+ 
+
+    // 使用新的动态分支数量的flash attention包装函数
+    cuda_OP::dynamic_flash_attention_wrapper(
+        Q_3d, total_K, total_V, att_heads, n_kv_heads_, nullptr);
     // Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
     // // // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_,
     // head_dim_,
