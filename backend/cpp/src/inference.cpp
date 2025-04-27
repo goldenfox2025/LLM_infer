@@ -304,13 +304,21 @@ void InferenceEngine<T>::generate_with_callback(
       size_t input_size = input_ids_copy.size();
 
 
-      { 
+      {
+          // 设置prefill阶段标志，启用prefill模式
+          GlobalCudaMemoryPool::set_prefill_phase(true);
+          std::cerr << "进入prefill阶段，序列长度: " << input_size << std::endl;
+
           kv_cache_.resize(kv_cache_.size() + input_size); // 调整大小移到 prefill 前
           std::vector<uint32_t> prefill_input = input_ids_copy;
           Tensor<uint32_t> input_tensor(std::move(prefill_input), {input_size}, this->device_);
           next_token_gpu_ptr = this->model_->prefill(
               &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
               temperature, top_p, this->d_states);
+
+          // 关闭prefill阶段标志
+          GlobalCudaMemoryPool::set_prefill_phase(false);
+          std::cerr << "退出prefill阶段" << std::endl;
       }
 
       // --- 处理 Prefill 的第一个 Token ---
@@ -425,6 +433,10 @@ void InferenceEngine<T>::generate_with_callback(
   if (generation_thread.joinable()) {
     generation_thread.join();
   }
+
+  // 重置prefill buffer，但不释放内存，以便下次使用
+  // 这样可以避免频繁的内存分配和释放，提高性能
+  GlobalCudaMemoryPool::reset_prefill_buffer();
 }
 template <typename T>
 void InferenceEngine<T>::reset() {

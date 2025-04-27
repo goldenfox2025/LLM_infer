@@ -13,6 +13,8 @@
 #include "inference.hpp"
 #include "llama.hpp"
 #include "qwen.hpp"
+#include "CudaMemoryPool.hpp"
+#include <iostream>
 
 namespace py = pybind11;
 class infer_base;
@@ -578,6 +580,44 @@ bool init_model(py::dict config, py::dict weights,
       throw std::runtime_error("Unsupported model type: " + model_type);
     }
     g_model->print_model_info();
+
+    // 初始化CUDA内存池，为prefill阶段预分配内存
+    try {
+      // 获取模型配置参数
+      size_t hidden_dim = cpp_config["hidden_size"];
+
+      // 获取最大序列长度，如果配置中有的话
+      size_t seq_len = 32; // 默认序列长度
+      if (cpp_config.find("max_position_embeddings") != cpp_config.end()) {
+        seq_len = std::min(seq_len, static_cast<size_t>(cpp_config["max_position_embeddings"]));
+      }
+
+      // 检查GPU内存状态
+      size_t free_memory = 0, total_memory = 0;
+      cudaError_t err = cudaMemGetInfo(&free_memory, &total_memory);
+      if (err == cudaSuccess) {
+        std::cout << "Current GPU memory: " << (free_memory / (1024 * 1024))
+                  << " MB free, " << (total_memory / (1024 * 1024))
+                  << " MB total" << std::endl;
+
+        // 只有当可用内存超过1GB时才开启prefill模式
+        if (free_memory > 1024 * 1024 * 1024) {
+          // 计算prefill内存大小，使用可用内存的10%，但不超过256MB
+          size_t prefill_size = std::min(free_memory / 10, static_cast<size_t>(256 * 1024 * 1024));
+
+          // 开启prefill模式
+          std::cout << "Enabling prefill mode with initial buffer size: "
+                    << (prefill_size / (1024 * 1024)) << " MB" << std::endl;
+          GlobalCudaMemoryPool::enable_prefill_mode(prefill_size);
+        } else {
+          std::cout << "Skipping prefill mode due to low available memory" << std::endl;
+        }
+      }
+    } catch (const std::exception& e) {
+      // 如果prefill模式初始化失败，只打印警告，不影响模型加载
+      std::cerr << "Warning: Failed to initialize prefill mode: " << e.what() << std::endl;
+    }
+
     return true;
   } catch (const std::exception& e) {
     std::cerr << "Error initializing model: " << e.what() << std::endl;

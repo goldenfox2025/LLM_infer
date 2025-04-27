@@ -373,20 +373,20 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
 
     cuda_OP::matmul(hidden_states,
-                    wk,      
-                    &k_slice,  
-                    nullptr, 
-                    k_bias);   
+                    wk,
+                    &k_slice,
+                    nullptr,
+                    k_bias);
 
     // Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
     // cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
 
     // 假设 v_bias 是 const Tensor<float>* 类型
     cuda_OP::matmul(hidden_states,
-                    wv,       
-                    &v_slice,  
-                    nullptr,   
-                    v_bias);  
+                    wv,
+                    &v_slice,
+                    nullptr,
+                    v_bias);
 
     // // 同步CUDA流并销毁
     // for (int j = 0; j < 3; j++) {
@@ -520,7 +520,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t>* input,
     // cuda_OP::gather_fa(att_heads_1, att_heads_2, att_heads_3, att_heads,
     //                    nullptr);
 
- 
+
 
     // 使用新的动态分支数量的flash attention包装函数
     cuda_OP::dynamic_flash_attention_wrapper(
@@ -658,7 +658,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
   // 重设KV缓存大小
   kv_cache->resize(offset + seq_len);
 
-  // 创建residual和hidden_states张量
+  // 创建residual和hidden_states张量，在prefill阶段自动使用prefill buffer
   Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);
   Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
 

@@ -1,194 +1,377 @@
-#pragma once // 防止头文件被多次包含
+#pragma once
 
 #include <cuda_runtime.h>
-
 #include <algorithm>
-#include <cstdlib>    // 用于 std::atexit (虽然最终没用，但保留包含可能有用)
-#include <execinfo.h> // 用于获取调用栈 (如果需要更详细的调试)
+#include <cstdlib>
 #include <iostream>
-#include <mutex>      // 用于 std::mutex 和 std::lock_guard / std::call_once
-#include <numeric>    // 需要包含 numeric 用于 std::accumulate
+#include <mutex>
+#include <numeric>
 #include <string>
-#include <system_error> // 用于 std::call_once
-#include <unordered_map> // 用于存储内存块
+#include <unordered_map>
 #include <vector>
-#include <mutex> // 用于 std::once_flag (较新写法，但可能需要 C++17 或更高，回退到 <mutex>)
 
-// 定义 CUDA 内存池类
+// 前向声明
+class CudaMemoryPool;
+/**
+ * CUDA内存池类
+ *
+ * 提供CUDA内存的高效管理，包括：
+ * 1. 内存复用：避免频繁的cudaMalloc/cudaFree调用
+ * 2. 内存缓存：保留已释放的内存块以供后续使用
+ * 3. Prefill模式：为prefill阶段预分配一块连续内存
+ */
 class CudaMemoryPool {
  public:
-  // 构造函数：尝试初始化 CUDA 上下文
-  CudaMemoryPool() {
-    // 尝试一个无操作的 CUDA 调用（如 cudaFree(0) 或 cudaGetDevice）来确保 CUDA
-    // 上下文被初始化。 这在多线程或延迟初始化环境中尤其重要。
-    cudaError_t err = cudaFree(0); // cudaFree(nullptr) 是合法的无操作调用
-    if (err != cudaSuccess) {
-      // 如果 cudaFree(0) 返回错误（除了正常情况），打印警告。
-      // 注意: 在没有设备或驱动的情况下，这里可能会失败。
-      // 在某些系统上，cudaFree(0) 可能返回 cudaErrorInvalidDevicePointer，这通常是无害的。
-       if (err != cudaErrorInvalidDevicePointer) {
-            std::cerr << "警告: CudaMemoryPool 构造函数中的 CUDA 上下文初始化检查返回: "
-                      << cudaGetErrorString(err) << std::endl;
-       }
+  /**
+   * 构造函数：初始化内存池并检查CUDA上下文
+   */
+  CudaMemoryPool() : is_shutting_down_(false), is_prefill_mode_(false),
+                     is_prefill_phase_(false), prefill_buffer_(nullptr),
+                     prefill_buffer_size_(0), prefill_buffer_used_(0),
+                     prefill_max_size_(256 * 1024 * 1024) {
+    // 初始化CUDA上下文
+    cudaError_t err = cudaFree(0);
+    // 忽略初始化错误
+    if (err != cudaSuccess && err != cudaErrorInvalidDevicePointer) {
+      // 初始化CUDA上下文失败
     }
-    // 或者使用 cudaGetDevice(&device_id); 检查是否能获取设备 ID
-    // int current_device;
-    // cudaError_t err_get_device = cudaGetDevice(¤t_device);
-    // if (err_get_device != cudaSuccess) {
-    //     std::cerr << "警告: CudaMemoryPool 无法获取当前 CUDA 设备: "
-    //               << cudaGetErrorString(err_get_device) << std::endl;
-    // }
   }
 
-  // 析构函数：释放所有缓存的内存块
-  // 注意：对于通过 GlobalCudaMemoryPool::instance() 获取的全局单例，
-  // 由于采用了特定的生命周期管理策略（不显式删除），这个析构函数在正常程序退出时不会被调用。
-  // 但是，如果用户直接创建 CudaMemoryPool 对象，则此析构函数会在对象销毁时执行。
+  /**
+   * 析构函数：释放所有缓存的内存块
+   *
+   * 注意：对于全局单例，此函数通常不会被调用，因为单例会持续到程序结束
+   */
   ~CudaMemoryPool() {
-    //std::cerr << "CudaMemoryPool 析构函数被调用（可能不是全局单例）" << std::endl;
     std::lock_guard<std::mutex> lock(mutex_);
+    is_shutting_down_ = true;
 
-    // 释放所有大小类别中的缓存（空闲）内存块
-    size_t freed_cached_bytes = 0;
-    size_t freed_cached_count = 0;
-    for (auto& [size, blocks] : free_blocks_) {
-      freed_cached_count += blocks.size();
-      freed_cached_bytes += size * blocks.size();
-      for (void* ptr : blocks) {
-        cudaError_t err = cudaFree(ptr);
+    // 检查CUDA驱动程序是否仍然可用
+    cudaError_t driver_status = cudaFree(0);
+    bool driver_available = (driver_status == cudaSuccess ||
+                            driver_status == cudaErrorInvalidDevicePointer);
+
+    if (driver_available) {
+      // 释放常规内存池中的块
+      for (auto& [size, blocks] : free_blocks_) {
+        for (void* ptr : blocks) {
+          cudaError_t err = cudaFree(ptr);
+          if (err != cudaSuccess) {
+            if (err == cudaErrorCudartUnloading) {
+              driver_available = false;
+              break;
+            }
+            // 释放缓存块失败
+          }
+        }
+        if (!driver_available) break;
+      }
+
+      // 释放prefill模式的内存块
+      if (driver_available && prefill_buffer_ != nullptr) {
+        cudaError_t err = cudaFree(prefill_buffer_);
         if (err != cudaSuccess) {
-             std::cerr << "警告: CudaMemoryPool 析构函数 cudaFree 缓存块失败 (大小: " << size << "): "
-                       << cudaGetErrorString(err) << std::endl;
+          // 释放prefill缓冲区失败
+        } else {
+          prefill_buffer_ = nullptr;
+          prefill_buffer_size_ = 0;
+          prefill_buffer_used_ = 0;
         }
       }
+    } else {
+      // CUDA驱动程序已关闭，跳过内存释放
     }
-    //std::cerr << "CudaMemoryPool 析构函数: 释放了 " << freed_cached_count << " 个缓存块 (" << freed_cached_bytes << " 字节)" << std::endl;
-    free_blocks_.clear(); // 清空空闲块记录
 
-    // 对仍然活跃的（未被 free 回池的）内存块发出警告
-    // 在正常情况下，如果所有分配的内存都已正确 free，这里应该是空的。
-    // 如果这个 CudaMemoryPool 实例被销毁时还有活跃分配，说明存在内存泄漏（未调用 free）。
+    free_blocks_.clear();
+
+    // 检查未释放的内存块
     if (!active_allocations_.empty()) {
       size_t active_bytes = 0;
-       for (auto const& [ptr, size] : active_allocations_) {
-           active_bytes += size;
-       }
-      std::cerr << "警告: CudaMemoryPool 析构函数发现 "
-                << active_allocations_.size() << " 个活跃分配 ("
-                << active_bytes << " 字节) 未被释放回池。可能存在内存泄漏！"
-                << std::endl;
-      // 在析构函数中不尝试释放活跃分配，因为它们可能仍然被程序的其他部分（错误地）引用。
-      // 让程序的终止或用户的调试来处理这些泄漏。
-      // for (auto const& [ptr, size] : active_allocations_) {
-      //   cudaFree(ptr); // 通常不建议在这里强制释放，可能隐藏真正的问题
-      // }
-      active_allocations_.clear(); // 清空活跃分配记录
+      for (auto const& [ptr, size] : active_allocations_) {
+        active_bytes += size;
+      }
+      // 发现未释放的内存块，可能存在内存泄漏
+      active_allocations_.clear();
     }
   }
 
-  // 禁止拷贝构造和拷贝赋值
+  // 禁止拷贝和移动操作
   CudaMemoryPool(const CudaMemoryPool&) = delete;
   CudaMemoryPool& operator=(const CudaMemoryPool&) = delete;
-  // 禁止移动构造和移动赋值（内存池通常不适合移动）
   CudaMemoryPool(CudaMemoryPool&&) = delete;
   CudaMemoryPool& operator=(CudaMemoryPool&&) = delete;
 
-  // 分配内存方法
-  void* allocate(size_t size) {
-    if (size == 0) {
-      // 分配 0 字节是无意义的，返回 nullptr
+  /**
+   * 分配内存
+   *
+   * @param size 请求的内存大小（字节）
+   * @param is_prefill_request 是否是prefill阶段的请求
+   * @return 分配的内存指针，失败时返回nullptr
+   */
+  void* allocate(size_t size, bool is_prefill_request = false) {
+    if (size == 0) return nullptr;
+
+    // 计算对齐后的大小（256字节对齐）
+    size_t aligned_size = (size + 255) & ~255;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 检查是否处于关闭状态
+    if (is_shutting_down_) {
+      // 内存池正在关闭，无法分配内存
       return nullptr;
     }
 
-    // 计算对齐后的大小：将请求的大小向上对齐到 256 字节的倍数。
-    // CUDA 分配通常有固有的对齐要求，256 是一个常用且相对安全的对齐值。
-    // (size + 255) & ~255 是一种高效的向上对齐到位掩码操作。
-    size_t aligned_size = (size + 255) & ~255;
+    // 自动检测prefill请求
+    if (!is_prefill_request && is_prefill_phase_) {
+      is_prefill_request = true;
+    }
 
-    std::lock_guard<std::mutex> lock(mutex_); // 加锁以保证线程安全
+    // 尝试从prefill buffer分配
+    void* ptr = try_allocate_from_prefill(size, aligned_size, is_prefill_request);
+    if (ptr) return ptr;
 
-    // 1. 尝试从缓存中查找合适大小的空闲块
-    auto it = free_blocks_.find(aligned_size);
-    if (it != free_blocks_.end() && !it->second.empty()) {
-      // 找到了匹配大小的空闲块列表，并且列表不为空
+    // 尝试从缓存中分配
+    ptr = try_allocate_from_cache(aligned_size);
+    if (ptr) return ptr;
 
-      // 从列表末尾取出一个块（pop_back 比 vector 前端操作更高效）
-      void* ptr = it->second.back();
-      it->second.pop_back();
 
-      // 将取出的块重新标记为活跃状态，记录其指针和大小
+    // 直接从CUDA分配新内存
+    return allocate_new_block(size, aligned_size);
+  }
+
+  /**
+   * 尝试从prefill buffer分配内存
+   */
+  void* try_allocate_from_prefill(size_t size, size_t aligned_size, bool is_prefill_request) {
+    // 如果不是prefill请求或prefill模式未启用，直接返回
+    if (!is_prefill_request || !is_prefill_mode_ || !prefill_buffer_) {
+      return nullptr;
+    }
+
+    // 检查是否有足够的空间
+    if (prefill_buffer_used_ + aligned_size <= prefill_buffer_size_) {
+      // 从prefill内存块中分配
+      void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
+      prefill_buffer_used_ += aligned_size;
       active_allocations_[ptr] = aligned_size;
 
-      // 返回分配的内存指针
+      // 大型内存分配完成
       return ptr;
     }
 
-    // 2. 缓存中没有合适的块，需要调用 cudaMalloc 分配新的 GPU 内存
-    void* ptr = nullptr;
-    cudaError_t err = cudaMalloc(&ptr, aligned_size);
+    // 尝试扩展prefill buffer
+    if (prefill_buffer_size_ < prefill_max_size_) {
+      // 计算新大小
+      size_t new_size = std::min(prefill_buffer_size_ * 3 / 2, prefill_max_size_);
+      new_size = std::max(new_size, prefill_buffer_used_ + aligned_size);
+      new_size = std::min(new_size, prefill_max_size_);
 
-    if (err != cudaSuccess) {
-      // cudaMalloc 分配失败
-      std::cerr << "CudaMemoryPool 错误: cudaMalloc 分配失败，请求大小 "
-                << aligned_size << " (原始请求 " << size
-                << ")。错误: " << cudaGetErrorString(err) << std::endl;
+      // 分配新buffer
+      void* new_buffer = nullptr;
+      cudaError_t err = cudaMalloc(&new_buffer, new_size);
+      if (err != cudaSuccess) {
+        // 扩展prefill内存块失败
+        return nullptr;
+      }
 
-      // 可选：尝试清理缓存并重试？ (这里未实现，直接返回失败)
-      // 例如：可以调用 trim_internal() 或 trim_threshold_internal() 释放部分或全部缓存
-      // trim_internal(); // 释放所有缓存
-      // err = cudaMalloc(&ptr, aligned_size); // 再次尝试
-      // if (err == cudaSuccess) { ... }
+      // 复制旧数据
+      if (prefill_buffer_used_ > 0) {
+        cudaError_t copy_err = cudaMemcpy(new_buffer, prefill_buffer_, prefill_buffer_used_, cudaMemcpyDeviceToDevice);
+        if (copy_err != cudaSuccess) {
+          // 复制prefill内存块数据失败
+          cudaFree(new_buffer);
+          return nullptr;
+        }
+      }
 
-      return nullptr; // 分配失败，返回 nullptr
+      // 释放旧buffer
+      cudaFree(prefill_buffer_);
+
+      // 更新prefill buffer信息
+      prefill_buffer_ = new_buffer;
+      prefill_buffer_size_ = new_size;
+
+      // 从新buffer分配
+      void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
+      prefill_buffer_used_ += aligned_size;
+      active_allocations_[ptr] = aligned_size;
+
+      // prefill内存块已扩展
+      return ptr;
     }
 
-    // 新内存分配成功
-    // 记录这次新的活跃分配
-    active_allocations_[ptr] = aligned_size;
+    return nullptr;
+  }
 
-    // 返回新分配的内存指针
+  /**
+   * 尝试从缓存中分配合适大小的块
+   */
+  void* try_allocate_from_cache(size_t aligned_size) {
+    auto it = free_blocks_.find(aligned_size);
+    if (it != free_blocks_.end() && !it->second.empty()) {
+      void* ptr = it->second.back();
+      it->second.pop_back();
+      active_allocations_[ptr] = aligned_size;
+      return ptr;
+    }
+    return nullptr;
+  }
+
+
+
+  /**
+   * 直接从CUDA分配新内存块
+   */
+  void* allocate_new_block(size_t size, size_t aligned_size) {
+    // 检查可用GPU内存
+    size_t free_memory = 0, total_memory = 0;
+    cudaError_t mem_err = cudaMemGetInfo(&free_memory, &total_memory);
+    if (mem_err == cudaSuccess && aligned_size > free_memory * 0.8) {
+      // 内存不足，尝试释放缓存
+      trim_threshold_internal(2);
+      cudaMemGetInfo(&free_memory, &total_memory);
+      if (aligned_size > free_memory * 0.8) {
+        trim_internal();
+      }
+    }
+
+    // 分配新内存
+    void* ptr = nullptr;
+    cudaError_t err = cudaMalloc(&ptr, aligned_size);
+    if (err != cudaSuccess) {
+      // cudaMalloc失败
+      return nullptr;
+    }
+
+    // 记录分配
+    active_allocations_[ptr] = aligned_size;
     return ptr;
   }
 
-  // 释放内存回内存池
+  /**
+   * 释放内存回内存池
+   *
+   * @param ptr 要释放的内存指针
+   */
   void free(void* ptr) {
-    if (!ptr) {
-      // 对空指针调用 free 是无操作
+    if (!ptr) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    // 关闭状态下直接释放
+    if (is_shutting_down_) {
+      free_during_shutdown(ptr);
       return;
     }
-
-    std::lock_guard<std::mutex> lock(mutex_); // 加锁以保证线程安全
-
-    // 1. 检查这个指针是否是由本内存池分配并管理的活跃块
+    // 检查指针是否由内存池管理
     auto it = active_allocations_.find(ptr);
     if (it == active_allocations_.end()) {
-      // 如果在活跃列表中找不到这个指针，说明它不是由本池管理，或者已经被释放了。
-      // 这通常是一个错误，或者是在程序退出时静态对象的析构顺序问题。
-      std::cerr << "警告: 尝试释放一个不由 CudaMemoryPool 管理的指针 (" << ptr
-                << ") 或已被释放的指针。" << std::endl;
+      // 尝试释放未管理的指针
+      return;
+    }
+    size_t aligned_size = it->second;
+    // 检查是否是prefill buffer中的内存
+    if (is_from_prefill_buffer(ptr)) {
+      free_from_prefill_buffer(ptr, aligned_size);
+      active_allocations_.erase(it);
+      return;
+    }
+    // 处理常规内存块
+    if (should_cache_block(aligned_size)) {
+      // 缓存内存块
+      free_blocks_[aligned_size].push_back(ptr);
+    } else {
+      // 直接释放内存
+      cudaError_t err = cudaFree(ptr);
+      if (err != cudaSuccess) {
+        handle_cuda_error(err, aligned_size);
+      }
+    }
+    // 从活跃分配中移除
+    active_allocations_.erase(it);
+    // 定期清理过多的缓存
+    perform_periodic_cleanup();
+  }
 
-      // 获取调用栈信息，帮助调试 (需要链接 -rdynamic 选项)
-      // void* array[10];
-      // size_t stack_size = backtrace(array, 10);
-      // char** strings = backtrace_symbols(array, stack_size);
-      // std::cerr << "调用栈:\n";
-      // for (size_t i = 0; i < stack_size; i++) {
-      //     std::cerr << strings[i] << std::endl;
-      // }
-      // ::free(strings); // 使用 C 库的 free 释放 backtrace_symbols 返回的内存
+  /**
+   * 关闭状态下释放内存
+   */
+  void free_during_shutdown(void* ptr) {
+    auto it = active_allocations_.find(ptr);
+    if (it != active_allocations_.end()) {
+      active_allocations_.erase(it);
 
-      return; // 不做任何操作
+      // 检查CUDA驱动程序是否可用
+      cudaError_t driver_status = cudaFree(0);
+      if (driver_status == cudaSuccess || driver_status == cudaErrorInvalidDevicePointer) {
+        cudaFree(ptr); // 忽略错误
+      }
+    }
+  }
+
+  /**
+   * 检查指针是否来自prefill buffer
+   */
+  bool is_from_prefill_buffer(void* ptr) {
+    if (!is_prefill_mode_ || !prefill_buffer_) return false;
+
+    char* prefill_start = static_cast<char*>(prefill_buffer_);
+    char* prefill_end = prefill_start + prefill_buffer_size_;
+    char* ptr_char = static_cast<char*>(ptr);
+
+    return (ptr_char >= prefill_start && ptr_char < prefill_end);
+  }
+
+  /**
+   * 释放prefill buffer中的内存
+   */
+  void free_from_prefill_buffer(void* ptr, size_t aligned_size) {
+    // 不减少prefill_buffer_used_，因为prefill buffer是顺序分配的
+    // 只有在reset_prefill_buffer()时才会重置prefill_buffer_used_
+    // 释放prefill buffer中的内存块，但不减少已使用计数
+  }
+
+  /**
+   * 判断是否应该缓存内存块
+   */
+  bool should_cache_block(size_t aligned_size) {
+    // 根据块大小确定最大缓存数量
+    size_t max_blocks = 8; // 默认为小块限制
+    if (aligned_size >= 1024 * 1024) { // 大于1MB
+      max_blocks = 2;
+    } else if (aligned_size >= 65536) { // 大于64KB
+      max_blocks = 4;
     }
 
-    // 2. 获取该内存块记录的对齐后的大小
-    size_t aligned_size = it->second;
+    // 检查该大小类别的当前缓存数量
+    return free_blocks_[aligned_size].size() < max_blocks;
+  }
 
-    // 3. 将内存块放回对应大小的空闲块列表（缓存起来）
-    // 使用 emplace_back 可能比 push_back 略优（如果 void* 需要构造的话，虽然这里不需要）
-    free_blocks_[aligned_size].push_back(ptr);
+  /**
+   * 处理CUDA错误
+   */
+  void handle_cuda_error(cudaError_t err, size_t aligned_size) {
+    if (err == cudaErrorCudartUnloading) {
+      is_shutting_down_ = true;
+      // CUDA驱动程序正在关闭
+    } else {
+      // cudaFree失败
+    }
+  }
 
-    // 4. 从活跃分配映射中移除该指针，因为它现在是空闲状态
-    active_allocations_.erase(it);
+  /**
+   * 执行定期清理
+   */
+  void perform_periodic_cleanup() {
+    // 计算缓存的总块数
+    size_t total_cached_blocks = 0;
+    for (const auto& [size, blocks] : free_blocks_) {
+      total_cached_blocks += blocks.size();
+    }
+
+    // 如果缓存的块总数超过阈值，执行部分清理
+    if (total_cached_blocks > 100) {
+      trim_threshold_internal(4); // 每个类别最多保留4个块
+    }
   }
 
   // 手动释放缓存：释放指定大小类别或所有大小类别的所有空闲块
@@ -204,145 +387,433 @@ class CudaMemoryPool {
     trim_threshold_internal(max_blocks_per_size); // 调用内部实现
   }
 
-  // 获取内存池的统计信息结构体
+  /**
+   * Prefill模式相关方法
+   */
+
+  /**
+   * 开启prefill模式，预分配一块内存用于prefill阶段
+   *
+   * @param initial_size 初始预分配的内存大小，默认为48MB
+   * @param max_size prefill内存的最大大小，默认为128MB
+   * @return 是否成功开启prefill模式
+   */
+  bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 128 * 1024 * 1024) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 如果已经处于prefill模式，检查是否需要重新分配
+    if (is_prefill_mode_) {
+      if (prefill_buffer_ != nullptr && prefill_buffer_size_ >= initial_size) {
+        // 已有buffer且大小合适，只需重置使用计数
+        prefill_buffer_used_ = 0;
+        prefill_max_size_ = max_size;
+        // 已处于prefill模式，重置buffer
+        return true;
+      } else {
+        // buffer不存在或大小不足，释放并重新分配
+        // buffer不足，需要重新分配
+        disable_prefill_mode();
+      }
+    }
+
+    // 检查是否处于关闭状态
+    if (is_shutting_down_) {
+      // 内存池正在关闭，无法开启prefill模式
+      return false;
+    }
+
+    // 检查可用GPU内存并调整大小
+    initial_size = adjust_prefill_size(initial_size);
+
+    // 分配prefill内存块
+    cudaError_t err = cudaMalloc(&prefill_buffer_, initial_size);
+    if (err != cudaSuccess) {
+      std::cerr << "错误: 无法分配prefill内存块: "
+                << (initial_size / (1024 * 1024)) << " MB，错误: "
+                << cudaGetErrorString(err) << std::endl;
+      prefill_buffer_ = nullptr;
+      return false;
+    }
+
+    // 设置prefill模式参数
+    prefill_buffer_size_ = initial_size;
+    prefill_buffer_used_ = 0;
+    prefill_max_size_ = max_size;
+    is_prefill_mode_ = true;
+
+    std::cerr << "已开启prefill模式: "
+              << (prefill_buffer_size_ / (1024 * 1024)) << " MB，最大: "
+              << (prefill_max_size_ / (1024 * 1024)) << " MB" << std::endl;
+
+    return true;
+  }
+
+  /**
+   * 调整prefill内存大小，确保不超过可用内存
+   */
+  size_t adjust_prefill_size(size_t requested_size) {
+    size_t free_memory = 0, total_memory = 0;
+    cudaError_t mem_err = cudaMemGetInfo(&free_memory, &total_memory);
+    if (mem_err == cudaSuccess) {
+      if (requested_size > free_memory * 0.8) {
+        size_t adjusted_size = free_memory * 0.7;
+        std::cerr << "警告: prefill内存大小过大，已调整为: "
+                  << (adjusted_size / (1024 * 1024)) << " MB" << std::endl;
+        return adjusted_size;
+      }
+    }
+    return requested_size;
+  }
+
+  /**
+   * 关闭prefill模式，释放预分配的内存
+   */
+  void disable_prefill_mode() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!is_prefill_mode_) return;
+
+    // 释放prefill内存块
+    if (prefill_buffer_ != nullptr) {
+      // 检查CUDA驱动程序是否可用
+      cudaError_t driver_status = cudaFree(0);
+      if (driver_status == cudaSuccess || driver_status == cudaErrorInvalidDevicePointer) {
+        cudaError_t err = cudaFree(prefill_buffer_);
+        if (err != cudaSuccess) {
+          std::cerr << "警告: 释放prefill内存块失败: " << cudaGetErrorString(err) << std::endl;
+          if (err == cudaErrorCudartUnloading) {
+            is_shutting_down_ = true;
+          }
+        }
+      } else {
+        is_shutting_down_ = true;
+      }
+
+      prefill_buffer_ = nullptr;
+    }
+
+    // 重置prefill模式参数
+    prefill_buffer_size_ = 0;
+    prefill_buffer_used_ = 0;
+    is_prefill_mode_ = false;
+
+    std::cerr << "已关闭prefill模式" << std::endl;
+  }
+
+  /**
+   * 重置prefill buffer，但不释放内存
+   * 这允许在多轮prefill操作之间重用已分配的内存
+   */
+  void reset_prefill_buffer() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!is_prefill_mode_ || prefill_buffer_ == nullptr) return;
+
+    // 检查活跃分配中的prefill内存块
+    auto [count, bytes] = count_active_prefill_allocations();
+
+    // std::cerr << "重置prefill buffer前，使用情况: "
+    //           << (prefill_buffer_used_ / (1024 * 1024)) << " MB 已使用, "
+    //           << count << " 个活跃分配 ("
+    //           << (bytes / (1024 * 1024)) << " MB)" << std::endl;
+
+    prefill_buffer_used_ = 0;
+
+    // std::cerr << "已重置prefill buffer，大小: "
+    //           << (prefill_buffer_size_ / (1024 * 1024)) << " MB" << std::endl;
+  }
+
+  /**
+   * 统计活跃的prefill内存分配
+   *
+   * @return pair<count, bytes> 活跃分配的数量和总字节数
+   */
+  std::pair<size_t, size_t> count_active_prefill_allocations() const {
+    size_t count = 0;
+    size_t bytes = 0;
+
+    if (!prefill_buffer_) return {count, bytes};
+
+    char* buffer_start = static_cast<char*>(prefill_buffer_);
+    char* buffer_end = buffer_start + prefill_buffer_size_;
+
+    for (const auto& [ptr, size] : active_allocations_) {
+      char* ptr_char = static_cast<char*>(ptr);
+      if (ptr_char >= buffer_start && ptr_char < buffer_end) {
+        count++;
+        bytes += size;
+      }
+    }
+
+    return {count, bytes};
+  }
+
+
+  /**
+   * 设置prefill阶段标志，用于自动检测是否应该使用prefill buffer
+   *
+   * @param is_prefill 是否处于prefill阶段
+   */
+  void set_prefill_phase(bool is_prefill) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    is_prefill_phase_ = is_prefill;
+
+    // 进入prefill阶段时，如果需要则启用prefill模式
+    if (is_prefill && !is_prefill_mode_ && !is_shutting_down_) {
+      enable_prefill_mode();
+    }
+
+    // 退出prefill阶段时，记录使用情况并重置buffer
+    if (!is_prefill && is_prefill_mode_) {
+      auto [count, bytes] = count_active_prefill_allocations();
+
+      // std::cerr << "Prefill阶段结束，buffer使用情况: "
+      //           << (prefill_buffer_used_ / (1024 * 1024)) << " MB / "
+      //           << (prefill_buffer_size_ / (1024 * 1024)) << " MB" << std::endl;
+
+      // std::cerr << "Prefill buffer中有 " << count
+      //           << " 个活跃分配 (" << (bytes / (1024 * 1024))
+      //           << " MB)，这些内存不会被立即释放" << std::endl;
+
+      // 重置buffer，准备下一次使用
+      prefill_buffer_used_ = 0;
+    }
+  }
+
+
+  /**
+   * 设置关闭标志，防止在程序退出过程中进行CUDA操作
+   */
+  void prepare_for_shutdown() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    is_shutting_down_ = true;
+
+    // 清空所有缓存的内存块，但不调用cudaFree
+    free_blocks_.clear();
+
+    // 不清空active_allocations_，因为这些内存块可能仍在使用
+    // 操作系统会在程序退出时回收所有内存
+
+    std::cerr << "内存池已准备好安全关闭" << std::endl;
+  }
+  /**
+   * 检查是否处于关闭状态
+   */
+  bool is_shutting_down() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return is_shutting_down_;
+  }
+  /**
+   * 获取内存池的统计信息结构体
+   */
   struct PoolStats {
     size_t total_cached_blocks = 0; // 空闲列表中总块数
     size_t total_cached_bytes = 0;  // 空闲列表中总字节数 (GPU内存)
     size_t active_allocations = 0;  // 当前活跃（未释放回池）的块数
     size_t active_bytes = 0;        // 当前活跃的总字节数 (GPU内存)
     size_t size_categories = 0;     // 空闲列表中有多少种不同的大小类别
+    size_t prefill_buffer_size = 0; // prefill内存块的总大小
+    size_t prefill_buffer_used = 0; // 已使用的prefill内存大小
   };
-
-  // 获取当前的统计信息
+  /**
+   * 获取当前的统计信息
+   */
   PoolStats getStats() const {
-    std::lock_guard<std::mutex> lock(mutex_); // 加锁（因为要访问共享数据）
+    std::lock_guard<std::mutex> lock(mutex_);
 
     PoolStats stats;
-    stats.size_categories = free_blocks_.size();       // 获取空闲类别数量
-    stats.active_allocations = active_allocations_.size(); // 获取活跃块数量
+    stats.size_categories = free_blocks_.size();
+    stats.active_allocations = active_allocations_.size();
 
-    // 遍历所有空闲块类别，累加缓存的块数和字节数
+    // 计算缓存的内存块
     for (const auto& [size, blocks] : free_blocks_) {
       stats.total_cached_blocks += blocks.size();
       stats.total_cached_bytes += size * blocks.size();
     }
 
-    // 使用 std::accumulate 计算所有活跃分配的总字节数
+    // 计算活跃分配的内存
     stats.active_bytes = std::accumulate(
-        active_allocations_.begin(), active_allocations_.end(), 0ULL, // 使用 0ULL 确保是 size_t/unsigned long long 类型
-        [](size_t sum, const auto& pair) { return sum + pair.second; }); // pair.second 是记录的大小
+        active_allocations_.begin(), active_allocations_.end(), 0ULL,
+        [](size_t sum, const auto& pair) { return sum + pair.second; });
+
+    // 添加prefill模式的统计信息
+    stats.prefill_buffer_size = prefill_buffer_size_;
+    stats.prefill_buffer_used = prefill_buffer_used_;
 
     return stats;
   }
 
  private:
-  // 内部实现的 trim 函数，在已持有锁的情况下调用
+  /**
+   * 内部实现方法
+   */
+
+  /**
+   * 释放所有或指定大小的缓存块
+   *
+   * @param size 要释放的块大小，0表示释放所有
+   */
   void trim_internal(size_t size = 0) {
     if (size == 0) {
-      // size 为 0，表示释放所有缓存块
+      // 释放所有缓存块
       for (auto& [block_size, blocks] : free_blocks_) {
         for (void* ptr : blocks) {
-          cudaError_t err = cudaFree(ptr); // 释放 GPU 内存
-           if (err != cudaSuccess) {
-             std::cerr << "警告: CudaMemoryPool trim_internal cudaFree 失败 (大小: " << block_size << "): "
-                       << cudaGetErrorString(err) << std::endl;
-           }
+          cudaError_t err = cudaFree(ptr);
+          if (err != cudaSuccess) {
+            // 释放缓存块失败
+          }
         }
-        // blocks.clear(); // 清空 vector (不需要，因为下面会 clear 整个 map)
       }
-      free_blocks_.clear(); // 清空整个空闲块映射
+      free_blocks_.clear();
     } else {
-      // size 不为 0，表示只释放指定大小类别的缓存块
-      size_t aligned_size = (size + 255) & ~255; // 计算对齐后的大小
+      // 只释放指定大小的缓存块
+      size_t aligned_size = (size + 255) & ~255;
       auto it = free_blocks_.find(aligned_size);
       if (it != free_blocks_.end()) {
-        // 找到了该大小的类别
         for (void* ptr : it->second) {
-          cudaError_t err = cudaFree(ptr); // 释放该类别下的所有 GPU 内存块
-           if (err != cudaSuccess) {
-             std::cerr << "警告: CudaMemoryPool trim_internal cudaFree 失败 (大小: " << aligned_size << "): "
-                       << cudaGetErrorString(err) << std::endl;
-           }
+          cudaError_t err = cudaFree(ptr);
+          if (err != cudaSuccess) {
+            // 释放缓存块失败
+          }
         }
-        free_blocks_.erase(it); // 从 map 中移除该大小类别
+        free_blocks_.erase(it);
       }
     }
   }
 
-  // 内部实现的 trim_threshold 函数，在已持有锁的情况下调用
+  /**
+   * 限制每种大小的缓存块数量
+   *
+   * @param max_blocks_per_size 每种大小最多保留的块数
+   */
   void trim_threshold_internal(size_t max_blocks_per_size) {
-    // 使用迭代器遍历 map，因为我们可能需要删除元素
-    for (auto it = free_blocks_.begin(); it != free_blocks_.end(); /* no increment here */) {
+    for (auto it = free_blocks_.begin(); it != free_blocks_.end();) {
       size_t size = it->first;
       std::vector<void*>& blocks = it->second;
 
+      // 如果块数量超过阈值，释放多余的块
       if (blocks.size() > max_blocks_per_size) {
-        // 当前类别的缓存块数量超过阈值
-        size_t blocks_to_release = blocks.size() - max_blocks_per_size; // 计算需要释放的数量
+        size_t blocks_to_release = blocks.size() - max_blocks_per_size;
 
-        // 从 vector 的末尾开始释放多余的块
         for (size_t i = 0; i < blocks_to_release; ++i) {
-          // 检查 vector 是否为空（理论上不会，但防御性编程）
           if (blocks.empty()) break;
 
-          void* ptr_to_free = blocks.back(); // 获取最后一个块的指针
-          cudaError_t err = cudaFree(ptr_to_free); // 释放 GPU 内存
+          void* ptr = blocks.back();
+          cudaError_t err = cudaFree(ptr);
           if (err != cudaSuccess) {
-            std::cerr << "警告: CudaMemoryPool trim_threshold cudaFree 失败 (大小: "
-                      << size << "): " << cudaGetErrorString(err) << std::endl;
-            // 即使释放失败，我们仍然从记录中移除它，避免无限循环或状态不一致
+            // 释放缓存块失败
           }
-          blocks.pop_back(); // 从 vector 中移除记录
+          blocks.pop_back();
         }
       }
 
-      // 检查修剪后该类别是否变为空
+      // 如果该大小类别变为空，从map中移除
       if (blocks.empty()) {
-        // 如果 vector 空了，从 map 中移除这个大小类别，使用迭代器进行安全删除
-        it = free_blocks_.erase(it); // erase 返回下一个有效迭代器
+        it = free_blocks_.erase(it);
       } else {
-        // 如果未删除，则手动递增迭代器
         ++it;
       }
     }
   }
 
-  // 核心数据结构：
-  // 存储空闲内存块的 map。键是 对齐后的内存块大小(size_t)，值是 存储该大小空闲块指针的 vector。
-  std::unordered_map<size_t, std::vector<void*>> free_blocks_;
+  /**
+   * 成员变量
+   */
 
-  // 存储当前活跃（已分配但未释放回池）内存块的 map。
-  // 键是 内存块指针(void*)，值是 该内存块对应的对齐后的大小(size_t)。
-  // 用于在 free 时查找块的大小并验证指针的有效性。
-  std::unordered_map<void*, size_t> active_allocations_;
+  std::unordered_map<size_t, std::vector<void*>> free_blocks_;     // 空闲内存块映射
+  std::unordered_map<void*, size_t> active_allocations_;           // 活跃内存块映射
 
-  // 互斥锁，用于保护对 free_blocks_ 和 active_allocations_ 的并发访问，确保线程安全。
-  // mutable 关键字允许在 const 成员函数 (如 getStats) 中锁定互斥锁。
-  mutable std::mutex mutex_;
+  // Prefill模式相关
+  bool is_prefill_mode_ = false;                                   // 是否处于prefill模式
+  void* prefill_buffer_ = nullptr;                                 // prefill内存块指针
+  size_t prefill_buffer_size_ = 0;                                 // prefill内存块大小
+  size_t prefill_buffer_used_ = 0;                                 // prefill内存已使用大小
+  size_t prefill_max_size_ = 256 * 1024 * 1024;                    // prefill内存最大大小(128MB)
+  bool is_prefill_phase_ = false;                                  // 是否处于prefill阶段
 
-  // C++11 的线程安全初始化标志，配合 std::call_once 使用。
-  // 注意：这里在 CudaMemoryPool 类内部声明只是为了完整性，实际的单例标志在 GlobalCudaMemoryPool 中。
-  // static std::once_flag init_flag_; // 不需要放在这里
+  // 状态标志
+  bool is_shutting_down_ = false;                                  // 是否处于关闭状态
+
+  // 线程安全
+  mutable std::mutex mutex_;                                       // 互斥锁
 };
 
 
-// 提供一个全局单例访问点 (线程安全，最长生命周期)
+/**
+ * 全局CUDA内存池单例
+ *
+ * 提供线程安全的全局访问点，确保内存池在整个程序生命周期内可用
+ */
 class GlobalCudaMemoryPool {
  public:
-  // 获取全局唯一的 CudaMemoryPool 实例引用
+  /**
+   * 获取全局唯一的CudaMemoryPool实例引用
+   */
   static CudaMemoryPool& instance();
 
+  /**
+   * Prefill模式相关方法
+   */
+
+  /**
+   * 开启prefill模式，预分配一块内存用于prefill阶段
+   *
+   * @param initial_size 初始预分配的内存大小，默认为48MB
+   * @param max_size prefill内存的最大大小，默认为128MB
+   * @return 是否成功开启prefill模式
+   */
+  static bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 128 * 1024 * 1024) {
+    return instance().enable_prefill_mode(initial_size, max_size);
+  }
+
+  /**
+   * 关闭prefill模式，释放预分配的内存
+   */
+  static void disable_prefill_mode() {
+    instance().disable_prefill_mode();
+  }
+
+  /**
+   * 重置prefill buffer，但不释放内存
+   */
+  static void reset_prefill_buffer() {
+    instance().reset_prefill_buffer();
+  }
+  /**
+   * 设置prefill阶段标志，用于自动检测是否应该使用prefill buffer
+   */
+  static void set_prefill_phase(bool is_prefill) {
+    instance().set_prefill_phase(is_prefill);
+  }
+  /**
+   * 设置关闭标志，防止在程序退出过程中进行CUDA操作
+   */
+  static void prepare_for_shutdown() {
+    if (pool_instance_ptr != nullptr) {
+      pool_instance_ptr->prepare_for_shutdown();
+    }
+  }
+
+  /**
+   * 检查是否处于关闭状态
+   */
+  static bool is_shutting_down() {
+    if (pool_instance_ptr != nullptr) {
+      return pool_instance_ptr->is_shutting_down();
+    }
+    return false;
+  }
+
  private:
-  // 私有构造/析构/拷贝/赋值，防止外部创建 GlobalCudaMemoryPool 的实例
+  // 禁止外部创建和复制
   GlobalCudaMemoryPool() = default;
-  ~GlobalCudaMemoryPool() = default; // 析构函数是默认的，但不会被调用
+  ~GlobalCudaMemoryPool() = default;
   GlobalCudaMemoryPool(const GlobalCudaMemoryPool&) = delete;
   GlobalCudaMemoryPool& operator=(const GlobalCudaMemoryPool&) = delete;
   GlobalCudaMemoryPool(GlobalCudaMemoryPool&&) = delete;
   GlobalCudaMemoryPool& operator=(GlobalCudaMemoryPool&&) = delete;
 
-  // 指向全局单例 CudaMemoryPool 实例的指针
+  // 全局单例实例
   static CudaMemoryPool* pool_instance_ptr;
-  // 用于保证线程安全初始化的标志
   static std::once_flag init_flag_;
 };

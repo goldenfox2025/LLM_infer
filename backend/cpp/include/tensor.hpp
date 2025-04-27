@@ -69,7 +69,8 @@ class Tensor {
   }
 
   // 从 initializer_list 构造，分配新的数据，并指定设备
-  Tensor(std::initializer_list<size_t> shape, Device device = Device::CPU)
+  // is_prefill: 是否是prefill阶段的内存分配
+  Tensor(std::initializer_list<size_t> shape, Device device = Device::CPU, bool is_prefill = false)
       : shape_(shape),
         offset_(0),
         length_(1),
@@ -86,7 +87,7 @@ class Tensor {
       data_.reset();
       // 通过内存池申请 GPU 内存
       T* gpu_ptr = static_cast<T*>(
-          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
+          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T), is_prefill));
       gpu_data_ = std::shared_ptr<T>(
           gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
@@ -171,7 +172,8 @@ class Tensor {
   }
 
   // 从 shape 和 device 构造
-  Tensor(const std::vector<size_t>& shape, Device device)
+  // is_prefill: 是否是prefill阶段的内存分配
+  Tensor(const std::vector<size_t>& shape, Device device, bool is_prefill = false)
       : shape_(shape),
         offset_(0),
         length_(1),
@@ -187,7 +189,7 @@ class Tensor {
     } else if (device_ == Device::CUDA) {
       data_.reset();
       T* gpu_ptr = static_cast<T*>(
-          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
+          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T), is_prefill));
       gpu_data_ = std::shared_ptr<T>(
           gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
@@ -472,10 +474,11 @@ class Tensor {
   }
 
   // 转换到 CUDA：将数据从 CPU 拷贝到 GPU，通过内存池申请 GPU 内存
-  Tensor<T>& cuda() {
+  // is_prefill: 是否是prefill阶段的内存分配
+  Tensor<T>& cuda(bool is_prefill = false) {
     if (device_ == Device::CUDA) return *this;
     T* gpu_ptr = static_cast<T*>(
-        GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T)));
+        GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T), is_prefill));
     checkCudaError(cudaMemcpy(gpu_ptr, data_ptr(), length_ * sizeof(T),
                               cudaMemcpyHostToDevice));
     data_.reset();

@@ -17,6 +17,21 @@ CudaMemoryPool& GlobalCudaMemoryPool::instance() {
             // 在程序退出时执行清理
             std::cerr << "Executing final CUDA memory cleanup..." << std::endl;
 
+            // 检查CUDA驱动程序是否仍然可用
+            cudaError_t driver_status = cudaFree(0);
+            bool driver_available = (driver_status == cudaSuccess ||
+                                    driver_status == cudaErrorInvalidDevicePointer);
+
+            if (!driver_available) {
+                std::cerr << "CUDA driver is shutting down or unavailable, skipping detailed cleanup" << std::endl;
+                // 首先将内存池设置为关闭状态，防止新的分配和释放操作
+                GlobalCudaMemoryPool::prepare_for_shutdown();
+                return;
+            }
+
+            // 首先将内存池设置为关闭状态，防止新的分配和释放操作
+            GlobalCudaMemoryPool::prepare_for_shutdown();
+
             // 获取当前活跃分配的数量
             auto stats = pool_instance_ptr->getStats();
             if (stats.active_allocations > 0) {
@@ -24,15 +39,19 @@ CudaMemoryPool& GlobalCudaMemoryPool::instance() {
                         << " active CUDA memory allocations ("
                         << stats.active_bytes << " bytes) at program exit."
                         << std::endl;
-            }
 
-            // 释放所有缓存的内存块
-            pool_instance_ptr->trim();
+                // 打印prefill模式的统计信息
+                if (stats.prefill_buffer_size > 0) {
+                    std::cerr << "Prefill buffer: " << (stats.prefill_buffer_size / (1024 * 1024))
+                            << " MB total, " << (stats.prefill_buffer_used / (1024 * 1024))
+                            << " MB used" << std::endl;
+                }
+            }
 
             // 注意：我们不释放活跃分配，因为它们可能仍然被使用
             // 操作系统会在程序退出时回收所有内存
 
-            // 重要：我们故意不删除 pool_instance_ptr
+            // 我们故意不删除 pool_instance_ptr
             // 这确保了内存池实例的生命周期持续到程序进程结束，
             // 从而允许其他静态/全局对象在其析构函数中安全地调用 free()
             // delete pool_instance_ptr; // <<-- 不要这样做！
