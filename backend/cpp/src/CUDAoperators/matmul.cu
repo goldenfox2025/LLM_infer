@@ -537,7 +537,7 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
     int ldc = N;  // C 每行有 N 个元素
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    {  // 引入作用域方便 lock_guard 管理
+    {  // 引入作用域方便 lock_guard 管理 虽然实际上并不十分需要（本项目暂不支持多线程操作）
       std::lock_guard<std::mutex> lock(handle_mutex);
       // 将 cuBLAS 操作与传入的 stream 关联
       CHECK_CUBLAS(
@@ -549,9 +549,9 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C,
       //    m = N, n = M, k = K
       // 同时对 A 和 B 使用转置操作：
       cublas_matmul_wrapper<T>(handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                               int(N),  // m = N
-                               int(M),  // n = M
-                               int(K),  // k = K
+                               int(N), 
+                               int(M), 
+                               int(K), 
                                &alpha,
                                B.data_ptr(),  // 原始 B
                                ldb,           // ldb = K
