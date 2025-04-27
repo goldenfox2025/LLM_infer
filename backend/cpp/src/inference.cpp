@@ -4,6 +4,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <chrono>
+#include <iomanip>
 
 #include "base_model.hpp"
 #include "common.hpp"
@@ -172,6 +174,10 @@ template class KVCache<__nv_bfloat16>;
 // ------------------------
 // InferenceEngine 实现
 // ------------------------
+
+// 初始化静态变量
+template <typename T>
+bool InferenceEngine<T>::has_warmed_up_ = false;
 template <typename T>
 InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
                                     Device device)
@@ -295,6 +301,55 @@ void InferenceEngine<T>::generate_with_callback(
     const std::vector<uint32_t>& input_ids, size_t max_length,
     float temperature, float top_p, size_t top_k,
     std::function<void(uint32_t)> callback) {
+  // 如果是第一次调用，执行预热
+  if (!has_warmed_up_ && device_ == Device::CUDA) {
+    std::cout << "执行CUDA预热..." << std::endl << std::flush;
+
+    // 创建一个小的输入序列用于预热
+    std::vector<uint32_t> warmup_input(4, 1); // 使用4个token进行预热
+
+    // 保存当前KV缓存状态
+    size_t original_kv_size = kv_cache_.size();
+
+    // 执行预热操作
+    try {
+      // 设置prefill阶段标志
+      GlobalCudaMemoryPool::set_prefill_phase(true);
+
+      // 调整KV缓存大小
+      kv_cache_.resize(kv_cache_.size() + warmup_input.size());
+
+      // 创建输入张量 - 使用拷贝构造而不是移动构造
+      std::vector<uint32_t> warmup_input_copy = warmup_input;
+      Tensor<uint32_t> input_tensor(std::move(warmup_input_copy), {warmup_input.size()}, device_);
+
+      // 执行prefill操作
+      uint32_t* warmup_token = model_->prefill(
+          &input_tensor, thread_pool_, &kv_cache_, top_k,
+          temperature, top_p, d_states);
+
+      // 确保所有CUDA操作完成
+      checkCudaErrors(cudaDeviceSynchronize());
+
+      // 关闭prefill阶段标志
+      GlobalCudaMemoryPool::set_prefill_phase(false);
+
+      // 重置KV缓存
+      kv_cache_.clear();
+
+      // 重置prefill buffer
+      GlobalCudaMemoryPool::reset_prefill_buffer();
+
+      // 标记已完成预热
+      has_warmed_up_ = true;
+
+      std::cout << "CUDA预热完成" << std::endl << std::flush;
+    } catch (const std::exception& e) {
+      std::cerr << "预热过程中发生错误: " << e.what() << std::endl;
+      // 即使预热失败，也继续执行正常的推理
+    }
+  }
+
   ThreadSafeQueue<GenerationResult> result_queue;
   bind_this_thread_to_core(3);
   std::thread generation_thread([&, this, input_ids_copy = input_ids]() {
@@ -303,11 +358,16 @@ void InferenceEngine<T>::generate_with_callback(
       uint32_t next_token_host = -1; // CPU 上的 next_token 副本
       size_t input_size = input_ids_copy.size();
 
+      // 声明计时变量，确保在整个函数范围内可见
+      auto total_prefill_start = std::chrono::high_resolution_clock::now();
 
       {
           // 设置prefill阶段标志，启用prefill模式
           GlobalCudaMemoryPool::set_prefill_phase(true);
           std::cerr << "进入prefill阶段，序列长度: " << input_size << std::endl;
+
+          // 开始计时 - 仅计算部分
+          auto prefill_start = std::chrono::high_resolution_clock::now();
 
           kv_cache_.resize(kv_cache_.size() + input_size); // 调整大小移到 prefill 前
           std::vector<uint32_t> prefill_input = input_ids_copy;
@@ -316,18 +376,45 @@ void InferenceEngine<T>::generate_with_callback(
               &input_tensor, this->thread_pool_, &this->kv_cache_, top_k,
               temperature, top_p, this->d_states);
 
+          // 确保所有CUDA操作完成后再停止计时
+          checkCudaErrors(cudaDeviceSynchronize());
+
+          // 结束计时
+          auto prefill_end = std::chrono::high_resolution_clock::now();
+          std::chrono::duration<double, std::milli> prefill_duration = prefill_end - prefill_start;
+
           // 关闭prefill阶段标志
           GlobalCudaMemoryPool::set_prefill_phase(false);
+
+          // 输出计时结果，确保立即刷新输出缓冲区
+          std::cout << "Prefill阶段完成，耗时: " << std::fixed << std::setprecision(2)
+                    << prefill_duration.count() << " 毫秒" << std::endl << std::flush;
+
           std::cerr << "退出prefill阶段" << std::endl;
       }
 
       // --- 处理 Prefill 的第一个 Token ---
-      checkCudaErrors(cudaDeviceSynchronize()); // 确保 prefill 的 GPU 操作完成
+      // 开始计时 - 第一个token处理
+      auto token_start = std::chrono::high_resolution_clock::now();
 
       // 从 GPU 获取 prefill 产生的第一个 token
       checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
                                        cudaMemcpyDeviceToHost, cudaStreamDefault));
       checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
+
+      // 结束计时 - 第一个token处理
+      auto token_end = std::chrono::high_resolution_clock::now();
+      std::chrono::duration<double, std::milli> token_duration = token_end - token_start;
+
+      // 输出第一个token处理时间
+      std::cout << "第一个Token处理耗时: " << std::fixed << std::setprecision(2)
+                << token_duration.count() << " 毫秒" << std::endl << std::flush;
+
+      // 计算并输出总prefill时间（包括计算和第一个token处理）
+      auto total_prefill_end = std::chrono::high_resolution_clock::now();
+      std::chrono::duration<double, std::milli> total_prefill_duration = total_prefill_end - total_prefill_start;
+      std::cout << "总Prefill过程耗时: " << std::fixed << std::setprecision(2)
+                << total_prefill_duration.count() << " 毫秒" << std::endl << std::flush;
 
       if (next_token_host == this->model_->get_eos_token_id()) {
         result_queue.push(Signal::EndOfStream);

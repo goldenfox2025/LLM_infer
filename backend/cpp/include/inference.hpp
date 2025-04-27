@@ -117,6 +117,9 @@ class infer_base {
 template <typename T>
 class InferenceEngine : public infer_base {
  public:
+  // 静态变量，用于跟踪是否已经执行过预热
+  static bool has_warmed_up_;
+
   // 构造时传入共享的 BaseModel 实例
   // device: 指定 InferenceEngine 运行的设备 (CPU or CUDA)
   InferenceEngine(std::shared_ptr<BaseModel> model,

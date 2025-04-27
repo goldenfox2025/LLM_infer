@@ -622,11 +622,7 @@ namespace cuda_OP
 // --------------------------------------------------
 // 注意力计算：decode 版本 — 计算注意力分数（模板化）
 // --------------------------------------------------
-#include <cuda_runtime.h>
 
-#include <cmath> // For sqrtf, rsqrtf
-
-  // (假设 checkCudaError 宏和函数已定义，同上一个例子)
 
   template <typename T>
   __global__ void attention_scores_kernel(
@@ -1044,77 +1040,22 @@ namespace cuda_OP
         static_cast<int>(cache_length), static_cast<int>(dqkv), V.data_ptr(),
         att_output.data_ptr(), static_cast<int>(n_kv_h));
 
-    // 检查内核启动错误和异步错误
+
     checkCudaError(cudaGetLastError());
-    // 通常不需要立即同步，除非后续 CPU 需要访问结果
-    // checkCudaError(cudaDeviceSynchronize());
   }
 
-  // --------------------------------------------------
-  // 注意力计算：prefill 版本 — 计算注意力分数（模板化）
-  // --------------------------------------------------
-  template <typename T>
-  __global__ void attention_scores_prefill_kernel(const T *Q, const T *K,
-                                                  T *att_scores, int n_q,
-                                                  int cache_length, int dqkv,
-                                                  int n_q_h, int n_kv_h)
-  {
-    int q = blockIdx.x;  // 扁平化后的查询索引：q in [0, n_q)
-    int j = threadIdx.x; // 缓存位置索引
-    if (q < n_q && j < cache_length)
-    {
-      int s = q / n_q_h;
-      int qh = q % n_q_h;
-      int n_groups = n_q_h / n_kv_h;
-      int kv_head = qh / n_groups;
-      float dot = 0.0f;
-      for (int d = 0; d < dqkv; d++)
-      {
-        float q_val = static_cast<float>(Q[(s * n_q_h + qh) * dqkv + d]);
-        float k_val = static_cast<float>(K[(j * n_kv_h + kv_head) * dqkv + d]);
-        dot += q_val * k_val;
-      }
-      int out_idx = s * (n_q_h * cache_length) + qh * cache_length + j;
-      att_scores[out_idx] = static_cast<T>(dot / sqrtf((float)dqkv));
-    }
-  }
+
 
   template <typename T>
   void compute_attention_scores_prefill(const Tensor<T> &Q, const Tensor<T> &K,
                                         Tensor<T> &att_scores, size_t dqkv,
                                         cudaStream_t stream)
   {
-    // Q [seq_len, n_q_h, dqkv]
-    // K [cache_length, n_kv_h, dqkv]
-    // att_scores [seq_len, n_q_h, cache_length]
-    size_t seq_len = Q.sizes()[0];
-    size_t n_q_h = Q.sizes()[1];
-    size_t cache_length = K.sizes()[0];
-    size_t n_kv_h = K.sizes()[1];
 
-    if (Q.sizes()[2] != dqkv)
-    {
-      throw std::runtime_error("Q tensor dimension mismatch");
-    }
-    if (att_scores.sizes()[0] != seq_len || att_scores.sizes()[1] != n_q_h ||
-        att_scores.sizes()[2] != cache_length)
-    {
-      throw std::runtime_error("attention scores tensor shape mismatch...");
-    }
-    if (K.sizes()[2] != dqkv)
-    {
-      throw std::runtime_error("K tensor dimension mismatch");
-    }
-    size_t total_q = seq_len * n_q_h;
-    int threads = std::min(static_cast<int>(cache_length), 4096);
-    int blocks = static_cast<int>(total_q);
-    attention_scores_prefill_kernel<<<blocks, threads, 0, stream>>>(
-        Q.data_ptr(), K.data_ptr(), att_scores.data_ptr(),
-        static_cast<int>(total_q), static_cast<int>(cache_length),
-        static_cast<int>(dqkv), static_cast<int>(n_q_h),
-        static_cast<int>(n_kv_h));
-    checkCudaError(cudaGetLastError());
-    // checkCudaError(cudaDeviceSynchronize());
+    // 使用launch_gqa_gemm计算注意力分数
+    // 这个函数专门处理GQA场景，一个KV头对应多个Q头
+    // 通过索引映射而非复制来处理这种关系，提高内存效率
+    cuda_OP::launch_gqa_gemm(Q, K, att_scores, true, stream);
   }
 
   // --------------------------------------------------
