@@ -1,3 +1,5 @@
+
+
 #ifndef CUDA_GQA_GEMM_CUH
 #define CUDA_GQA_GEMM_CUH
 
@@ -42,7 +44,7 @@ namespace cuda_OP
         // 计算当前线程负责的输出元素索引
         int seq_pos = blockIdx.y * BLOCK_SIZE + threadIdx.y;
         int t_seq_pos = blockIdx.x * BLOCK_SIZE + threadIdx.x;
-        int scores_offset = batch_idx * total_seq_len * n_q_heads * seq_len  + seq_pos * total_seq_len * n_q_heads + q_head_idx * total_seq_len + t_seq_pos;
+        int scores_offset = batch_idx * total_seq_len * n_q_heads * seq_len + seq_pos * total_seq_len * n_q_heads + q_head_idx * total_seq_len + t_seq_pos;
         const T *q = Q + batch_idx * n_q_heads * head_dim * seq_len + seq_pos * head_dim * n_q_heads + q_head_idx * head_dim;
         const T *k = K + batch_idx * n_kv_heads * head_dim * total_seq_len + t_seq_pos * head_dim * n_kv_heads + kv_head_idx * head_dim;
         float sum = 0.0f;
@@ -82,10 +84,10 @@ namespace cuda_OP
      */
     template <typename T>
     void launch_gqa_gemm(
-        const Tensor<T> &Q,  // 查询张量 [batch_size, n_q_heads, seq_len, head_dim]
-        const Tensor<T> &K,  // 键张量 [batch_size, n_kv_heads, seq_len, head_dim]
-        Tensor<T> &scores,   // 输出分数张量 [batch_size, n_q_heads, seq_len, seq_len]
-        bool transpose_K,    // 是否转置K (通常为true，用于注意力计算)
+        const Tensor<T> &Q, // 查询张量 [batch_size, n_q_heads, seq_len, head_dim]
+        const Tensor<T> &K, // 键张量 [batch_size, n_kv_heads, seq_len, head_dim]
+        Tensor<T> &scores,  // 输出分数张量 [batch_size, n_q_heads, seq_len, seq_len]
+
         cudaStream_t stream) // CUDA流
     {
 
@@ -157,15 +159,14 @@ namespace cuda_OP
     // 显式实例化模板函数，以便在其他文件中使用
     template void launch_gqa_gemm<float>(
         const Tensor<float> &Q, const Tensor<float> &K, Tensor<float> &scores,
-        bool transpose_K, cudaStream_t stream);
+        cudaStream_t stream);
 
     template void launch_gqa_gemm<half>(
         const Tensor<half> &Q, const Tensor<half> &K, Tensor<half> &scores,
-        bool transpose_K, cudaStream_t stream);
+        cudaStream_t stream);
 
-    template void launch_gqa_gemm<nv_bfloat16>(
-        const Tensor<nv_bfloat16> &Q, const Tensor<nv_bfloat16> &K, Tensor<nv_bfloat16> &scores,
-        bool transpose_K, cudaStream_t stream);
+    template void launch_gqa_gemm<nv_bfloat16>(const Tensor<nv_bfloat16> &Q, const Tensor<nv_bfloat16> &K, Tensor<nv_bfloat16> &scores,
+                                               cudaStream_t stream);
 
 } // namespace cuda_OP
 

@@ -1055,7 +1055,7 @@ namespace cuda_OP
     // 使用launch_gqa_gemm计算注意力分数
     // 这个函数专门处理GQA场景，一个KV头对应多个Q头
     // 通过索引映射而非复制来处理这种关系，提高内存效率
-    cuda_OP::launch_gqa_gemm(Q, K, att_scores, true, stream);
+    cuda_OP::launch_gqa_gemm(Q, K, att_scores, stream);
   }
 
   // --------------------------------------------------
