@@ -645,7 +645,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
 
   // 获取输入信息
   const size_t seq_len = input->sizes()[0];
-
+  
   // 计算起始KV缓存位置
   size_t offset = 0;
   if (kv_cache) {
@@ -654,9 +654,6 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t>* input,
     }
     offset = kv_cache->size() - seq_len;
   }
-
-  // 重设KV缓存大小
-  kv_cache->resize(offset + seq_len);
 
   // 创建residual和hidden_states张量，在prefill阶段自动使用prefill buffer
   Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);

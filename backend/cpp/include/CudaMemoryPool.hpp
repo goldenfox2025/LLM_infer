@@ -398,7 +398,7 @@ class CudaMemoryPool {
    * @param max_size prefill内存的最大大小，默认为128MB
    * @return 是否成功开启prefill模式
    */
-  bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 128 * 1024 * 1024) {
+  bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 512 * 1024 * 1024) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // 如果已经处于prefill模式，检查是否需要重新分配
@@ -762,7 +762,7 @@ class GlobalCudaMemoryPool {
    * @param max_size prefill内存的最大大小，默认为128MB
    * @return 是否成功开启prefill模式
    */
-  static bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 128 * 1024 * 1024) {
+  static bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 512 * 1024 * 1024) {
     return instance().enable_prefill_mode(initial_size, max_size);
   }
 

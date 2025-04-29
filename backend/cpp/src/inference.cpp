@@ -306,7 +306,7 @@ void InferenceEngine<T>::generate_with_callback(
     std::cout << "执行CUDA预热..." << std::endl << std::flush;
 
     // 创建一个小的输入序列用于预热
-    std::vector<uint32_t> warmup_input(4, 1); // 使用4个token进行预热
+    std::vector<uint32_t> warmup_input(128, 1); // 使用4个token进行预热
 
     // 保存当前KV缓存状态
     size_t original_kv_size = kv_cache_.size();
