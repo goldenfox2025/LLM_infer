@@ -401,7 +401,24 @@ namespace cuda_OP
             // *** 注意：这个循环内部没有 __syncthreads() ***
 
             // --- 使用共享内存块计算矩阵乘法 ---
-
+            #pragma unroll
+            for (int k = 0; k < BK; ++k)
+            { // 在块内遍历 K 维度
+#pragma unroll
+                for (int i = 0; i < TM; ++i)
+                { // 遍历线程的 M 维度
+#pragma unroll
+                    for (int j = 0; j < TN; ++j)
+                    {
+                        // smemQ 中的行，thread_m_idx 是一个 tid 映射到的对象
+                        // 由于一个线程负责 TM*TN 的结果， 因为映射到的对象步长为 TM 或者 TN
+                        int smem_q_row = thread_m_idx * TM + i;
+                        int smem_k_col = thread_n_idx * TN + j;
+                        accum[i][j] += smemQ[(ph) & 1][smem_q_row][k] * smemK[(ph) & 1][smem_k_col][k];
+                    }
+                }
+            }
+            __syncthreads();
             ph ^= 1;
 #pragma unroll 1 // 通常不对 grid-stride loop 做完全展开
             for (int smem_q_row_base = 0; smem_q_row_base < BM; smem_q_row_base += blockDim.x / VEC_LOADS_PER_ROW)
@@ -661,24 +678,7 @@ namespace cuda_OP
                 } // 结束对 smem_k_row < BN 的检查
             } // 结束 K 加载的 (潜在的) Grid-Stride 行循环
 
-#pragma unroll
-            for (int k = 0; k < BK; ++k)
-            { // 在块内遍历 K 维度
-#pragma unroll
-                for (int i = 0; i < TM; ++i)
-                { // 遍历线程的 M 维度
-#pragma unroll
-                    for (int j = 0; j < TN; ++j)
-                    {
-                        // smemQ 中的行，thread_m_idx 是一个 tid 映射到的对象
-                        // 由于一个线程负责 TM*TN 的结果， 因为映射到的对象步长为 TM 或者 TN
-                        int smem_q_row = thread_m_idx * TM + i;
-                        int smem_k_col = thread_n_idx * TN + j;
-                        accum[i][j] += smemQ[(ph) ^ 1][smem_q_row][k] * smemK[(ph) ^ 1][smem_k_col][k];
-                    }
-                }
-            }
-            __syncthreads();
+
         }
 
         // --- 缩放结果并写回全局内存 ---
