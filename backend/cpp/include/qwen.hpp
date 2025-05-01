@@ -17,6 +17,13 @@ class QwenModel : public BaseModel {
  public:
   QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
             const std::unordered_map<std::string, int>& config);
+
+  // 带量化参数的构造函数
+  QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
+            const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
+            const std::unordered_map<std::string, Tensor<float>>& scales_params,
+            const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
+            const std::unordered_map<std::string, int>& config);
   ~QwenModel() override;
 
   bool verify_params() const override;
@@ -60,8 +67,18 @@ class QwenModel : public BaseModel {
   float get_rms_norm_eps() const { return rms_norm_eps_; }
   float get_rope_theta() const { return rope_theta_; }
   size_t get_vocab_size() const { return vocab_size_; }
+  int get_quant_type() const { return quant_type_; }
   const std::unordered_map<std::string, Tensor<T>>& get_params() const {
     return params_;
+  }
+  const std::unordered_map<std::string, Tensor<int32_t>>& get_qweight_params() const {
+    return qweight_params_;
+  }
+  const std::unordered_map<std::string, Tensor<float>>& get_scales_params() const {
+    return scales_params_;
+  }
+  const std::unordered_map<std::string, Tensor<int32_t>>& get_qzeros_params() const {
+    return qzeros_params_;
   }
 
   // CUDA versions of forward and prefill.
@@ -91,6 +108,11 @@ class QwenModel : public BaseModel {
   float rope_theta_;
 
   std::unordered_map<std::string, Tensor<T>> params_;
+  std::unordered_map<std::string, Tensor<int32_t>> qweight_params_; // 量化权重
+  std::unordered_map<std::string, Tensor<float>> scales_params_;    // 缩放因子
+  std::unordered_map<std::string, Tensor<int32_t>> qzeros_params_;  // 零点
+  int quant_type_ = 0;  // 0: 非量化, 1: AWQ量化
+  int group_size_ = 128; // 量化分组大小
   Device device_;
 
   std::array<cudaStream_t, kNumStreams> compute_streams_;

@@ -55,8 +55,8 @@ def load_llama_model(model_path: str):
 
     return config, weights, "llama"
 
-def load_qwen_model(model_path: str, keep_bf16=True):
-    """加载 Qwen 模型及配置，可选保持 BF16 精度"""
+def load_qwen_model(model_path: str, keep_bf16=True, is_awq=False):
+    """加载 Qwen 模型及配置，可选保持 BF16 精度或加载 AWQ 量化模型"""
     model_path = Path(model_path)
     weights = {}
 
@@ -64,8 +64,24 @@ def load_qwen_model(model_path: str, keep_bf16=True):
     with safe_open(model_path / "model.safetensors", framework="pt") as f:
         for key in f.keys():
             tensor = f.get_tensor(key)
-            # 如果设置了保持 bf16 并且张量是 bf16 类型，则保持原始格式
-            if tensor.dtype == torch.bfloat16 and keep_bf16:
+
+            # 如果是AWQ量化模型，需要区分量化权重和非量化权重
+            if is_awq:
+                # 检查是否是量化权重（qweight、scales、qzeros）
+                if any(suffix in key for suffix in [".qweight", ".scales", ".qzeros"]):
+                    # 量化权重保持原始格式
+                    weights[key] = tensor
+                    print(f"Loaded AWQ quantized tensor {key} with shape {tensor.shape} and dtype {tensor.dtype}")
+                else:
+                    # 非量化权重根据keep_bf16参数决定是否转换
+                    if tensor.dtype == torch.bfloat16 and keep_bf16:
+                        weights[key] = tensor
+                        print(f"Loaded AWQ non-quantized bf16 tensor {key} with shape {tensor.shape}")
+                    else:
+                        weights[key] = tensor.to(torch.float32)
+                        print(f"Loaded AWQ non-quantized fp32 tensor {key} with shape {weights[key].shape}")
+            # 非AWQ模型处理
+            elif tensor.dtype == torch.bfloat16 and keep_bf16:
                 weights[key] = tensor
                 print(f"Loaded bf16 tensor {key} with shape {tensor.shape}")
             else:
@@ -86,7 +102,27 @@ def load_qwen_model(model_path: str, keep_bf16=True):
                 print(f"Warning: {key} not found in config")
         print("Config loaded:", config)
 
-    model_type = "qwen_bf16" if keep_bf16 else "qwen"
+        # 如果是AWQ模型，添加量化相关配置
+        if is_awq:
+            # 检查是否有AWQ相关配置
+            if "quantization_config" in config:
+                quant_config = config["quantization_config"]
+                if "group_size" in quant_config:
+                    config["group_size"] = quant_config["group_size"]
+                    print(f"Using group_size from config: {config['group_size']}")
+                else:
+                    config["group_size"] = 128  # 默认值
+                    print(f"Using default group_size: {config['group_size']}")
+            else:
+                config["group_size"] = 128  # 默认值
+                print(f"Using default group_size: {config['group_size']}")
+
+    # 根据模型类型返回不同的标识符
+    if is_awq:
+        model_type = "qwen_awq"
+    else:
+        model_type = "qwen_bf16" if keep_bf16 else "qwen"
+
     return config, weights, model_type
 
 def load_tokenizer(model_path: str, model_type: str):
@@ -126,8 +162,8 @@ def create_callback(q: queue.Queue):
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen 模型聊天')
-    parser.add_argument('--model_path', type=str, default="./models/Qwen2.5-1.5B-Instruct", help='模型路径')
-    parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16'], help='模型类型')
+    parser.add_argument('--model_path', type=str, default="./quantization_test/Qwen2.5-1.5B-AWQ", help='模型路径')
+    parser.add_argument('--model_type', type=str, default="qwen_awq", choices=['llama', 'qwen', 'qwen_bf16', 'qwen_awq'], help='模型类型')
     parser.add_argument('--system_prompt', type=str, default="You are a helpful assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=200 + 22, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=1, help='生成温度')
@@ -138,8 +174,12 @@ def main():
     # 加载模型和 tokenizer
     if args.model_type == "llama":
         config, weights, model_type = load_llama_model(args.model_path)
-    elif args.model_type in ["qwen", "qwen_bf16"]:
-        config, weights, model_type = load_qwen_model(args.model_path, keep_bf16=(args.model_type=="qwen_bf16"))
+    elif args.model_type == "qwen":
+        config, weights, model_type = load_qwen_model(args.model_path, keep_bf16=False, is_awq=False)
+    elif args.model_type == "qwen_bf16":
+        config, weights, model_type = load_qwen_model(args.model_path, keep_bf16=True, is_awq=False)
+    elif args.model_type == "qwen_awq":
+        config, weights, model_type = load_qwen_model(args.model_path, keep_bf16=True, is_awq=True)
     else:
         print(f"Unsupported model type: {args.model_type}")
         exit(1)

@@ -255,4 +255,17 @@ namespace cuda_OP
                                        Tensor<T> &att_output, int n_kv_heads,
                                        cudaStream_t stream = nullptr);
 
+  // AWQ量化矩阵乘法
+  template <typename T>
+  void matmul_quantized(
+      const Tensor<T>& input,
+      const Tensor<int32_t>& qweight,
+      const Tensor<float>& scales,
+      const Tensor<int32_t>& zeros,
+      int group_size,
+      Tensor<T>* output,
+      cudaStream_t stream = nullptr,
+      const Tensor<T>* bias = nullptr
+  );
+
 } // namespace cuda_OP

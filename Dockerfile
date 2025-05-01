@@ -1,5 +1,5 @@
 # --- 单阶段开发镜像 Dockerfile ---
-FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
 # 安装系统依赖和开发工具
 RUN apt-get update && apt-get install -y \
@@ -8,22 +8,24 @@ RUN apt-get update && apt-get install -y \
     git \
     software-properties-common \
     curl \
-    python3.10 \
-    python3.10-dev \
-    python3.10-distutils && \
+    python3.12 \
+    python3.12-dev \
+    python3.12-distutils && \
     rm -rf /var/lib/apt/lists/*
 
-# 设置 Python 3.10 为默认版本
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
-    update-alternatives --set python3 /usr/bin/python3.10
+# 设置 Python 3.12 为默认版本
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --set python3 /usr/bin/python3.12
 
 # 安装 pip 并升级 pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
     python3 -m pip install --no-cache-dir --upgrade pip
 
 # 安装开发所需的 Python 库（这里使用清华大学的镜像可以加速下载）
 RUN python3 -m pip install --no-cache-dir --ignore-installed --timeout=600 -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
-    pybind11 safetensors tokenizers flask transformers torch
+    pybind11 safetensors tokenizers flask transformers numpy==1.26.4 && \
+    python3 -m pip install --no-cache-dir --ignore-installed --timeout=600 torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 && \
+    python3 -m pip install --no-cache-dir --ignore-installed --timeout=600 -i https://pypi.tuna.tsinghua.edu.cn/simple/ autoawq==0.2.8
 
 # 设置工作目录为 /build_src，存放源码和编译过程
 WORKDIR /build_src
@@ -35,7 +37,7 @@ COPY frontend/ frontend/
 COPY interface/ interface/
 
 # 拉取 CUTLASS（固定版本更稳定）
-RUN git clone --recursive https://github.com/NVIDIA/cutlass.git 
+RUN git clone --recursive https://github.com/NVIDIA/cutlass.git
 
 # 编译阶段：自动获取 pybind11 的 CMake 配置路径传给 cmake，然后编译工程
 RUN mkdir build && cd build && \

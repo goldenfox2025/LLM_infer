@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.15)
+# 在project()之前设置编译器
+set(CMAKE_CXX_COMPILER "/usr/bin/g++-12")
+set(CMAKE_CUDA_HOST_COMPILER "/usr/bin/g++-12")
+
+# 添加CUDA编译器标志来处理兼容性问题
+
 project(llm_infer LANGUAGES CXX CUDA)
 
 # --- 基本配置 ---
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 89)
-set(CMAKE_CXX_COMPILER "/usr/bin/g++-12")
 
 # --- 添加自定义构建类型 ProfileDebug ---
 # 这种模式提供调试信息但与NCU兼容
@@ -34,6 +39,7 @@ pybind11_add_module(model_bridge SHARED
     backend/cpp/src/thread_pool.cpp
     backend/cpp/src/qwen.cpp
     backend/cpp/src/CudaMemoryPool.cpp
+
 )
 
 # --- 设置链接库 ---

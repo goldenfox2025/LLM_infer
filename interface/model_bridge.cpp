@@ -24,6 +24,7 @@ enum class ModelType {
   LLAMA,
   QWEN,
   QWEN_BF16,
+  QWEN_AWQ,
 };
 
 // ModelFactory 用于根据模型类型创建对应实例
@@ -53,6 +54,30 @@ class ModelFactory {
       default:
         throw std::runtime_error(
             "Unsupported model type for FP32 weights in create_model");
+    }
+  }
+
+  // 创建带量化参数的模型
+  static std::shared_ptr<BaseModel> create_model_quantized(
+      ModelType type,
+      const std::unordered_map<std::string, Tensor<__nv_bfloat16>>& weights,
+      const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
+      const std::unordered_map<std::string, Tensor<float>>& scales_params,
+      const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
+      const std::unordered_map<std::string, int>& config) {
+    switch (type) {
+      case ModelType::QWEN_AWQ: {
+        auto model = std::make_shared<QwenModel<__nv_bfloat16>>(
+            weights, qweight_params, scales_params, qzeros_params, config);
+        model->print_model_info();
+        if (!model->verify_params()) {
+          throw std::runtime_error("Model parameter verification failed");
+        }
+        return model;
+      }
+      default:
+        throw std::runtime_error(
+            "Unsupported model type for quantized weights in create_model_quantized");
     }
   }
 };
@@ -473,6 +498,188 @@ process_qwen_weights_bf16(const py::dict& weights) {
   return cpp_bf16_weights;
 }
 
+// 处理 Qwen AWQ 量化权重
+std::tuple<std::unordered_map<std::string, Tensor<__nv_bfloat16>>,
+           std::unordered_map<std::string, Tensor<int32_t>>,
+           std::unordered_map<std::string, Tensor<float>>,
+           std::unordered_map<std::string, Tensor<int32_t>>>
+process_qwen_weights_awq(const py::dict& weights) {
+  std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_bf16_weights;
+  std::unordered_map<std::string, Tensor<int32_t>> cpp_qweight_params;
+  std::unordered_map<std::string, Tensor<float>> cpp_scales_params;
+  std::unordered_map<std::string, Tensor<int32_t>> cpp_qzeros_params;
+
+  // 全局权重映射表（非量化权重）
+  const std::unordered_map<std::string, std::string> global_weights_map = {
+      {"model.embed_tokens.weight", "token_embeddings.weight"},
+      {"model.norm.weight", "norm.weight"},
+      {"lm_head.weight", "lm_head"},
+      {"model.lm_head.weight", "lm_head"}
+  };
+
+  // 处理非量化的全局权重
+  for (const auto& [src_key, dst_key] : global_weights_map) {
+    if (weights.contains(src_key)) {
+      std::cout << "Processing Qwen AWQ global key: " << src_key << " -> "
+                << dst_key << std::endl;
+      py::object tensor = weights[src_key.c_str()];
+      Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
+      if (dst_key == "lm_head") {
+        cpp_bf16_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
+      } else {
+        cpp_bf16_weights.emplace(dst_key, std::move(bf16_tensor));
+      }
+    }
+  }
+
+  // 处理量化权重
+  for (auto item : weights) {
+    std::string key = py::str(item.first).cast<std::string>();
+
+    // 处理量化权重 (qweight)
+    if (key.find(".qweight") != std::string::npos) {
+      std::string base_key = key.substr(0, key.find(".qweight"));
+      std::string dst_key = base_key;
+
+      // 转换层级路径格式
+      if (base_key.find("model.layers.") == 0) {
+        size_t start = std::string("model.layers.").size();
+        size_t end = base_key.find('.', start);
+        std::string layer_str = base_key.substr(start, end - start);
+        int layer = std::stoi(layer_str);
+
+        // 替换路径前缀
+        dst_key = "layers." + std::to_string(layer) + base_key.substr(end);
+      }
+
+      std::string full_dst_key = dst_key + ".qweight";
+      std::cout << "Processing Qwen AWQ qweight: " << key << " -> " << full_dst_key << std::endl;
+
+      // 转换为int32_t张量
+      py::array_t<int32_t> np_array = item.second.cast<py::array_t<int32_t>>();
+      std::vector<size_t> shape;
+      for (int i = 0; i < np_array.ndim(); i++) {
+        shape.push_back(np_array.shape(i));
+      }
+      std::vector<int32_t> data(np_array.data(), np_array.data() + np_array.size());
+      cpp_qweight_params.emplace(full_dst_key, Tensor<int32_t>(std::move(data), shape));
+    }
+
+    // 处理量化缩放因子 (scales)
+    else if (key.find(".scales") != std::string::npos) {
+      std::string base_key = key.substr(0, key.find(".scales"));
+      std::string dst_key = base_key;
+
+      // 转换层级路径格式
+      if (base_key.find("model.layers.") == 0) {
+        size_t start = std::string("model.layers.").size();
+        size_t end = base_key.find('.', start);
+        std::string layer_str = base_key.substr(start, end - start);
+        int layer = std::stoi(layer_str);
+
+        // 替换路径前缀
+        dst_key = "layers." + std::to_string(layer) + base_key.substr(end);
+      }
+
+      std::string full_dst_key = dst_key + ".scales";
+      std::cout << "Processing Qwen AWQ scales: " << key << " -> " << full_dst_key << std::endl;
+
+      // 转换为float张量
+      py::array_t<float> np_array = item.second.cast<py::array_t<float>>();
+      std::vector<size_t> shape;
+      for (int i = 0; i < np_array.ndim(); i++) {
+        shape.push_back(np_array.shape(i));
+      }
+      std::vector<float> data(np_array.data(), np_array.data() + np_array.size());
+      cpp_scales_params.emplace(full_dst_key, Tensor<float>(std::move(data), shape));
+    }
+
+    // 处理量化零点 (qzeros)
+    else if (key.find(".qzeros") != std::string::npos) {
+      std::string base_key = key.substr(0, key.find(".qzeros"));
+      std::string dst_key = base_key;
+
+      // 转换层级路径格式
+      if (base_key.find("model.layers.") == 0) {
+        size_t start = std::string("model.layers.").size();
+        size_t end = base_key.find('.', start);
+        std::string layer_str = base_key.substr(start, end - start);
+        int layer = std::stoi(layer_str);
+
+        // 替换路径前缀
+        dst_key = "layers." + std::to_string(layer) + base_key.substr(end);
+      }
+
+      std::string full_dst_key = dst_key + ".qzeros";
+      std::cout << "Processing Qwen AWQ qzeros: " << key << " -> " << full_dst_key << std::endl;
+
+      // 转换为int32_t张量
+      py::array_t<int32_t> np_array = item.second.cast<py::array_t<int32_t>>();
+      std::vector<size_t> shape;
+      for (int i = 0; i < np_array.ndim(); i++) {
+        shape.push_back(np_array.shape(i));
+      }
+      std::vector<int32_t> data(np_array.data(), np_array.data() + np_array.size());
+      cpp_qzeros_params.emplace(full_dst_key, Tensor<int32_t>(std::move(data), shape));
+    }
+
+    // 处理非量化的层级权重
+    else if (key.find("model.layers.") == 0 &&
+             key.find(".qweight") == std::string::npos &&
+             key.find(".scales") == std::string::npos &&
+             key.find(".qzeros") == std::string::npos) {
+      // 处理层级权重（如 layernorm 和 bias）
+      const std::vector<std::pair<std::string, std::string>> qwen_layer_key_mapping = {
+          {"input_layernorm.weight", "input_layernorm.weight"},
+          {"post_attention_layernorm.weight", "post_attention_layernorm.weight"},
+          {"self_attn.q_proj.bias", "self_attn.q_proj.bias"},
+          {"self_attn.k_proj.bias", "self_attn.k_proj.bias"},
+          {"self_attn.v_proj.bias", "self_attn.v_proj.bias"},
+          {"self_attn.o_proj.bias", "self_attn.o_proj.bias"}
+      };
+
+      for (const auto& [src_suffix, dst_suffix] : qwen_layer_key_mapping) {
+        std::string pattern = "." + src_suffix;
+        if (key.find(pattern) != std::string::npos) {
+          size_t start = std::string("model.layers.").size();
+          size_t end = key.find('.', start);
+          std::string layer_str = key.substr(start, end - start);
+          int layer = std::stoi(layer_str);
+          std::string dst_key = "layers." + std::to_string(layer) + "." + dst_suffix;
+          std::cout << "Processing Qwen AWQ layer key: " << key << " -> " << dst_key << std::endl;
+          py::object tensor = weights[key.c_str()];
+          Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
+          cpp_bf16_weights.emplace(dst_key, std::move(bf16_tensor));
+          break;
+        }
+      }
+    }
+    // 处理lm_head (特殊处理)
+    else if (key == "lm_head.weight") {
+      std::cout << "Processing Qwen AWQ lm_head" << std::endl;
+      py::object tensor = weights[key.c_str()];
+      Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
+      cpp_bf16_weights.emplace("lm_head", bf16_tensor.transpose(-1, -2));
+    }
+  }
+
+  // 如果 lm_head 缺失，则尝试从 token_embeddings.weight 转置生成
+  if (cpp_bf16_weights.find("lm_head") == cpp_bf16_weights.end()) {
+    std::cout << "Warning: lm_head not found in AWQ weights, creating from "
+                 "token_embeddings.weight" << std::endl;
+    if (cpp_bf16_weights.find("token_embeddings.weight") != cpp_bf16_weights.end()) {
+      Tensor<__nv_bfloat16> lm_head =
+          cpp_bf16_weights.at("token_embeddings.weight").transpose(-1, -2);
+      cpp_bf16_weights.emplace("lm_head", std::move(lm_head));
+    } else {
+      std::cerr << "Error: token_embeddings.weight not found in AWQ weights"
+                << std::endl;
+    }
+  }
+
+  return {cpp_bf16_weights, cpp_qweight_params, cpp_scales_params, cpp_qzeros_params};
+}
+
 bool init_model(py::dict config, py::dict weights,
                 const std::string& model_type) {
   try {
@@ -504,6 +711,9 @@ bool init_model(py::dict config, py::dict weights,
     ModelType type;
     std::unordered_map<std::string, Tensor<float>> cpp_weights_fp32;
     std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_weights_bf16;
+    std::unordered_map<std::string, Tensor<int32_t>> cpp_qweight_params;
+    std::unordered_map<std::string, Tensor<float>> cpp_scales_params;
+    std::unordered_map<std::string, Tensor<int32_t>> cpp_qzeros_params;
 
     if (model_type == "llama") {
       type = ModelType::LLAMA;
@@ -573,6 +783,46 @@ bool init_model(py::dict config, py::dict weights,
 
       g_model = std::make_shared<QwenModel<__nv_bfloat16>>(cpp_weights_bf16,
                                                            cpp_config);
+      g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(g_model,
+                                                                  Device::CUDA);
+      g_model->cuda();
+    } else if (model_type == "qwen_awq") {
+      type = ModelType::QWEN_AWQ;
+      // Qwen AWQ 配置
+      cpp_config["n_layers"] = config["num_hidden_layers"].cast<int>();
+      cpp_config["n_heads"] = config["num_attention_heads"].cast<int>();
+      cpp_config["n_kv_heads"] = config["num_key_value_heads"].cast<int>();
+      cpp_config["intermediate_size"] = config["intermediate_size"].cast<int>();
+      cpp_config["vocab_size"] = config["vocab_size"].cast<int>();
+      cpp_config["hidden_size"] = config["hidden_size"].cast<int>();
+      cpp_config["max_position_embeddings"] =
+          config["max_position_embeddings"].cast<int>();
+      cpp_config["bos_token_id"] = config["bos_token_id"].cast<int>();
+      cpp_config["eos_token_id"] = config["eos_token_id"].cast<int>();
+      cpp_config["rms_norm_eps"] =
+          static_cast<int>(config["rms_norm_eps"].cast<float>());
+      cpp_config["rope_theta"] =
+          static_cast<int>(config["rope_theta"].cast<float>());
+
+      // 设置量化类型和分组大小
+      cpp_config["quant_type"] = 1; // AWQ量化
+
+      // 如果配置中有分组大小，则使用配置中的值
+      if (config.contains("group_size")) {
+        cpp_config["group_size"] = config["group_size"].cast<int>();
+      } else {
+        // 默认分组大小为128
+        cpp_config["group_size"] = 128;
+      }
+
+      // 处理 Qwen AWQ 权重
+      auto [bf16_weights, qweight_params, scales_params, qzeros_params] =
+          process_qwen_weights_awq(weights);
+
+      // 创建带量化参数的模型
+      g_model = std::make_shared<QwenModel<__nv_bfloat16>>(
+          bf16_weights, qweight_params, scales_params, qzeros_params, cpp_config);
+
       g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(g_model,
                                                                   Device::CUDA);
       g_model->cuda();

@@ -1,5 +1,12 @@
 # backend/cpp/src/CUDAoperators/CMakeLists.txt
 set(CMAKE_CXX_STANDARD 17)
+
+# 设置CUDA编译器选项以处理GCC兼容性问题
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler --expt-relaxed-constexpr --extended-lambda")
+
+# 确保使用兼容的GCC版本
+set(CMAKE_CUDA_HOST_COMPILER "/usr/bin/g++-12")
+
 # 自动查找当前目录及其子目录下的所有 .cu 和 .cpp 文件
 # 注意: GLOB_RECURSE 可能会意外包含不需要的文件。如果项目结构复杂，
 #       建议明确列出源文件或使用更精确的 GLOB 模式。
@@ -50,7 +57,7 @@ target_compile_options(operators PRIVATE
     # -O0: 关闭优化。
     # -mavx2, -mfma: 启用 AVX2 和 FMA 指令集 (如果 CPU 支持，可以提升性能)。
     #               如果 operators 库中的 C++ 代码需要这些指令，则添加。
-    $<$<CONFIG:Debug>:-g;-O0;-mavx2;-mfma>
+    $<$<CONFIG:Debug>:-g;-O0;-mavx2;-mfma;-DDEBUG_AWQ>
 
     # $<CONFIG:Release>: 仅在 Release 模式下应用的选项。
     # -O3: 开启高级别优化。
@@ -66,7 +73,8 @@ target_compile_options(operators PRIVATE
     # $<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>: 仅在 Debug 模式下编译 CUDA 代码时应用。
     # -G: 生成设备端调试信息。
     # -O0: 关闭优化。
-    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-G;-O0>
+    # -DDEBUG_AWQ: 启用AWQ调试输出
+    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-G;-O0;-DDEBUG_AWQ>
 
     # $<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>: 仅在 Release 模式下编译 CUDA 代码时应用。
     # -O3: 开启优化。

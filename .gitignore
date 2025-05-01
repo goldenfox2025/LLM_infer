@@ -4,3 +4,12 @@
 /docs
 build
 /data
+/quantization_test
+cuda_12.4.0_550.54.14_linux.run.1
+test_cuda_env.sh
+setup_cuda_env.sh
+test.txt
+cuda_install_options.txt
+CUDA_Environment.md
+clean_cuda_env.sh
+analyze_awq_model.py
