@@ -276,7 +276,8 @@ __global__ void gqa_gemm_kernel_v2(
 #pragma unroll
             for (int i = 0; i < vec_unit; ++i) {
               // 如果 BK 能被 vec_unit 整除, smem 列边界检查理论上可以省略
-              // 但加上更安全，特别是处理 BK 不是 vec_unit 倍数的情况 (如果允许)
+              // 但加上更安全，特别是处理 BK 不是 vec_unit 倍数的情况
+              // 虽然这里确实不需要
               if (smem_q_col_start + i < BK) {
                 smem_q_write_addr[i] = static_cast<float>(vq.t[i]);
               }
