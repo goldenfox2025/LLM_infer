@@ -2,10 +2,10 @@
 #include "qwen.hpp"
 
 #include <cmath>
-#include <cmath>   // For std::fabs (for tolerance comparison if needed)
-#include <cstring> // For memcmp (binary comparison)
+#include <cmath>    // For std::fabs (for tolerance comparison if needed)
+#include <cstring>  // For memcmp (binary comparison)
 #include <iostream>
-#include <limits> // For std::numeric_limits (for tolerance comparison if needed)
+#include <limits>  // For std::numeric_limits (for tolerance comparison if needed)
 #include <vector>
 
 #include "cudaOP.cuh"
@@ -33,7 +33,7 @@ bool compareGpuTensors(const Tensor<T> &t1, const Tensor<T> &t2,
   if (t1.numel() == 0) {
     if (verbose)
       std::cout << "[Compare Info] Both tensors are empty, considered equal.\n";
-    return true; // Empty tensors are equal
+    return true;  // Empty tensors are equal
   }
 
   size_t num_elements = t1.numel();
@@ -65,13 +65,13 @@ bool compareGpuTensors(const Tensor<T> &t1, const Tensor<T> &t2,
       if (syncErr != cudaSuccess)
         std::cerr << "  sync: " << cudaGetErrorString(syncErr) << std::endl;
     }
-    return false; // Treat copy error as inequality
+    return false;  // Treat copy error as inequality
   }
 
   // 4. 逐元素比较
   bool mismatch_found = false;
   size_t first_mismatch_idx = 0;
-  T val1_at_mismatch = T(); // Default constructor
+  T val1_at_mismatch = T();  // Default constructor
   T val2_at_mismatch = T();
 
   // --- 使用 memcmp 进行快速二进制比较 (推荐) ---
@@ -89,7 +89,7 @@ bool compareGpuTensors(const Tensor<T> &t1, const Tensor<T> &t2,
           val2_at_mismatch = h_buffer2[i];
           break;
         }
-      } else { // For float or other types where == is reasonable initially
+      } else {  // For float or other types where == is reasonable initially
         if (h_buffer1[i] != h_buffer2[i]) {
           first_mismatch_idx = i;
           val1_at_mismatch = h_buffer1[i];
@@ -161,7 +161,7 @@ void debugPrintTensor(const Tensor<T> &tensor, const std::string &tensor_name,
   std::cout << "\n";
 
   // 4) Print elements starting from offset 0
-  size_t offset = 1023; // 从开始处打印
+  size_t offset = 1023;  // 从开始处打印
   size_t total_elements = tensor.numel();
   size_t n_print = std::min(num_to_print, total_elements - offset);
 
@@ -245,8 +245,10 @@ QwenModel<T>::QwenModel(
     const std::unordered_map<std::string, Tensor<float>> &scales_params,
     const std::unordered_map<std::string, Tensor<int32_t>> &qzeros_params,
     const std::unordered_map<std::string, int> &config)
-    : params_(params), qweight_params_(qweight_params),
-      scales_params_(scales_params), qzeros_params_(qzeros_params) {
+    : params_(params),
+      qweight_params_(qweight_params),
+      scales_params_(scales_params),
+      qzeros_params_(qzeros_params) {
   // 从 config 中提取基本参数
   vocab_size_ = config.at("vocab_size");
   n_layers_ = config.at("n_layers");
@@ -310,7 +312,8 @@ QwenModel<T>::QwenModel(
   }
 }
 
-template <typename T> QwenModel<T>::~QwenModel() {
+template <typename T>
+QwenModel<T>::~QwenModel() {
   for (cudaStream_t stream : compute_streams_) {
     if (stream) {
       // 最好在销毁流之前同步它，确保所有工作完成
@@ -329,7 +332,8 @@ template <typename T> QwenModel<T>::~QwenModel() {
 // -------------------------------
 // 参数验证：检查全局与层级关键参数是否存在
 // -------------------------------
-template <typename T> bool QwenModel<T>::verify_params() const {
+template <typename T>
+bool QwenModel<T>::verify_params() const {
   std::cout << "Not checking parameters" << std::endl;
   return true;
 }
@@ -337,7 +341,8 @@ template <typename T> bool QwenModel<T>::verify_params() const {
 // -------------------------------
 // 打印模型基本信息
 // -------------------------------
-template <typename T> void QwenModel<T>::print_model_info() const {
+template <typename T>
+void QwenModel<T>::print_model_info() const {
   std::cout << "QwenModel Info:" << std::endl;
   std::cout << "  Vocab size: " << vocab_size_ << std::endl;
   std::cout << "  Layers: " << n_layers_ << std::endl;
@@ -645,7 +650,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     // head_dim_,
     // // //                                   att_scores, n_kv_heads_);
 
-    // cuda_OP::launch_gemmv_scores(total_K.data_ptr(), Q_3d.data_ptr(),
+    // cuda_OP::launch_gemv_scores(total_K.data_ptr(), Q_3d.data_ptr(),
     //                       att_scores.data_ptr(), n_heads_, ratio,
     //                       total_seq_len, head_dim_, head_dim_,
     //                       total_seq_len);
@@ -769,8 +774,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
       cuda_OP::matmul(hidden_states, up_weight, &up_buf, nullptr, up_bias);
     }
 
-    cuda_OP::silu(&gate_buf, &gate_buf);              // SiLU激活
-    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf); // 逐元素相乘
+    cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
+    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
     // 投影回原始维度
     Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA);
@@ -929,7 +934,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
       //                             if (sizes.empty()) {
       //                               std::cout << "<empty>";
       //                             } else {
-      //                               for (size_t i = 0; i < sizes.size(); ++i) {
+      //                               for (size_t i = 0; i < sizes.size(); ++i)
+      //                               {
       //                                 std::cout
       //                                     << sizes[i]
       //                                     << (i == sizes.size() - 1 ? ""
@@ -958,7 +964,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 检查CUDA错误
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            std::cerr << "CUDA error in q_proj matmul_quantized: " << cudaGetErrorString(err) << std::endl;
+          std::cerr << "CUDA error in q_proj matmul_quantized: "
+                    << cudaGetErrorString(err) << std::endl;
         }
       } else {
         // 回退到非量化版本
@@ -978,10 +985,10 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 检查CUDA错误
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            std::cerr << "CUDA error in k_proj matmul_quantized: " << cudaGetErrorString(err) << std::endl;
+          std::cerr << "CUDA error in k_proj matmul_quantized: "
+                    << cudaGetErrorString(err) << std::endl;
         }
       } else {
-
         throw std::runtime_error("Some errors.");
       }
 
@@ -998,10 +1005,10 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 检查CUDA错误
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            std::cerr << "CUDA error in v_proj matmul_quantized: " << cudaGetErrorString(err) << std::endl;
+          std::cerr << "CUDA error in v_proj matmul_quantized: "
+                    << cudaGetErrorString(err) << std::endl;
         }
       } else {
-
         throw std::runtime_error("Some errors.");
       }
     } else {
@@ -1247,8 +1254,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
       cuda_OP::matmul(hidden_states, up_weight, &up_buf, nullptr, up_bias);
     }
 
-    cuda_OP::silu(&gate_buf, &gate_buf);              // SiLU激活
-    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf); // 逐元素相乘
+    cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
+    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
     // 投影回原始维度
     Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA);
@@ -1310,7 +1317,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
 // -------------------------------
 // cuda()：将所有参数移到 CUDA，并设置设备
 // -------------------------------
-template <typename T> QwenModel<T> &QwenModel<T>::cuda() {
+template <typename T>
+QwenModel<T> &QwenModel<T>::cuda() {
   for (auto &kv : params_) {
     if (kv.second.device() != Device::CUDA) {
       kv.second.cuda();
@@ -1323,7 +1331,8 @@ template <typename T> QwenModel<T> &QwenModel<T>::cuda() {
 // -------------------------------
 // cpu()：Qwen 模型仅支持 CUDA，故调用 cpu() 抛出异常
 // -------------------------------
-template <typename T> QwenModel<T> &QwenModel<T>::cpu() {
+template <typename T>
+QwenModel<T> &QwenModel<T>::cpu() {
   throw std::runtime_error("QwenModel only supports CUDA execution.");
   return *this;
 }
@@ -1332,10 +1341,9 @@ template <typename T> QwenModel<T> &QwenModel<T>::cpu() {
 // generate: Token 生成接口，目前作为 stub
 // -------------------------------
 template <typename T>
-std::vector<uint32_t>
-QwenModel<T>::generate(const std::vector<uint32_t> &input_ids,
-                       size_t max_length, float temperature, float top_p,
-                       size_t top_k) {
+std::vector<uint32_t> QwenModel<T>::generate(
+    const std::vector<uint32_t> &input_ids, size_t max_length,
+    float temperature, float top_p, size_t top_k) {
   // TODO: 实现 Qwen 模型的 token 生成逻辑
   throw std::runtime_error("Token generation not implemented for QwenModel");
   return std::vector<uint32_t>();

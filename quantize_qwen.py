@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-使用AutoAWQ量化Qwen2.5-1.5B模型 (尝试移除 version='GEMM')
+使用AutoAWQ量化Qwen2.5-1.5B模型
 """
 
 import torch
@@ -18,8 +18,8 @@ except ImportError:
 
 def main():
     # 模型路径
-    model_path = "/home/keta/code/LLM_infer/models/Qwen2.5-1.5B-Instruct"
-    quant_path = "/home/keta/code/LLM_infer/quantization_test/Qwen2.5-1.5B-AWQ"
+    model_path = "./models/Qwen2.5-1.5B-Instruct"
+    quant_path = "./quantization_test/Qwen2.5-1.5B-AWQ"
 
     # --- 重要：删除旧的量化结果以确保重新生成 ---
     if os.path.exists(quant_path):
@@ -77,12 +77,12 @@ def main():
     print(f"准备了{len(samples)}个校准样本")
 
     # --- 量化配置修改 ---
-    print("设置量化配置 (移除了 version='GEMM')")
+    print("设置量化配置 ")
     quant_config = {
         "zero_point": True,
         "q_group_size": 128,
         "w_bit": 4,
-        # "version": "GEMM"  # <--- 移除或注释掉这一行
+        # "version": "GEMV"  # 打包顺序和GEMM不同
     }
     # ---------------------
 
