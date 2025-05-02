@@ -2,26 +2,31 @@
 # -*- coding: utf-8 -*-
 
 """
-使用AutoAWQ量化Qwen2.5-1.5B模型
+使用AutoAWQ量化Qwen2.5-1.5B模型，并检查GEMV和GEMM格式的张量形状
 """
 
 import torch
 import os
-import shutil # 导入 shutil 用于删除旧目录
+import shutil
 from transformers import AutoTokenizer
 # 确保已安装: pip install autoawq
 try:
     from awq import AutoAWQForCausalLM
+    # 导入 AutoAWQ 的量化线性层类
+    from awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV
 except ImportError:
     print("错误: 请安装 autoawq (pip install autoawq)")
+    print("可能还需要: pip install torch transformers accelerate safetensors") # 补充依赖
     exit()
+    
+
 
 def main():
     # 模型路径
     model_path = "./models/Qwen2.5-1.5B-Instruct"
     quant_path = "./quantization_test/Qwen2.5-1.5B-AWQ"
 
-    # --- 重要：删除旧的量化结果以确保重新生成 ---
+    # --- 删除旧目录 ---
     if os.path.exists(quant_path):
         print(f"检测到旧的量化目录: {quant_path}")
         try:
@@ -30,37 +35,28 @@ def main():
         except OSError as e:
             print(f"错误：无法删除旧目录 {quant_path}: {e}")
             print("请手动删除该目录后重试。")
-            return # 停止执行，防止覆盖不完整
-
-    # 检查量化模型是否已存在 (理论上在上面已经被删除了)
-    model_exists = False # 因为我们已经删除了
+            return
 
     # 加载分词器
     print(f"正在加载分词器...")
-    # 总是从原始模型加载，因为量化模型目录刚被删除
-    print(f"从原始模型路径加载分词器: {model_path}")
     try:
-        # 某些模型 (如 Qwen) 可能需要 trust_remote_code=True
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     except Exception as e:
         print(f"加载分词器失败: {e}")
         return
 
-
     print("进行新的量化...")
-    # 创建输出目录
     os.makedirs(quant_path, exist_ok=True)
 
     # 加载原始模型
     print(f"正在加载原始模型: {model_path}")
     try:
-        # 添加 trust_remote_code=True
         model = AutoAWQForCausalLM.from_pretrained(model_path, device_map="auto", trust_remote_code=True)
     except Exception as e:
          print(f"加载原始模型失败: {e}")
          return
 
-    # 准备校准数据
+    # 准备校准数据 (与之前相同)
     print("准备校准数据")
     print("使用本地校准数据")
     samples = [
@@ -72,8 +68,7 @@ def main():
         "计算机视觉是人工智能的一个领域，它使计算机能够从图像或视频中获取信息并理解视觉世界。计算机视觉技术包括图像分类、目标检测、图像分割和人脸识别等。这些技术已经在自动驾驶、医疗诊断和安全监控等领域得到了广泛应用。",
         "强化学习是一种机器学习方法，它通过与环境交互并从反馈中学习来优化决策。在强化学习中，智能体通过尝试不同的行动并观察结果来学习最佳策略。这种方法已经在游戏、机器人控制和资源管理等领域取得了成功。",
         "神经网络是一种受人脑启发的计算模型，由相互连接的节点（神经元）组成，用于模式识别和决策。神经网络可以学习复杂的非线性关系，这使它们在处理图像、语音和文本等数据时非常有效。深度神经网络包含多个隐藏层，能够学习数据的层次表示。"
-    ] * 16  # 重复样本以增加数量
-
+    ] * 16
     print(f"准备了{len(samples)}个校准样本")
 
     # --- 量化配置修改 ---
@@ -82,7 +77,7 @@ def main():
         "zero_point": True,
         "q_group_size": 128,
         "w_bit": 4,
-        # "version": "GEMV"  # 打包顺序和GEMM不同
+        "version": "GEMV"  
     }
     # ---------------------
 
@@ -97,56 +92,87 @@ def main():
     # 保存量化模型
     print(f"保存量化模型到: {quant_path}")
     try:
-        # 保存模型和分词器
         model.save_quantized(quant_path)
-        tokenizer.save_pretrained(quant_path) # 再次保存以防万一
-
-        # 简单的验证
-        quant_model_file = os.path.join(quant_path, "model.safetensors") # AWQ 倾向于保存为 safetensors
-        if not os.path.exists(quant_model_file):
-             quant_model_file = os.path.join(quant_path, "pytorch_model.bin") # 检查备用名
-
-        if os.path.exists(quant_model_file):
-             print("量化模型权重文件已找到！")
-        else:
-             print("警告：未找到模型权重文件 (model.safetensors 或 pytorch_model.bin)，保存可能失败")
-
-        if os.path.exists(os.path.join(quant_path, "tokenizer.json")):
-             print("分词器文件已找到！")
-        else:
-             print("警告：未找到分词器文件 (tokenizer.json)，保存可能失败")
-
-        print(f"量化模型保存在: {os.path.abspath(quant_path)}")
-        print("下次可以直接从此路径加载量化模型")
+        tokenizer.save_pretrained(quant_path)
+        print(f"量化模型已尝试保存在: {os.path.abspath(quant_path)}")
     except Exception as e:
         print(f"保存模型时出错: {e}")
         raise
 
-    # 加载量化模型进行测试 (可选，但推荐)
-    print("加载新量化的模型进行测试...")
+    # --- 关键步骤：加载量化模型并检查内部形状 ---
+    print("\n加载新量化的模型以检查内部张量形状...")
     try:
-        # 再次加载以确认量化模型本身可用
         model_quant = AutoAWQForCausalLM.from_quantized(quant_path, device_map="auto", trust_remote_code=True)
-        print("新量化模型加载成功！")
-    except Exception as e:
-        print(f"加载新量化模型失败: {e}")
-        print("量化或保存过程可能仍有问题，请检查日志。")
-        return # 如果加载失败，后续测试无意义
+        print("量化模型加载成功！现在开始检查层...")
 
-    # 测试生成 (可选，但推荐)
+        print("\n--- 开始检查 Quantized Layers (寻找 WQLinear_GEMV 和 WQLinear_GEMM) ---")
+        found_gemv = 0
+        found_gemm = 0
+        max_layers_to_print_each = 5 # 每种类型最多打印几个
+
+        for name, module in model_quant.named_modules():
+            # 检查 GEMV 层
+            if isinstance(module, WQLinear_GEMV):
+                found_gemv += 1
+                if found_gemv <= max_layers_to_print_each:
+                    print(f"\nLayer (Type: WQLinear_GEMV): {name}")
+                    print(f"  qweight shape: {module.qweight.shape} (dtype: {module.qweight.dtype})")
+                    print(f"  scales shape: {module.scales.shape} (dtype: {module.scales.dtype})")
+                    print(f"  qzeros shape: {module.qzeros.shape} (dtype: {module.qzeros.dtype})")
+                    if hasattr(module, 'bias') and module.bias is not None:
+                        print(f"  bias shape: {module.bias.shape} (dtype: {module.bias.dtype})")
+                    else:
+                        print(f"  bias: None")
+            # 检查 GEMM 层
+            elif isinstance(module, WQLinear_GEMM):
+                 found_gemm += 1
+                 if found_gemm <= max_layers_to_print_each:
+                     print(f"\nLayer (Type: WQLinear_GEMM): {name}") # 明确类型
+                     # --- 添加打印 GEMM 层形状的代码 ---
+                     print(f"  qweight shape: {module.qweight.shape} (dtype: {module.qweight.dtype})")
+                     print(f"  scales shape: {module.scales.shape} (dtype: {module.scales.dtype})")
+                     print(f"  qzeros shape: {module.qzeros.shape} (dtype: {module.qzeros.dtype})")
+                     if hasattr(module, 'bias') and module.bias is not None:
+                         print(f"  bias shape: {module.bias.shape} (dtype: {module.bias.dtype})")
+                     else:
+                         print(f"  bias: None")
+                     # ------------------------------------
+
+        if found_gemv == 0 and found_gemm == 0:
+            print("\n警告：在加载的模型中未找到 WQLinear_GEMV 或 WQLinear_GEMM 层。")
+            print("请确认 AutoAWQ 版本、量化过程是否成功替换了线性层。")
+        else:
+            print(f"\n总共发现 {found_gemv} 个 WQLinear_GEMV 层 (输出了前 {min(found_gemv, max_layers_to_print_each)} 个).")
+            print(f"总共发现 {found_gemm} 个 WQLinear_GEMM 层 (输出了前 {min(found_gemm, max_layers_to_print_each)} 个).")
+
+        print("--- 检查完毕 ---")
+
+    except Exception as e:
+        print(f"\n加载或检查新量化模型失败: {e}")
+        print("请检查量化或保存过程是否真的成功，以及 AutoAWQ 是否安装完好。")
+        return
+
+    # 测试生成 (保持不变)
     prompt = "讲个关于机器人学习绘画的短故事。"
     print(f"\n测试提示: {prompt}")
-    messages = [{"role": "user", "content": prompt}] # 简化消息格式
+    messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     try:
-        device = next(model_quant.parameters()).device
-    except StopIteration: # 处理可能没有 parameters 的情况
-         try:
-             device = next(model_quant.buffers()).device
-         except StopIteration:
-             device = "cpu" # 默认回退到 CPU
-             print("警告：无法确定模型设备，假设为 CPU")
+        # 尝试获取设备，增加健壮性
+        device = "cuda:0" # Default
+        if hasattr(model_quant, 'device'):
+            device = model_quant.device
+        elif hasattr(model_quant, 'hf_device_map'): # 处理 device_map 情况
+             # 尝试从 device_map 获取一个设备，通常第一个即可代表主要设备
+             device_list = list(set(model_quant.hf_device_map.values()))
+             if device_list:
+                 device = device_list[0]
+        print(f"模型将被发送到设备: {device}")
+    except Exception as e:
+        print(f"获取模型设备时出错: {e}, 回退到 cpu")
+        device = "cpu"
+
 
     inputs = tokenizer(text, return_tensors="pt").to(device)
     print(f"输入已发送到设备: {inputs.input_ids.device}")
@@ -154,20 +180,29 @@ def main():
 
     print("开始生成文本...")
     try:
+        # 确保模型在正确的设备上
+        model_quant.to(device)
+
         with torch.no_grad():
-            # 使用与之前相同的生成参数
+            # 查找 pad_token_id，如果 tokenizer 没有，使用 eos_token_id
+            pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+
             outputs = model_quant.generate(
                 **inputs,
                 max_new_tokens=200,
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.9,
-                eos_token_id=tokenizer.eos_token_id # 明确指定 EOS token ID
+                pad_token_id=pad_token_id, # 使用找到的 pad_token_id
+                eos_token_id=tokenizer.eos_token_id
             )
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
         print(f"生成成功！生成的文本:\n{generated_text}")
     except Exception as e:
         print(f"使用新量化模型生成文本时出错: {e}")
+        # 打印更详细的错误信息
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

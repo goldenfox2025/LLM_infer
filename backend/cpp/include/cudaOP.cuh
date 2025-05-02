@@ -48,7 +48,15 @@ union Vec_2 {
 namespace cuda_OP {
 
 // 定义支持的数据类型别名
-
+template <typename T>
+void matmul_quantized_gemv(          // Renamed wrapper
+    const Tensor<T> &input,          // [M, K]
+    const Tensor<int32_t> &qweight,  // [N, K/8] <- Expected GEMV layout
+    const Tensor<float> &scales,     // [N, G_padded] (G_padded >= G)
+    const Tensor<int32_t> &zeros,    // [N, G/8]
+    int group_size,
+    Tensor<T> *output,  // [M, N] - DIMS NOT CHECKED HERE
+    cudaStream_t stream, const Tensor<T> *bias);
 using nvbf16 = __nv_bfloat16;
 void init_curand(curandState *d_states, unsigned long long seed, int offset,
                  cudaStream_t stream = nullptr);
