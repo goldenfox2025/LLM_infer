@@ -98,234 +98,238 @@ __global__ void gqa_gemm_kernel_v2(
   // 这是加载 vec 的结果
   constexpr int vec_unit = 16 / sizeof(T);
   int k_tile_start = 0;
-  constexpr int VEC_LOADS_PER_ROW =
-      (BK + vec_unit - 1) / vec_unit;  // 使用 ceil 除法保证覆盖 BK
-  constexpr int VEC_LOADS_PER_ROW_K = (BK + vec_unit - 1) / vec_unit;
 
-  // 理论上，M 维度的线程数量为 BM/TM
-  // all_tid = BM*BN/(TM*TN)
-  // Q或者K的分块加载 需要确保BM*BK或者BN*BK的数据
-  // 1次向量化加载可以负责vec_unit个数据
-  // 以Q为例，BM*BK/(vec_unit*cnt)是需要的总线程数
-  // cnt是一个线程执行向量化加载次数
-  // TM=2 TN=2 BK=32 BM=32 BN=32
-  // 这样的配置下，总线程为256（16*16），需要加载32*32个数据。
-  // 每个线程加载1个float4，即8个数据。加载32*4次需要128个线程
-  // 我们考虑使用 grid - stride - loop，可以简单地分发任务
-  // 我们还应该考虑内存访问事务
-  // 缓存行大小是128字节。
-  // 尽量使得warp访问的全局内存是合并的
-  // 将dim维度分配到连续的tid上（连续的维度）
-  // 仍然需要保证一个块处理BM行（以Q为例）
-  // 枚举需要处理的行，tid则负责索引行内
-  // VEC_LOADS_PER_ROW: 需要多少次向量加载才能填满 smemQ 的一行 (BK 维度)
+// 理论上，M 维度的线程数量为 BM/TM
+// all_tid = BM*BN/(TM*TN)
+// Q或者K的分块加载 需要确保BM*BK或者BN*BK的数据
+// 1次向量化加载可以负责vec_unit个数据
+// 以Q为例，BM*BK/(vec_unit*cnt)是需要的总线程数
+// cnt是一个线程执行向量化加载次数
+// TM=2 TN=2 BK=32 BM=32 BN=32
+// 这样的配置下，总线程为256（16*16），需要加载32*32个数据。
+// 每个线程加载1个float4，即8个数据。加载32*4次需要128个线程
+// 我们考虑使用 grid - stride - loop，可以简单地分发任务
+// 我们还应该考虑内存访问事务
+// 缓存行大小是128字节。
+// 尽量使得warp访问的全局内存是合并的
+// 将dim维度分配到连续的tid上（连续的维度）
+// 仍然需要保证一个块处理BM行（以Q为例）
+// 枚举需要处理的行，tid则负责索引行内
+// VEC_LOADS_PER_ROW: 需要多少次向量加载才能填满 smemQ 的一行 (BK 维度)
+//   constexpr int VEC_LOADS_PER_ROW =
+//       (BK + vec_unit - 1) / vec_unit;  // 使用 ceil 除法保证覆盖 BK
+//   constexpr int VEC_LOADS_PER_ROW_K = (BK + vec_unit - 1) / vec_unit;
+// THREADS_PER_ROW_LOAD_GROUP: 一个块内可以同时处理多少行的加载
+// (基于线程数和每行需要的加载次数) 注意：这里假设 blockDim.x 是
+// VEC_LOADS_PER_ROW 的倍数，简化分组。
+// 如果不是倍数，线程映射会更复杂，这里先做此理想假设。
+// 更健壮的方式是不做此假设，直接用 blockDim.x 进行 stride。
+// const int THREADS_PER_ROW_LOAD_GROUP = blockDim.x / VEC_LOADS_PER_ROW; //
+// 理想分组下的行处理能力
 
-  // THREADS_PER_ROW_LOAD_GROUP: 一个块内可以同时处理多少行的加载
-  // (基于线程数和每行需要的加载次数) 注意：这里假设 blockDim.x 是
-  // VEC_LOADS_PER_ROW 的倍数，简化分组。
-  // 如果不是倍数，线程映射会更复杂，这里先做此理想假设。
-  // 更健壮的方式是不做此假设，直接用 blockDim.x 进行 stride。
-  // const int THREADS_PER_ROW_LOAD_GROUP = blockDim.x / VEC_LOADS_PER_ROW; //
-  // 理想分组下的行处理能力
+// --- 使用 Grid-Stride Loop (如果需要) 遍历 smemQ 的行 ---
+// 这个循环是为了处理 BM 可能大于一个块一次能加载的行数的情况
+// 如果 BM 比较小 (例如 BM <= blockDim.x /
+// VEC_LOADS_PER_ROW)，这个循环只会迭代一次。
+// 一般，我更习惯按照tid迭代。计算出特定tid负责的共享内存的行和列
+// 一个tid负责一个vec 例如下面的代码
+//     // 循环遍历 Q tile 中的所有 *向量*
 
-  // --- 使用 Grid-Stride Loop (如果需要) 遍历 smemQ 的行 ---
-  // 这个循环是为了处理 BM 可能大于一个块一次能加载的行数的情况
-  // 如果 BM 比较小 (例如 BM <= blockDim.x /
-  // VEC_LOADS_PER_ROW)，这个循环只会迭代一次。
-  // 一般，我更习惯按照tid迭代。计算出特定tid负责的共享内存的行和列
-  // 一个tid负责一个vec 例如下面的代码
-  //     // 循环遍历 Q tile 中的所有 *向量*
-  //     for (int load_idx = tid; load_idx < BM * (BK / vec_unit);
-  //          load_idx += blockDim.x) {
-  //       // 1. 计算此向量在 smemQ 中的目标行和起始列
-  //       int smem_q_row = load_idx / (BK / vec_unit);
-  //       int vec_idx_in_row = load_idx % (BK / vec_unit);
-  //       int smem_q_col_start = vec_idx_in_row * vec_unit;  //
-  //       向量写入的起始列
+// 但下面可以合并内存事务
+// #pragma unroll 1  // 通常不对 grid-stride loop 做完全展开
+//   for (int smem_q_row_base = 0; smem_q_row_base < BM;
+//        smem_q_row_base += blockDim.x / VEC_LOADS_PER_ROW) {
+//     // 1. 计算当前线程 `tid` 负责加载哪一行 (`smem_q_row`) 的哪一个向量
+//     // (`vec_in_row_idx`)
+//     // vec_in_row_idx: 本线程负责加载其目标行内的第几个向量 (沿 BK 维度)
+//     int vec_in_row_idx = tid % VEC_LOADS_PER_ROW;
+//     // row_group_id: 本线程属于哪个“行加载组” (一个组负责加载一行)
+//     int row_group_id = tid / VEC_LOADS_PER_ROW;
 
-  //       // 2. 计算对应的全局内存读取地址
-  //       int global_q_seq = block_q_seq_start + smem_q_row;  // 全局行
-  //       int global_q_dim_vec_start =
-  //           k_tile_start + smem_q_col_start;  // 全局列 (向量起点)
+//     // smem_q_row: 计算本线程要写入的共享内存目标行索引
+//     int smem_q_row = smem_q_row_base + row_group_id;
+//     // smem_q_col_start: 计算本线程要写入的共享内存起始列索引 (向量的起点)
+//     int smem_q_col_start = vec_in_row_idx * vec_unit;
 
-  //       // 3. 严格边界检查 和 加载/写入
-  //       if (global_q_seq < seq_len) {
-  //         // 行有效，检查列
-  //         if (global_q_dim_vec_start + vec_unit - 1 < head_dim) {
-  //           // --- 情况 A: 完整向量在边界内，直接向量化加载 ---
-  //           Vec<T, vec_unit> vq;
-  //           vq.f4 = *reinterpret_cast<const float4 *>(
-  //               &q_head_ptr[global_q_seq * q_stride_seq +
-  //                           global_q_dim_vec_start]);
+//     // 检查计算出的 smem 行是否仍在 smemQ 的有效范围内 (BM)
+//     //
+//     因为是分发任务的模式，先检查共享内存行是否有效，再检查全局内存行是否有效
+//     if (smem_q_row < BM) {
+//       // 2. 计算对应的全局内存读取地址
 
-  // // 水平写入 smemQ
-  // #pragma unroll
-  //           for (int i = 0; i < vec_unit; ++i) {
-  //             // 检查 smem 列边界 (理论上如果 BK 是 vec_unit
-  //             倍数，这里不需要检查,
-  //             // 但加上更安全)
-  //             if (smem_q_col_start + i < BK) {
-  //               smemQ[smem_q_row][smem_q_col_start + i] =
-  //                   static_cast<float>(vq.t[i]);
-  //             }
-  //           }
-  //         } else {
-  // // --- 情况 B: 向量跨越 head_dim 边界，处理部分加载 ---
-  // #pragma unroll
-  //           for (int i = 0; i < vec_unit; ++i) {
-  //             int current_smem_col = smem_q_col_start + i;
-  //             if (current_smem_col < BK) {  // 检查 smem 列边界
-  //               int current_global_dim = k_tile_start + current_smem_col;
-  //               if (current_global_dim < head_dim) {  // 检查全局列边界
-  //                 // 只加载和写入在 head_dim 内的部分
-  //                 T element = q_head_ptr[global_q_seq * q_stride_seq +
-  //                                        current_global_dim];
-  //                 smemQ[smem_q_row][current_smem_col] =
-  //                     static_cast<float>(element);
-  //               } else {
-  //                 // 超出 head_dim 的部分在 smem 中补零
-  //                 smemQ[smem_q_row][current_smem_col] = 0.0f;
-  //               }
-  //             }
-  //           }
-  //         }
-  //       } else {
-  // // --- 情况 C: 整行无效 (global_q_seq >= seq_len) ---
-  // // 将 smemQ 中对应的向量位置全部置零
-  // #pragma unroll
-  //         for (int i = 0; i < vec_unit; ++i) {
-  //           int current_smem_col = smem_q_col_start + i;
-  //           if (current_smem_col < BK) {  // 检查 smem 列边界
-  //             smemQ[smem_q_row][current_smem_col] = 0.0f;
-  //           }
-  //         }
-  //       }
-  //     }  // 结束 Q 加载循环
+//       // global_q_seq: 要读取的全局内存 Q 的行索引 (序列维度)
+//       int global_q_seq = block_q_seq_start + smem_q_row;
+//       // global_q_dim_vec_start: 要读取的全局内存 Q 的列起始索引 (head_dim
+//       维度,
+//       // 向量起点)
+//       // 这是实现合并访问的关键
+//       // 同一个 row_group_id (加载同一行的线程) 会有相同的 global_q_seq,
+//       // 而不同的 vec_in_row_idx 会使得 global_q_dim_vec_start 连续变化
+//       (步长为
+//       // vec_unit), 从而访问同一全局内存行内的连续数据。
+//       int global_q_dim_vec_start = k_tile_start + smem_q_col_start;
 
-  // 但下面可以合并内存事务
-#pragma unroll 1  // 通常不对 grid-stride loop 做完全展开
-  for (int smem_q_row_base = 0; smem_q_row_base < BM;
-       smem_q_row_base += blockDim.x / VEC_LOADS_PER_ROW) {
-    // 1. 计算当前线程 `tid` 负责加载哪一行 (`smem_q_row`) 的哪一个向量
-    // (`vec_in_row_idx`)
-    // vec_in_row_idx: 本线程负责加载其目标行内的第几个向量 (沿 BK 维度)
-    int vec_in_row_idx = tid % VEC_LOADS_PER_ROW;
-    // row_group_id: 本线程属于哪个“行加载组” (一个组负责加载一行)
-    int row_group_id = tid / VEC_LOADS_PER_ROW;
+//       // 全局内存读取指针的基地址 (指向向量的第一个元素)
+//       const T *q_load_addr =
+//           &q_head_ptr[global_q_seq * q_stride_seq +
+//           global_q_dim_vec_start];
+//       // 共享内存写入指针的基地址
+//       float *smem_q_write_addr = &smemQ[(ph) &
+//       1][smem_q_row][smem_q_col_start];
 
-    // smem_q_row: 计算本线程要写入的共享内存目标行索引
-    int smem_q_row = smem_q_row_base + row_group_id;
-    // smem_q_col_start: 计算本线程要写入的共享内存起始列索引 (向量的起点)
-    int smem_q_col_start = vec_in_row_idx * vec_unit;
+//       // 3. 严格边界检查 和 加载/写入
 
-    // 检查计算出的 smem 行是否仍在 smemQ 的有效范围内 (BM)
-    // 因为是分发任务的模式，先检查共享内存行是否有效，再检查全局内存行是否有效
-    if (smem_q_row < BM) {
-      // 2. 计算对应的全局内存读取地址
+//       // 检查全局行索引是否有效
+//       if (global_q_seq < seq_len) {
+//         // 检查全局列起始索引是否有效 (向量起点不能越界)
+//         // 注意：这里检查的是向量起点，完整性在后面检查
+//         if (global_q_dim_vec_start < head_dim) {
+//           // 检查整个向量是否完全在 head_dim 边界内
+//           bool full_vector_in_bounds =
+//               (global_q_dim_vec_start + vec_unit <= head_dim);
 
-      // global_q_seq: 要读取的全局内存 Q 的行索引 (序列维度)
-      int global_q_seq = block_q_seq_start + smem_q_row;
-      // global_q_dim_vec_start: 要读取的全局内存 Q 的列起始索引 (head_dim 维度,
-      // 向量起点)
-      // 这是实现合并访问的关键
-      // 同一个 row_group_id (加载同一行的线程) 会有相同的 global_q_seq,
-      // 而不同的 vec_in_row_idx 会使得 global_q_dim_vec_start 连续变化 (步长为
-      // vec_unit), 从而访问同一全局内存行内的连续数据。
-      int global_q_dim_vec_start = k_tile_start + smem_q_col_start;
+//           if (full_vector_in_bounds) {
+//             // --- 情况 A: 完整向量在边界内，直接向量化加载 ---
+//             Vec<T, vec_unit> vq;
+//             // 使用 reinterpret_cast 进行向量加载 (需要确保地址对齐)
+//             // 对于 float, 使用 float4; 对于 half/bfloat16, 使用 int 或
+//             short
+//             // 的向量类型 (如 int2, short4) 这里用 float4
+//             作为示例，需要根据 T
+//             // 和 vec_unit 调整
+//             if constexpr (sizeof(T) * vec_unit ==
+//                           16) {  // e.g., float4 or bf16/fp16 x 8
+//               *reinterpret_cast<float4 *>(&vq.t[0]) =
+//                   *reinterpret_cast<const float4 *>(q_load_addr);
+//             } else if constexpr (sizeof(T) * vec_unit ==
+//                                  8) {  // e.g., float2 or bf16/fp16 x 4
+//               *reinterpret_cast<float2 *>(&vq.t[0]) =
+//                   *reinterpret_cast<const float2 *>(q_load_addr);
+//             } else {  // 其他情况或需要更通用的加载
+// // vq.load(q_load_addr); // 假设有通用加载方法
+// // 或者 fallback 到标量加载
+// #pragma unroll
+//               for (int i = 0; i < vec_unit; ++i) vq.t[i] = q_load_addr[i];
+//             }
 
-      // 全局内存读取指针的基地址 (指向向量的第一个元素)
-      const T *q_load_addr =
-          &q_head_ptr[global_q_seq * q_stride_seq + global_q_dim_vec_start];
-      // 共享内存写入指针的基地址
-      float *smem_q_write_addr = &smemQ[(ph) & 1][smem_q_row][smem_q_col_start];
+// // 水平写入 smemQ (向量 -> 标量分散写入)
+// #pragma unroll
+//             for (int i = 0; i < vec_unit; ++i) {
+//               // 如果 BK 能被 vec_unit 整除, smem 列边界检查理论上可以省略
+//               // 但加上更安全，特别是处理 BK 不是 vec_unit 倍数的情况
+//               // 虽然这里确实不需要
+//               if (smem_q_col_start + i < BK) {
+//                 smem_q_write_addr[i] = static_cast<float>(vq.t[i]);
+//               }
+//             }
+//           } else {
+// // --- 情况 B: 向量跨越 head_dim 边界，处理部分加载 (Tail case) ---
+// #pragma unroll
+//             for (int i = 0; i < vec_unit; ++i) {
+//               int current_smem_col = smem_q_col_start + i;
+//               // 检查共享内存列边界
+//               if (current_smem_col < BK) {
+//                 int current_global_dim = global_q_dim_vec_start + i;
+//                 // 检查全局内存列边界
+//                 if (current_global_dim < head_dim) {
+//                   // 只加载和写入在 head_dim 内的部分 (标量加载)
+//                   T element =
+//                       q_load_addr[i];  // q_head_ptr[global_q_seq *
+//                       q_stride_seq
+//                                        // + current_global_dim];
+//                   smem_q_write_addr[i] = static_cast<float>(element);
+//                 } else {
+//                   // 超出 head_dim 的部分在 smem 中补零
+//                   smem_q_write_addr[i] = 0.0f;
+//                 }
+//               }
+//             }
+//           }
+//         } else {
+// // --- 情况 C: 向量的起始位置已经超出了 head_dim ---
+// // 将 smemQ 中对应的整个向量位置都置零
+// #pragma unroll
+//           for (int i = 0; i < vec_unit; ++i) {
+//             if (smem_q_col_start + i < BK) {  // 检查 smem 列边界
+//               smem_q_write_addr[i] = 0.0f;
+//             }
+//           }
+//         }
+//       } else {
+// // --- 情况 D: 整行无效 (global_q_seq >= seq_len) ---
+// // 将 smemQ 中对应的整个向量位置都置零
+// #pragma unroll
+//         for (int i = 0; i < vec_unit; ++i) {
+//           if (smem_q_col_start + i < BK) {  // 检查 smem 列边界
+//             smem_q_write_addr[i] = 0.0f;
+//           }
+//         }
+//       }
+//     }  // 结束对 smem_q_row < BM 的检查
+//   }  // 结束 Q 加载的 (潜在的) Grid-Stride 行循环
+#pragma unroll(1)
+  for (int load_idx = tid; load_idx < BM * (BK / vec_unit);
+       load_idx += blockDim.x) {
+    // 1. 计算此向量在 smemQ 中的目标行和起始列
+    int smem_q_row = load_idx / (BK / vec_unit);
+    int vec_idx_in_row = load_idx % (BK / vec_unit);
+    int smem_q_col_start = vec_idx_in_row * vec_unit;
 
-      // 3. 严格边界检查 和 加载/写入
+    // 2. 计算对应的全局内存读取地址
+    int global_q_seq = block_q_seq_start + smem_q_row;  // 全局行
+    int global_q_dim_vec_start =
+        k_tile_start + smem_q_col_start;  // 全局列 (向量起点)
 
-      // 检查全局行索引是否有效
-      if (global_q_seq < seq_len) {
-        // 检查全局列起始索引是否有效 (向量起点不能越界)
-        // 注意：这里检查的是向量起点，完整性在后面检查
-        if (global_q_dim_vec_start < head_dim) {
-          // 检查整个向量是否完全在 head_dim 边界内
-          bool full_vector_in_bounds =
-              (global_q_dim_vec_start + vec_unit <= head_dim);
+    // 3. 严格边界检查 和 加载/写入
+    if (global_q_seq < seq_len) {
+      // 行有效，检查列
+      if (global_q_dim_vec_start + vec_unit - 1 < head_dim) {
+        // --- 情况 A: 完整向量在边界内，直接向量化加载 ---
+        Vec<T, vec_unit> vq;
+        vq.f4 = *reinterpret_cast<const float4 *>(
+            &q_head_ptr[global_q_seq * q_stride_seq + global_q_dim_vec_start]);
 
-          if (full_vector_in_bounds) {
-            // --- 情况 A: 完整向量在边界内，直接向量化加载 ---
-            Vec<T, vec_unit> vq;
-            // 使用 reinterpret_cast 进行向量加载 (需要确保地址对齐)
-            // 对于 float, 使用 float4; 对于 half/bfloat16, 使用 int 或 short
-            // 的向量类型 (如 int2, short4) 这里用 float4 作为示例，需要根据 T
-            // 和 vec_unit 调整
-            if constexpr (sizeof(T) * vec_unit ==
-                          16) {  // e.g., float4 or bf16/fp16 x 8
-              *reinterpret_cast<float4 *>(&vq.t[0]) =
-                  *reinterpret_cast<const float4 *>(q_load_addr);
-            } else if constexpr (sizeof(T) * vec_unit ==
-                                 8) {  // e.g., float2 or bf16/fp16 x 4
-              *reinterpret_cast<float2 *>(&vq.t[0]) =
-                  *reinterpret_cast<const float2 *>(q_load_addr);
-            } else {  // 其他情况或需要更通用的加载
-// vq.load(q_load_addr); // 假设有通用加载方法
-// 或者 fallback 到标量加载
+// 水平写入 smemQ
 #pragma unroll
-              for (int i = 0; i < vec_unit; ++i) vq.t[i] = q_load_addr[i];
-            }
-
-// 水平写入 smemQ (向量 -> 标量分散写入)
-#pragma unroll
-            for (int i = 0; i < vec_unit; ++i) {
-              // 如果 BK 能被 vec_unit 整除, smem 列边界检查理论上可以省略
-              // 但加上更安全，特别是处理 BK 不是 vec_unit 倍数的情况
-              // 虽然这里确实不需要
-              if (smem_q_col_start + i < BK) {
-                smem_q_write_addr[i] = static_cast<float>(vq.t[i]);
-              }
-            }
-          } else {
-// --- 情况 B: 向量跨越 head_dim 边界，处理部分加载 (Tail case) ---
-#pragma unroll
-            for (int i = 0; i < vec_unit; ++i) {
-              int current_smem_col = smem_q_col_start + i;
-              // 检查共享内存列边界
-              if (current_smem_col < BK) {
-                int current_global_dim = global_q_dim_vec_start + i;
-                // 检查全局内存列边界
-                if (current_global_dim < head_dim) {
-                  // 只加载和写入在 head_dim 内的部分 (标量加载)
-                  T element =
-                      q_load_addr[i];  // q_head_ptr[global_q_seq * q_stride_seq
-                                       // + current_global_dim];
-                  smem_q_write_addr[i] = static_cast<float>(element);
-                } else {
-                  // 超出 head_dim 的部分在 smem 中补零
-                  smem_q_write_addr[i] = 0.0f;
-                }
-              }
-            }
-          }
-        } else {
-// --- 情况 C: 向量的起始位置已经超出了 head_dim ---
-// 将 smemQ 中对应的整个向量位置都置零
-#pragma unroll
-          for (int i = 0; i < vec_unit; ++i) {
-            if (smem_q_col_start + i < BK) {  // 检查 smem 列边界
-              smem_q_write_addr[i] = 0.0f;
-            }
+        for (int i = 0; i < vec_unit; ++i) {
+          // 但加上更安全)
+          if (smem_q_col_start + i < BK) {
+            smemQ[ph & 1][smem_q_row][smem_q_col_start + i] =
+                static_cast<float>(vq.t[i]);
           }
         }
       } else {
-// --- 情况 D: 整行无效 (global_q_seq >= seq_len) ---
-// 将 smemQ 中对应的整个向量位置都置零
+// --- 情况 B: 向量跨越 head_dim 边界，处理部分加载 ---
 #pragma unroll
         for (int i = 0; i < vec_unit; ++i) {
-          if (smem_q_col_start + i < BK) {  // 检查 smem 列边界
-            smem_q_write_addr[i] = 0.0f;
+          int current_smem_col = smem_q_col_start + i;
+          if (current_smem_col < BK) {  // 检查 smem 列边界
+            int current_global_dim = k_tile_start + current_smem_col;
+            if (current_global_dim < head_dim) {  // 检查全局列边界
+              // 只加载和写入在 head_dim 内的部分
+              T element =
+                  q_head_ptr[global_q_seq * q_stride_seq + current_global_dim];
+              smemQ[ph & 1][smem_q_row][current_smem_col] =
+                  static_cast<float>(element);
+            } else {
+              // 超出 head_dim 的部分在 smem 中补零
+              smemQ[ph & 1][smem_q_row][current_smem_col] = 0.0f;
+            }
           }
         }
       }
-    }  // 结束对 smem_q_row < BM 的检查
-  }  // 结束 Q 加载的 (潜在的) Grid-Stride 行循环
+    } else {
+// --- 情况 C: 整行无效 (global_q_seq >= seq_len) ---
+// 将 smemQ 中对应的向量位置全部置零
+#pragma unroll
+      for (int i = 0; i < vec_unit; ++i) {
+        int current_smem_col = smem_q_col_start + i;
+        if (current_smem_col < BK) {  // 检查 smem 列边界
+          smemQ[ph & 1][smem_q_row][current_smem_col] = 0.0f;
+        }
+      }
+    }
+  }  // 结束 Q 加载循环
 
   // --- 开始加载 K 到 smemK ---
   // 使用与 Q 加载完全相同的逻辑结构，但替换为 K 的参数
@@ -336,100 +340,64 @@ __global__ void gqa_gemm_kernel_v2(
 // 理想分组
 
 // --- 使用 Grid-Stride Loop (如果需要) 遍历 smemK 的行 ---
-#pragma unroll 1
-  for (int smem_k_row_base = 0; smem_k_row_base < BN;
-       smem_k_row_base += blockDim.x / VEC_LOADS_PER_ROW_K) {
-    // 1. 计算当前线程 `tid` 负责加载 K 的哪一行/向量
-    int vec_in_row_idx = tid % VEC_LOADS_PER_ROW_K;
-    int row_group_id = tid / VEC_LOADS_PER_ROW_K;
+#pragma unroll(1)
+     // 循环遍历 K tile 中的所有 *向量* (注意维度是 BN)
+  for (int load_idx = tid; load_idx < BN * (BK / vec_unit);
+       load_idx += blockDim.x) {
+    // 1. 计算此向量在 smemK 中的目标行和起始列
+    int smem_k_row = load_idx / (BK / vec_unit);
+    int vec_idx_in_row = load_idx % (BK / vec_unit);
+    int smem_k_col_start = vec_idx_in_row * vec_unit;
 
-    int smem_k_row = smem_k_row_base + row_group_id;
-    int smem_k_col_start =
-        vec_in_row_idx * vec_unit;  // 注意 K 的 smem 也是 [BN][BK]
+    // 2. 计算对应的全局内存读取地址 (使用 K 的起始块和 stride)
+    int global_k_seq = block_k_seq_start + smem_k_row;  // <<< 使用 K 的起始行
+    int global_k_dim_vec_start = k_tile_start + smem_k_col_start;
 
-    // 检查计算出的 smem 行是否仍在 smemK 的有效范围内 (BN)
-    if (smem_k_row < BN) {
-      // 2. 计算对应的全局内存读取地址 (使用 K 的参数)
-      int global_k_seq = block_k_seq_start + smem_k_row;  // <<< 使用 K 的起始行
-      int global_k_dim_vec_start =
-          k_tile_start + smem_k_col_start;  // <<< 同样沿 head_dim 读取
-
-      // 全局内存 K 读取指针基地址
-      const T *k_load_addr =
-          &k_head_ptr[global_k_seq * k_stride_seq + global_k_dim_vec_start];
-      // 共享内存 K 写入指针基地址
-      float *smem_k_write_addr =
-          &smemK[(ph) & 1][smem_k_row][smem_k_col_start];  // 写入 smemK
-
-      // 3. 严格边界检查 和 加载/写入 (使用 K 的边界: total_seq_len, head_dim)
-
-      // 检查全局 K 行索引是否有效
-      if (global_k_seq < total_seq_len) {  // 使用 K 的总长度
-        // 检查全局列起始索引是否有效
-        if (global_k_dim_vec_start < head_dim) {
-          bool full_vector_in_bounds =
-              (global_k_dim_vec_start + vec_unit <= head_dim);
-
-          if (full_vector_in_bounds) {
-            // --- 情况 A: 完整向量加载 ---
-            Vec<T, vec_unit> vk;
-            // 向量加载 (同 Q)
-            if constexpr (sizeof(T) * vec_unit == 16) {
-              *reinterpret_cast<float4 *>(&vk.t[0]) =
-                  *reinterpret_cast<const float4 *>(k_load_addr);
-            } else if constexpr (sizeof(T) * vec_unit == 8) {
-              *reinterpret_cast<float2 *>(&vk.t[0]) =
-                  *reinterpret_cast<const float2 *>(k_load_addr);
-            } else {
-#pragma unroll
-              for (int i = 0; i < vec_unit; ++i) vk.t[i] = k_load_addr[i];
-            }
+    // 3. 严格边界检查 和 加载/写入 (注意使用 total_seq_len)
+    if (global_k_seq < total_seq_len) {  // <<< 使用 K 的总长度
+      if (global_k_dim_vec_start + vec_unit - 1 < head_dim) {
+        // --- 情况 A: 完整向量加载 ---
+        Vec<T, vec_unit> vk;
+        vk.f4 = *reinterpret_cast<const float4 *>(
+            &k_head_ptr[global_k_seq * k_stride_seq + global_k_dim_vec_start]);
 
 // 水平写入 smemK
 #pragma unroll
-            for (int i = 0; i < vec_unit; ++i) {
-              if (smem_k_col_start + i < BK) {
-                smem_k_write_addr[i] = static_cast<float>(vk.t[i]);
-              }
-            }
-          } else {
-// --- 情况 B: 部分向量加载 ---
-#pragma unroll
-            for (int i = 0; i < vec_unit; ++i) {
-              int current_smem_col = smem_k_col_start + i;
-              if (current_smem_col < BK) {
-                int current_global_dim = global_k_dim_vec_start + i;
-                if (current_global_dim < head_dim) {
-                  T element =
-                      k_load_addr[i];  // k_head_ptr[global_k_seq * k_stride_seq
-                                       // + current_global_dim];
-                  smem_k_write_addr[i] = static_cast<float>(element);
-                } else {
-                  smem_k_write_addr[i] = 0.0f;
-                }
-              }
-            }
-          }
-        } else {
-// --- 情况 C: 向量起始位置越界 (K) ---
-#pragma unroll
-          for (int i = 0; i < vec_unit; ++i) {
-            if (smem_k_col_start + i < BK) {
-              smem_k_write_addr[i] = 0.0f;
-            }
+        for (int i = 0; i < vec_unit; ++i) {
+          if (smem_k_col_start + i < BK) {
+            smemK[ph & 1][smem_k_row][smem_k_col_start + i] =
+                static_cast<float>(vk.t[i]);
           }
         }
       } else {
-// --- 情况 D: 整行无效 (K) ---
+// --- 情况 B: 部分向量加载 ---
 #pragma unroll
         for (int i = 0; i < vec_unit; ++i) {
-          if (smem_k_col_start + i < BK) {
-            smem_k_write_addr[i] = 0.0f;
+          int current_smem_col = smem_k_col_start + i;
+          if (current_smem_col < BK) {
+            int current_global_dim = k_tile_start + current_smem_col;
+            if (current_global_dim < head_dim) {
+              T element =
+                  k_head_ptr[global_k_seq * k_stride_seq + current_global_dim];
+              smemK[ph & 1][smem_k_row][current_smem_col] =
+                  static_cast<float>(element);
+            } else {
+              smemK[ph & 1][smem_k_row][current_smem_col] = 0.0f;
+            }
           }
         }
       }
-    }  // 结束对 smem_k_row < BN 的检查
-  }  // 结束 K 加载的 (潜在的) Grid-Stride 行循环
+    } else {
+// --- 情况 C: 整行无效 (for K) ---
+#pragma unroll
+      for (int i = 0; i < vec_unit; ++i) {
+        int current_smem_col = smem_k_col_start + i;
+        if (current_smem_col < BK) {
+          smemK[ph & 1][smem_k_row][current_smem_col] = 0.0f;
+        }
+      }
+    }
+  }  // 结束 K 加载循环
 
   // --- 同步：确保所有线程完成 Q 和 K 的共享内存加载 ---
   __syncthreads();
@@ -438,228 +406,138 @@ __global__ void gqa_gemm_kernel_v2(
   for (k_tile_start = BK; k_tile_start <= head_dim; k_tile_start += BK) {
     ph ^= 1;
 #pragma unroll 1  // 通常不对 grid-stride loop 做完全展开
-    for (int smem_q_row_base = 0; smem_q_row_base < BM;
-         smem_q_row_base += blockDim.x / VEC_LOADS_PER_ROW) {
-      // 1. 计算当前线程 `tid` 负责加载哪一行 (`smem_q_row`) 的哪一个向量
-      // (`vec_in_row_idx`)
+    for (int load_idx = tid; load_idx < BM * (BK / vec_unit);
+         load_idx += blockDim.x) {
+      // 1. 计算此向量在 smemQ 中的目标行和起始列
+      int smem_q_row = load_idx / (BK / vec_unit);
+      int vec_idx_in_row = load_idx % (BK / vec_unit);
+      int smem_q_col_start = vec_idx_in_row * vec_unit;
 
-      // vec_in_row_idx: 本线程负责加载其目标行内的第几个向量 (沿 BK 维度)
-      int vec_in_row_idx = tid % VEC_LOADS_PER_ROW;
-      // row_group_id: 本线程属于哪个“行加载组” (一个组负责加载一行)
-      int row_group_id = tid / VEC_LOADS_PER_ROW;
+      // 2. 计算对应的全局内存读取地址
+      int global_q_seq = block_q_seq_start + smem_q_row;  // 全局行
+      int global_q_dim_vec_start =
+          k_tile_start + smem_q_col_start;  // 全局列 (向量起点)
 
-      // smem_q_row: 计算本线程要写入的共享内存目标行索引
-      int smem_q_row = smem_q_row_base + row_group_id;
-      // smem_q_col_start: 计算本线程要写入的共享内存起始列索引 (向量的起点)
-      int smem_q_col_start = vec_in_row_idx * vec_unit;
+      // 3. 严格边界检查 和 加载/写入
+      if (global_q_seq < seq_len) {
+        // 行有效，检查列
+        if (global_q_dim_vec_start + vec_unit - 1 < head_dim) {
+          // --- 情况 A: 完整向量在边界内，直接向量化加载 ---
+          Vec<T, vec_unit> vq;
+          vq.f4 = *reinterpret_cast<const float4 *>(
+              &q_head_ptr[global_q_seq * q_stride_seq +
+                          global_q_dim_vec_start]);
 
-      // 检查计算出的 smem 行是否仍在 smemQ 的有效范围内 (BM)
-      if (smem_q_row < BM) {
-        // 2. 计算对应的全局内存读取地址
-
-        // global_q_seq: 要读取的全局内存 Q 的行索引 (序列维度)
-        int global_q_seq = block_q_seq_start + smem_q_row;
-        // global_q_dim_vec_start: 要读取的全局内存 Q 的列起始索引 (head_dim
-        // 维度, 向量起点)
-        // *** 这是实现合并访问的关键 ***
-        // 同一个 row_group_id (加载同一行的线程) 会有相同的 global_q_seq,
-        // 而不同的 vec_in_row_idx 会使得 global_q_dim_vec_start 连续变化
-        // (步长为 vec_unit), 从而访问同一全局内存行内的连续数据。
-        int global_q_dim_vec_start = k_tile_start + smem_q_col_start;
-
-        // 全局内存读取指针的基地址 (指向向量的第一个元素)
-        const T *q_load_addr =
-            &q_head_ptr[global_q_seq * q_stride_seq + global_q_dim_vec_start];
-        // 共享内存写入指针的基地址
-        float *smem_q_write_addr =
-            &smemQ[(ph) & 1][smem_q_row][smem_q_col_start];
-
-        // 3. 严格边界检查 和 加载/写入
-
-        // 检查全局行索引是否有效
-        if (global_q_seq < seq_len) {
-          // 检查全局列起始索引是否有效 (向量起点不能越界)
-          // 注意：这里检查的是向量起点，完整性在后面检查
-          if (global_q_dim_vec_start < head_dim) {
-            // 检查整个向量是否完全在 head_dim 边界内
-            bool full_vector_in_bounds =
-                (global_q_dim_vec_start + vec_unit <= head_dim);
-
-            if (full_vector_in_bounds) {
-              // --- 情况 A: 完整向量在边界内，直接向量化加载 ---
-              Vec<T, vec_unit> vq;
-              // 使用 reinterpret_cast 进行向量加载 (需要确保地址对齐)
-              // 对于 float, 使用 float4; 对于 half/bfloat16, 使用 int 或 short
-              // 的向量类型 (如 int2, short4) 这里用 float4 作为示例，需要根据 T
-              // 和 vec_unit 调整
-              if constexpr (sizeof(T) * vec_unit ==
-                            16) {  // e.g., float4 or bf16/fp16 x 8
-                *reinterpret_cast<float4 *>(&vq.t[0]) =
-                    *reinterpret_cast<const float4 *>(q_load_addr);
-              } else if constexpr (sizeof(T) * vec_unit ==
-                                   8) {  // e.g., float2 or bf16/fp16 x 4
-                *reinterpret_cast<float2 *>(&vq.t[0]) =
-                    *reinterpret_cast<const float2 *>(q_load_addr);
-              } else {  // 其他情况或需要更通用的加载
-// vq.load(q_load_addr); // 假设有通用加载方法
-// 或者 fallback 到标量加载
+// 水平写入 smemQ
 #pragma unroll
-                for (int i = 0; i < vec_unit; ++i) vq.t[i] = q_load_addr[i];
-              }
-
-// 水平写入 smemQ (向量 -> 标量分散写入)
-#pragma unroll
-              for (int i = 0; i < vec_unit; ++i) {
-                // 如果 BK 能被 vec_unit 整除, smem 列边界检查理论上可以省略
-                // 但加上更安全，特别是处理 BK 不是 vec_unit 倍数的情况
-                // (如果允许)
-                if (smem_q_col_start + i < BK) {
-                  smem_q_write_addr[i] = static_cast<float>(vq.t[i]);
-                }
-              }
-            } else {
-// --- 情况 B: 向量跨越 head_dim 边界，处理部分加载 (Tail case) ---
-#pragma unroll
-              for (int i = 0; i < vec_unit; ++i) {
-                int current_smem_col = smem_q_col_start + i;
-                // 检查共享内存列边界
-                if (current_smem_col < BK) {
-                  int current_global_dim = global_q_dim_vec_start + i;
-                  // 检查全局内存列边界
-                  if (current_global_dim < head_dim) {
-                    // 只加载和写入在 head_dim 内的部分 (标量加载)
-                    T element =
-                        q_load_addr[i];  // q_head_ptr[global_q_seq *
-                                         // q_stride_seq + current_global_dim];
-                    smem_q_write_addr[i] = static_cast<float>(element);
-                  } else {
-                    // 超出 head_dim 的部分在 smem 中补零
-                    smem_q_write_addr[i] = 0.0f;
-                  }
-                }
-              }
-            }
-          } else {
-// --- 情况 C: 向量的起始位置已经超出了 head_dim ---
-// 将 smemQ 中对应的整个向量位置都置零
-#pragma unroll
-            for (int i = 0; i < vec_unit; ++i) {
-              if (smem_q_col_start + i < BK) {  // 检查 smem 列边界
-                smem_q_write_addr[i] = 0.0f;
-              }
+          for (int i = 0; i < vec_unit; ++i) {
+            // 但加上更安全)
+            if (smem_q_col_start + i < BK) {
+              smemQ[ph & 1][smem_q_row][smem_q_col_start + i] =
+                  static_cast<float>(vq.t[i]);
             }
           }
         } else {
-// --- 情况 D: 整行无效 (global_q_seq >= seq_len) ---
-// 将 smemQ 中对应的整个向量位置都置零
+// --- 情况 B: 向量跨越 head_dim 边界，处理部分加载 ---
 #pragma unroll
           for (int i = 0; i < vec_unit; ++i) {
-            if (smem_q_col_start + i < BK) {  // 检查 smem 列边界
-              smem_q_write_addr[i] = 0.0f;
+            int current_smem_col = smem_q_col_start + i;
+            if (current_smem_col < BK) {  // 检查 smem 列边界
+              int current_global_dim = k_tile_start + current_smem_col;
+              if (current_global_dim < head_dim) {  // 检查全局列边界
+                // 只加载和写入在 head_dim 内的部分
+                T element = q_head_ptr[global_q_seq * q_stride_seq +
+                                       current_global_dim];
+                smemQ[ph & 1][smem_q_row][current_smem_col] =
+                    static_cast<float>(element);
+              } else {
+                // 超出 head_dim 的部分在 smem 中补零
+                smemQ[ph & 1][smem_q_row][current_smem_col] = 0.0f;
+              }
             }
           }
         }
-      }  // 结束对 smem_q_row < BM 的检查
-    }  // 结束 Q 加载的 (潜在的) Grid-Stride 行循环
-
-    // --- 开始加载 K 到 smemK ---
-    // 使用与 Q 加载完全相同的逻辑结构，但替换为 K 的参数
-
-#pragma unroll 1
-    for (int smem_k_row_base = 0; smem_k_row_base < BN;
-         smem_k_row_base += blockDim.x / VEC_LOADS_PER_ROW_K) {
-      // 1. 计算当前线程 `tid` 负责加载 K 的哪一行/向量
-      int vec_in_row_idx = tid % VEC_LOADS_PER_ROW_K;
-      int row_group_id = tid / VEC_LOADS_PER_ROW_K;
-
-      int smem_k_row = smem_k_row_base + row_group_id;
-      int smem_k_col_start =
-          vec_in_row_idx * vec_unit;  // 注意 K 的 smem 也是 [BN][BK]
-
-      // 检查计算出的 smem 行是否仍在 smemK 的有效范围内 (BN)
-      if (smem_k_row < BN) {
-        // 2. 计算对应的全局内存读取地址 (使用 K 的参数)
-        int global_k_seq =
-            block_k_seq_start + smem_k_row;  // <<< 使用 K 的起始行
-        int global_k_dim_vec_start =
-            k_tile_start + smem_k_col_start;  // <<< 同样沿 head_dim 读取
-
-        // 全局内存 K 读取指针基地址
-        const T *k_load_addr =
-            &k_head_ptr[global_k_seq * k_stride_seq + global_k_dim_vec_start];
-        // 共享内存 K 写入指针基地址
-        float *smem_k_write_addr =
-            &smemK[(ph) & 1][smem_k_row][smem_k_col_start];  // 写入 smemK
-
-        // 3. 严格边界检查 和 加载/写入 (使用 K 的边界: total_seq_len, head_dim)
-
-        // 检查全局 K 行索引是否有效
-        if (global_k_seq < total_seq_len) {  // <<< 使用 K 的总长度
-          // 检查全局列起始索引是否有效
-          if (global_k_dim_vec_start < head_dim) {
-            bool full_vector_in_bounds =
-                (global_k_dim_vec_start + vec_unit <= head_dim);
-
-            if (full_vector_in_bounds) {
-              // --- 情况 A: 完整向量加载 ---
-              Vec<T, vec_unit> vk;
-              // 向量加载 (同 Q)
-              if constexpr (sizeof(T) * vec_unit == 16) {
-                *reinterpret_cast<float4 *>(&vk.t[0]) =
-                    *reinterpret_cast<const float4 *>(k_load_addr);
-              } else if constexpr (sizeof(T) * vec_unit == 8) {
-                *reinterpret_cast<float2 *>(&vk.t[0]) =
-                    *reinterpret_cast<const float2 *>(k_load_addr);
-              } else {
+      } else {
+// --- 情况 C: 整行无效 (global_q_seq >= seq_len) ---
+// 将 smemQ 中对应的向量位置全部置零
 #pragma unroll
-                for (int i = 0; i < vec_unit; ++i) vk.t[i] = k_load_addr[i];
-              }
+        for (int i = 0; i < vec_unit; ++i) {
+          int current_smem_col = smem_q_col_start + i;
+          if (current_smem_col < BK) {  // 检查 smem 列边界
+            smemQ[ph & 1][smem_q_row][current_smem_col] = 0.0f;
+          }
+        }
+      }
+    }  // 结束 Q 加载循环
+
+// --- 开始加载 K 到 smemK ---
+// 使用与 Q 加载完全相同的逻辑结构，但替换为 K 的参数
+
+// VEC_LOADS_PER_ROW_K: K 的共享内存行需要多少向量加载 (BK 维度)
+
+// const int THREADS_PER_ROW_LOAD_GROUP_K = blockDim.x / VEC_LOADS_PER_ROW_K; //
+// 理想分组
+
+// --- 使用 Grid-Stride Loop (如果需要) 遍历 smemK 的行 ---
+#pragma unroll(1)
+    // 循环遍历 K tile 中的所有 *向量* (注意维度是 BN)
+    for (int load_idx = tid; load_idx < BN * (BK / vec_unit);
+         load_idx += blockDim.x) {
+      // 1. 计算此向量在 smemK 中的目标行和起始列
+      int smem_k_row = load_idx / (BK / vec_unit);
+      int vec_idx_in_row = load_idx % (BK / vec_unit);
+      int smem_k_col_start = vec_idx_in_row * vec_unit;
+
+      // 2. 计算对应的全局内存读取地址 (使用 K 的起始块和 stride)
+      int global_k_seq = block_k_seq_start + smem_k_row;  // <<< 使用 K 的起始行
+      int global_k_dim_vec_start = k_tile_start + smem_k_col_start;
+
+      // 3. 严格边界检查 和 加载/写入 (注意使用 total_seq_len)
+      if (global_k_seq < total_seq_len) {  // <<< 使用 K 的总长度
+        if (global_k_dim_vec_start + vec_unit - 1 < head_dim) {
+          // --- 情况 A: 完整向量加载 ---
+          Vec<T, vec_unit> vk;
+          vk.f4 = *reinterpret_cast<const float4 *>(
+              &k_head_ptr[global_k_seq * k_stride_seq +
+                          global_k_dim_vec_start]);
 
 // 水平写入 smemK
 #pragma unroll
-              for (int i = 0; i < vec_unit; ++i) {
-                if (smem_k_col_start + i < BK) {
-                  smem_k_write_addr[i] = static_cast<float>(vk.t[i]);
-                }
-              }
-            } else {
-// --- 情况 B: 部分向量加载 ---
-#pragma unroll
-              for (int i = 0; i < vec_unit; ++i) {
-                int current_smem_col = smem_k_col_start + i;
-                if (current_smem_col < BK) {
-                  int current_global_dim = global_k_dim_vec_start + i;
-                  if (current_global_dim < head_dim) {
-                    T element =
-                        k_load_addr[i];  // k_head_ptr[global_k_seq *
-                                         // k_stride_seq + current_global_dim];
-                    smem_k_write_addr[i] = static_cast<float>(element);
-                  } else {
-                    smem_k_write_addr[i] = 0.0f;
-                  }
-                }
-              }
-            }
-          } else {
-// --- 情况 C: 向量起始位置越界 (K) ---
-#pragma unroll
-            for (int i = 0; i < vec_unit; ++i) {
-              if (smem_k_col_start + i < BK) {
-                smem_k_write_addr[i] = 0.0f;
-              }
+          for (int i = 0; i < vec_unit; ++i) {
+            if (smem_k_col_start + i < BK) {
+              smemK[ph & 1][smem_k_row][smem_k_col_start + i] =
+                  static_cast<float>(vk.t[i]);
             }
           }
         } else {
-// --- 情况 D: 整行无效 (K) ---
+// --- 情况 B: 部分向量加载 ---
 #pragma unroll
           for (int i = 0; i < vec_unit; ++i) {
-            if (smem_k_col_start + i < BK) {
-              smem_k_write_addr[i] = 0.0f;
+            int current_smem_col = smem_k_col_start + i;
+            if (current_smem_col < BK) {
+              int current_global_dim = k_tile_start + current_smem_col;
+              if (current_global_dim < head_dim) {
+                T element = k_head_ptr[global_k_seq * k_stride_seq +
+                                       current_global_dim];
+                smemK[ph & 1][smem_k_row][current_smem_col] =
+                    static_cast<float>(element);
+              } else {
+                smemK[ph & 1][smem_k_row][current_smem_col] = 0.0f;
+              }
             }
           }
         }
-      }  // 结束对 smem_k_row < BN 的检查
-    }  // 结束 K 加载的 (潜在的) Grid-Stride 行循环
+      } else {
+// --- 情况 C: 整行无效 (for K) ---
+#pragma unroll
+        for (int i = 0; i < vec_unit; ++i) {
+          int current_smem_col = smem_k_col_start + i;
+          if (current_smem_col < BK) {
+            smemK[ph & 1][smem_k_row][current_smem_col] = 0.0f;
+          }
+        }
+      }
+    }
 
 #pragma unroll
     for (int k = 0; k < BK; ++k) {  // 在块内遍历 K 维度
