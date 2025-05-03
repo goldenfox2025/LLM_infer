@@ -157,7 +157,7 @@ void matmul_quantized_gemv(const Tensor<T>& input,
                              std::to_string(PACK_FACTOR) + ")");
   }
 
-  int G = K / group_size;
+  // int G = K / group_size;
   int K_PACKED = K / PACK_FACTOR;
 
   if (K_PACKED_w != K_PACKED) {
@@ -173,22 +173,23 @@ void matmul_quantized_gemv(const Tensor<T>& input,
 
   using S = float;
 
-#ifndef NDEBUG
-  std::cout << "--- matmul_quantized_gemv ---" << std::endl;
-  std::cout << "Input sizes: " << vec_to_string(input.sizes()) << std::endl;
-  std::cout << "QWeight sizes: " << vec_to_string(qweight.sizes()) << std::endl;
-  std::cout << "Scales sizes: " << vec_to_string(scales.sizes()) << std::endl;
-  std::cout << "Zeros sizes: " << vec_to_string(zeros.sizes()) << std::endl;
-  if (bias)
-    std::cout << "Bias sizes: " << vec_to_string(bias->sizes()) << std::endl;
-  std::cout << "M=" << M << ", K=" << K << ", N=" << N
-            << ", group_size=" << group_size << ", G=" << G
-            << ", K/8=" << K_PACKED << ", G/8=" << G_PACKED
-            << ", G_padded=" << G_PADDED << std::endl;
-  std::cout << "Launching Kernel with Grid: (" << num_blocks.x << ", "
-            << num_blocks.y << "), Block: (" << threads_per_block.x << ")"
-            << std::endl;
-#endif
+  // #ifndef NDEBUG
+  //   std::cout << "--- matmul_quantized_gemv ---" << std::endl;
+  //   std::cout << "Input sizes: " << vec_to_string(input.sizes()) <<
+  //   std::endl; std::cout << "QWeight sizes: " <<
+  //   vec_to_string(qweight.sizes()) << std::endl; std::cout << "Scales sizes:
+  //   " << vec_to_string(scales.sizes()) << std::endl; std::cout << "Zeros
+  //   sizes: " << vec_to_string(zeros.sizes()) << std::endl; if (bias)
+  //     std::cout << "Bias sizes: " << vec_to_string(bias->sizes()) <<
+  //     std::endl;
+  //   std::cout << "M=" << M << ", K=" << K << ", N=" << N
+  //             << ", group_size=" << group_size << ", G=" << G
+  //             << ", K/8=" << K_PACKED << ", G/8=" << G_PACKED
+  //             << ", G_padded=" << G_PADDED << std::endl;
+  //   std::cout << "Launching Kernel with Grid: (" << num_blocks.x << ", "
+  //             << num_blocks.y << "), Block: (" << threads_per_block.x << ")"
+  //             << std::endl;
+  // #endif
 
   matmul_awq_gemv_kernel<T, S, TILE_K, BLOCK_N>
       <<<num_blocks, threads_per_block, 0, stream>>>(

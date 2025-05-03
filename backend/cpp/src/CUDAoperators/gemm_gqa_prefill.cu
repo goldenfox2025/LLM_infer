@@ -321,11 +321,6 @@ __global__ void gqa_gemm_kernel_v2(
 // --- 开始加载 K 到 smemK ---
 // 使用与 Q 加载完全相同的逻辑结构，但替换为 K 的参数
 
-// VEC_LOADS_PER_ROW_K: K 的共享内存行需要多少向量加载 (BK 维度)
-
-// const int THREADS_PER_ROW_LOAD_GROUP_K = blockDim.x / VEC_LOADS_PER_ROW_K; //
-// 理想分组
-
 // --- 使用 Grid-Stride Loop (如果需要) 遍历 smemK 的行 ---
 #pragma unroll(1)
     // 循环遍历 K tile 中的所有 *向量* (注意维度是 BN)

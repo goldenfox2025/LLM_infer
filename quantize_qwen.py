@@ -77,7 +77,7 @@ def main():
         "zero_point": True,
         "q_group_size": 128,
         "w_bit": 4,
-        "version": "GEMV"  
+        # "version": "GEMV"  
     }
     # ---------------------
 
