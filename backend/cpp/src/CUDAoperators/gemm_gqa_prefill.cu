@@ -247,9 +247,6 @@ __global__ void gqa_gemm_kernel_v2(
     }
   }  // 结束 K 加载循环
 
-  // --- 同步：确保所有线程完成 Q 和 K 的共享内存加载 ---
-  __syncthreads();
-
   // 根据BK遍历 MK NK 的 K 维度。
   for (k_tile_start = BK; k_tile_start <= head_dim; k_tile_start += BK) {
     ph ^= 1;
@@ -381,7 +378,7 @@ __global__ void gqa_gemm_kernel_v2(
         }
       }
     }
-
+    __syncthreads();
 #pragma unroll
     for (int k = 0; k < BK; ++k) {  // 在块内遍历 K 维度
 #pragma unroll
@@ -397,9 +394,8 @@ __global__ void gqa_gemm_kernel_v2(
         }
       }
     }
-    __syncthreads();
   }
-
+  __syncthreads();
   // --- 缩放结果并写回全局内存 ---
   // scores 布局: [seq_len, n_q_heads, total_seq_len]
   int scores_stride_seq = n_q_heads * total_seq_len;

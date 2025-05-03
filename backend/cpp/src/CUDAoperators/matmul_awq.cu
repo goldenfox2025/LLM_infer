@@ -63,7 +63,6 @@ constexpr int PACK_FACTOR = 32 / BITS;
 
 __constant__ const int LOGICAL_TO_PHYSICAL_INNER_IDX[PACK_FACTOR] = {
     0, 4, 1, 5, 2, 6, 3, 7};
-
 template <typename T, typename ScaleType, int BK_GEMV = 32, int BN_GEMV = 128,
           int THREADS_PER_BLOCK_GEMV = 128>
 __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
@@ -81,31 +80,90 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
                 "Need enough threads for packed N");
 
   constexpr int PADDING_A_GEMV = 1;
-  __shared__ T smemA[BK_GEMV + PADDING_A_GEMV];
+  __shared__ T smemA[2][BK_GEMV + PADDING_A_GEMV];
 
   constexpr int PADDING_B_GEMV = 0;
-  __shared__ uint32_t smemB[BK_GEMV * (patch_N + PADDING_B_GEMV)];
+  __shared__ uint32_t smemB[2][BK_GEMV * (patch_N + PADDING_B_GEMV)];
 
   constexpr int PADDING_Z_GEMV = 0;
-  __shared__ uint32_t smemZeros[patch_N + PADDING_Z_GEMV];
+  __shared__ uint32_t smemZeros[2][patch_N + PADDING_Z_GEMV];
 
-  constexpr int PADDING_S2D_GEMV = 1;
-  __shared__ ScaleType smemScales[PACK_FACTOR][patch_N + PADDING_S2D_GEMV];
+  constexpr int PADDING_S2D_GEMV = 0;
+  __shared__ ScaleType smemScales[2][PACK_FACTOR][patch_N + PADDING_S2D_GEMV];
 
   float acc = 0.0f;
 
   int tid = threadIdx.x;
+
   int n_local = tid;
 
-  for (int tile_k_base = 0; tile_k_base < K; tile_k_base += BK_GEMV) {
+  int ph = 0;
+  int tile_k_base = 0;
+#pragma unroll
+  for (int k_offset = tid; k_offset < BK_GEMV;
+       k_offset += THREADS_PER_BLOCK_GEMV) {
+    int k_global = tile_k_base + k_offset;
+    if (k_global < K) {
+      smemA[ph][k_offset] = inp[k_global];  // Use ph
+    } else {
+      smemA[ph][k_offset] = static_cast<T>(0.0f);  // Use ph
+    }
+  }
+
+#pragma unroll
+  for (int load_idx = tid; load_idx < BK_GEMV * patch_N;
+       load_idx += THREADS_PER_BLOCK_GEMV) {
+    int load_row = load_idx / patch_N;
+    int load_col = load_idx % patch_N;
+    int global_n_packed = B_block_start / PACK_FACTOR + load_col;
+    int k_global = tile_k_base + load_row;
+    uint32_t qwt_val = 0;
+    if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
+      qwt_val = reinterpret_cast<const uint32_t *>(
+          qwt)[k_global * (N / PACK_FACTOR) + global_n_packed];
+    }
+
+    smemB[ph][load_row * (patch_N + PADDING_B_GEMV) + load_col] = qwt_val;
+  }
+
+  int current_tile_group_idx = tile_k_base / group_size;
+  const int num_groups = (K + group_size - 1) / group_size;
+#pragma unroll
+  for (int i = tid; i < patch_N; i += THREADS_PER_BLOCK_GEMV) {
+    int n_packed_global = B_block_start / PACK_FACTOR + i;
+    uint32_t zos_val = 0;
+    if (current_tile_group_idx < num_groups &&
+        n_packed_global < (N / PACK_FACTOR)) {
+      zos_val = reinterpret_cast<const uint32_t *>(
+          zos)[current_tile_group_idx * (N / PACK_FACTOR) + n_packed_global];
+    }
+    smemZeros[ph][i] = zos_val;
+  }
+
+#pragma unroll
+  for (int i = tid; i < BN_GEMV; i += THREADS_PER_BLOCK_GEMV) {
+    int n_global = B_block_start + i;
+    ScaleType scl_val = static_cast<ScaleType>(0.0f);
+    if (current_tile_group_idx < num_groups && n_global < N) {
+      scl_val = scl[current_tile_group_idx * N + n_global];
+    }
+    int scale_row = i % PACK_FACTOR;
+    int scale_col = i / PACK_FACTOR;
+    if (scale_col < patch_N) {
+      smemScales[ph][scale_row][scale_col] = scl_val;
+    }
+  }
+  ph = 1 - ph;
+  __syncthreads();
+  for (tile_k_base = BK_GEMV; tile_k_base <= K; tile_k_base += BK_GEMV) {
 #pragma unroll
     for (int k_offset = tid; k_offset < BK_GEMV;
          k_offset += THREADS_PER_BLOCK_GEMV) {
       int k_global = tile_k_base + k_offset;
       if (k_global < K) {
-        smemA[k_offset] = inp[k_global];
+        smemA[ph][k_offset] = inp[k_global];
       } else {
-        smemA[k_offset] = static_cast<T>(0.0f);
+        smemA[ph][k_offset] = static_cast<T>(0.0f);
       }
     }
 
@@ -120,8 +178,10 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
       if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
         qwt_val = qwt[k_global * (N / PACK_FACTOR) + global_n_packed];
       }
-      smemB[load_row * patch_N + load_col] = qwt_val;
+
+      smemB[ph][load_row * (patch_N + PADDING_B_GEMV) + load_col] = qwt_val;
     }
+
     int current_tile_group_idx = tile_k_base / group_size;
     const int num_groups = (K + group_size - 1) / group_size;
 #pragma unroll
@@ -133,7 +193,7 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
         zos_val =
             zos[current_tile_group_idx * (N / PACK_FACTOR) + n_packed_global];
       }
-      smemZeros[i] = zos_val;
+      smemZeros[ph][i] = zos_val;
     }
 #pragma unroll
     for (int i = tid; i < BN_GEMV; i += THREADS_PER_BLOCK_GEMV) {
@@ -145,21 +205,22 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
       int scale_row = i % PACK_FACTOR;
       int scale_col = i / PACK_FACTOR;
       if (scale_col < patch_N) {
-        smemScales[scale_row][scale_col] = scl_val;
+        smemScales[ph][scale_row][scale_col] = scl_val;
       }
     }
 
     __syncthreads();
 #pragma unroll(4)
     for (int bk = 0; bk < BK_GEMV; ++bk) {
-      float inp_val = static_cast<float>(smemA[bk]);
+      float inp_val = static_cast<float>(smemA[ph ^ 1][bk]);
 
       int n_packed_local = n_local / PACK_FACTOR;
       int j_inner = n_local % PACK_FACTOR;
       // if (n_packed_local < patch_N) {
-      //   uint32_t regB_packed = smemB[bk * patch_N + n_packed_local];
-      //   uint32_t regZ_packed = smemZeros[n_packed_local];
-      //   ScaleType regS = smemScales[j_inner][n_packed_local];
+      //   uint32_t regB_packed =
+      //       smemB[ph ^ 1][bk * (patch_N + PADDING_B_GEMV) + n_packed_local];
+      //   uint32_t regZ_packed = smemZeros[ph ^ 1][n_packed_local];
+      //   ScaleType regS = smemScales[ph ^ 1][j_inner][n_packed_local];
 
       //   int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
       //   int bit_shift = physical_inner_col_idx * BITS;
@@ -173,16 +234,15 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
 
       //   acc = __fmaf_rn(inp_val, dequant_w, acc);
       // }
-
       uint32_t regB_packed =
           (n_packed_local < patch_N)
-              ? smemB[bk * (patch_N + PADDING_B_GEMV) + n_packed_local]
+              ? smemB[ph ^ 1][bk * (patch_N + PADDING_B_GEMV) + n_packed_local]
               : 0;
       uint32_t regZ_packed =
-          (n_packed_local < patch_N) ? smemZeros[n_packed_local] : 0;
+          (n_packed_local < patch_N) ? smemZeros[ph ^ 1][n_packed_local] : 0;
 
       ScaleType regS = (n_packed_local < patch_N)
-                           ? smemScales[j_inner][n_packed_local]
+                           ? smemScales[ph ^ 1][j_inner][n_packed_local]
                            : static_cast<ScaleType>(0.0f);
 
       int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
@@ -195,7 +255,10 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
 
       acc = __fmaf_rn(inp_val, dequant_w, acc);
     }
+
+    ph = 1 - ph;
   }
+
   __syncthreads();
 
   int n_global = B_block_start + n_local;

@@ -13,7 +13,7 @@ cd build
 
 echo "🛠️  Running CMake..."
 cmake .. \
-  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_BUILD_TYPE=Debug \
   -Dpybind11_DIR="$(python3 -c 'import pybind11; print(pybind11.get_cmake_dir())')"
 
 echo "🔨 Building..."
