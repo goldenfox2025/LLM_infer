@@ -75,7 +75,7 @@ if [ -d "frontend" ]; then
     --set full
     --target-processes all
     --replay-mode kernel
-    --kernel-name 'matmul_awq_kernel_optimized'
+    --kernel-name 'matmul_awq_kernel_prefill_v1'
     python3 frontend/chat.py
     # ... chat.py 的参数 ...
     )
