@@ -1,6 +1,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 #include <stdint.h>
 
 #include <iomanip>
@@ -31,6 +32,7 @@ void debug_print_tensor(const Tensor<T> &tensor, const std::string &name,
   std::cout << "Tensor " << name << " " << format_sizes(tensor.sizes()) << ":"
             << std::endl;
   std::vector<T> host_data(tensor.numel());
+
   cudaMemcpy(host_data.data(), tensor.data_ptr(), tensor.numel() * sizeof(T),
              cudaMemcpyDeviceToHost);
   int num_to_print = std::min(static_cast<int>(tensor.numel()), max_elements);
@@ -62,214 +64,6 @@ constexpr int PACK_FACTOR = 32 / BITS;
 __constant__ const int LOGICAL_TO_PHYSICAL_INNER_IDX[PACK_FACTOR] = {
     0, 4, 1, 5, 2, 6, 3, 7};
 
-template <typename T, typename ScaleType, int TM = 8, int TN = 8, int BK = 32,
-          int BN = 64, int BM = 64>
-__global__ void matmul_awq_kernel_prefill_v1(
-    const T *__restrict__ inp, const int32_t *__restrict__ qwt,
-    const ScaleType *__restrict__ scl, const int32_t *__restrict__ zos,
-    T *__restrict__ out, const int M, const int K, const int N,
-    const int group_size, const T *__restrict__ bias) {
-  int A_stride_1 = K;
-
-  int A_block_start = blockIdx.x * BM;
-  int B_block_start = blockIdx.y * BN;
-  constexpr int patch_N = BN / PACK_FACTOR;
-
-  constexpr int PADDING_A = 1;
-  __shared__ T smemA[BM * (BK + PADDING_A)];
-
-  constexpr int PADDING_B = 0;
-  __shared__ uint32_t smemB[BK * (patch_N + PADDING_B)];
-
-  constexpr int PADDING_Z = 0;
-  __shared__ uint32_t smemZeros[patch_N + PADDING_Z];
-
-  constexpr int PADDING_S2D = 1;
-  __shared__ ScaleType smemScales[PACK_FACTOR][patch_N + PADDING_S2D];
-
-  constexpr int vec_unit = (sizeof(T) <= 8) ? (16 / sizeof(T)) : 1;
-  Vec<T, vec_unit> va;
-
-  float acc[TM][TN];
-#pragma unroll
-  for (int i = 0; i < TM; ++i) {
-#pragma unroll
-    for (int j = 0; j < TN; ++j) {
-      acc[i][j] = 0.0f;
-    }
-  }
-
-  constexpr int THREADS_N = BN / TN;
-  int thread_m_in_block = threadIdx.x / THREADS_N;
-  int thread_n_in_block = threadIdx.x % THREADS_N;
-
-  for (int tile_k_base = 0; tile_k_base < K; tile_k_base += BK) {
-#pragma unroll
-    for (int load_idx = threadIdx.x; load_idx < BM * BK / vec_unit;
-         load_idx += blockDim.x) {
-      int load_row = load_idx / (BK / vec_unit);
-      int load_col_vec = load_idx % (BK / vec_unit);
-      int load_col_base = load_col_vec * vec_unit;
-      int global_row = A_block_start + load_row;
-      int global_col_base = tile_k_base + load_col_base;
-
-      const T *inp_ptr = &inp[global_row * A_stride_1 + global_col_base];
-      T local_a[vec_unit];
-
-      if (global_row < M) {
-        if (global_col_base + vec_unit <= K) {
-          *reinterpret_cast<Vec<T, vec_unit> *>(local_a) =
-              *reinterpret_cast<const Vec<T, vec_unit> *>(inp_ptr);
-        } else {
-#pragma unroll
-          for (int v = 0; v < vec_unit; ++v) {
-            if (global_col_base + v < K) {
-              local_a[v] = inp[global_row * A_stride_1 + (global_col_base + v)];
-            } else {
-              local_a[v] = static_cast<T>(0.0f);
-            }
-          }
-        }
-      } else {
-#pragma unroll
-        for (int v = 0; v < vec_unit; ++v) {
-          local_a[v] = static_cast<T>(0.0f);
-        }
-      }
-
-#pragma unroll
-      for (int v = 0; v < vec_unit; ++v) {
-        if (load_col_base + v < BK) {
-          smemA[load_row * (BK + PADDING_A) + load_col_base + v] = local_a[v];
-        }
-      }
-    }
-
-#pragma unroll
-    for (int load_tid_idx = threadIdx.x; load_tid_idx < BK * patch_N;
-         load_tid_idx += blockDim.x) {
-      int load_row = load_tid_idx / patch_N;
-      int load_col = load_tid_idx % patch_N;
-      int global_n_packed = B_block_start / PACK_FACTOR + load_col;
-      int k_global = tile_k_base + load_row;
-      uint32_t qwt_val = 0;
-      if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
-        qwt_val = qwt[k_global * (N / PACK_FACTOR) + global_n_packed];
-      }
-      smemB[load_row * (patch_N + PADDING_B) + load_col] = qwt_val;
-    }
-
-    int current_tile_group_idx = tile_k_base / group_size;
-    const int num_groups = (K + group_size - 1) / group_size;
-#pragma unroll
-    for (int i = threadIdx.x; i < patch_N; i += blockDim.x) {
-      int n_packed_global = B_block_start / PACK_FACTOR + i;
-      uint32_t zos_val = 0;
-      if (current_tile_group_idx < num_groups &&
-          n_packed_global < (N / PACK_FACTOR)) {
-        zos_val =
-            zos[current_tile_group_idx * (N / PACK_FACTOR) + n_packed_global];
-      }
-      smemZeros[i] = zos_val;
-    }
-
-#pragma unroll
-    for (int i = threadIdx.x; i < BN; i += blockDim.x) {
-      int n_global = B_block_start + i;
-      ScaleType scl_val = static_cast<ScaleType>(0.0f);
-      if (current_tile_group_idx < num_groups && n_global < N) {
-        scl_val = scl[current_tile_group_idx * N + n_global];
-      }
-      int scale_row = i % PACK_FACTOR;
-      int scale_col = i / PACK_FACTOR;
-      if (scale_col < patch_N) {
-        smemScales[scale_row][scale_col] = scl_val;
-      }
-    }
-
-    __syncthreads();
-
-    ScaleType regS_unpacked[PACK_FACTOR];
-
-#pragma unroll(4)
-    for (int bk = 0; bk < BK; ++bk) {
-      T regA[TM];
-#pragma unroll
-      for (int i = 0; i < TM; ++i) {
-        int m_local = thread_m_in_block * TM + i;
-        regA[i] = (m_local < BM) ? smemA[m_local * (BK + PADDING_A) + bk]
-                                 : static_cast<T>(0.0f);
-      }
-
-#pragma unroll
-      for (int j_packed_offset = 0; j_packed_offset < TN / PACK_FACTOR;
-           ++j_packed_offset) {
-        int n_packed_local =
-            thread_n_in_block * (TN / PACK_FACTOR) + j_packed_offset;
-
-        uint32_t regB_packed =
-            (n_packed_local < patch_N)
-                ? smemB[bk * (patch_N + PADDING_B) + n_packed_local]
-                : 0;
-        uint32_t regZ_packed =
-            (n_packed_local < patch_N) ? smemZeros[n_packed_local] : 0;
-
-#pragma unroll
-        for (int j_inner_load = 0; j_inner_load < PACK_FACTOR; ++j_inner_load) {
-          if (n_packed_local < patch_N) {
-            regS_unpacked[j_inner_load] =
-                smemScales[j_inner_load][n_packed_local];
-          } else {
-            regS_unpacked[j_inner_load] = static_cast<ScaleType>(0.0f);
-          }
-        }
-
-#pragma unroll
-        for (int j_inner = 0; j_inner < PACK_FACTOR; ++j_inner) {
-          ScaleType regS = regS_unpacked[j_inner];
-
-          int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
-          int bit_shift = physical_inner_col_idx * BITS;
-          uint32_t q_w = (regB_packed >> bit_shift) & 0x0F;
-          uint32_t q_z = (regZ_packed >> bit_shift) & 0x0F;
-          float scale_float = static_cast<float>(regS);
-          float dequant_w =
-              (static_cast<float>(q_w) - static_cast<float>(q_z)) * scale_float;
-
-          int acc_j_idx = j_packed_offset * PACK_FACTOR + j_inner;
-
-#pragma unroll
-          for (int i = 0; i < TM; ++i) {
-            float inp_val = static_cast<float>(regA[i]);
-            acc[i][acc_j_idx] =
-                __fmaf_rn(inp_val, dequant_w, acc[i][acc_j_idx]);
-          }
-        }
-      }
-    }
-
-    __syncthreads();
-  }
-
-#pragma unroll
-  for (int i = 0; i < TM; ++i) {
-    int m_global = A_block_start + thread_m_in_block * TM + i;
-    if (m_global < M) {
-#pragma unroll
-      for (int j = 0; j < TN; ++j) {
-        int n_global = B_block_start + thread_n_in_block * TN + j;
-        if (n_global < N) {
-          float acc_val = acc[i][j];
-          if (bias) {
-            acc_val += static_cast<float>(bias[n_global]);
-          }
-          out[m_global * N + n_global] = static_cast<T>(acc_val);
-        }
-      }
-    }
-  }
-}
-
 template <typename T, typename ScaleType, int BK_GEMV = 32, int BN_GEMV = 128,
           int THREADS_PER_BLOCK_GEMV = 128>
 __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
@@ -298,9 +92,6 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
   constexpr int PADDING_S2D_GEMV = 1;
   __shared__ ScaleType smemScales[PACK_FACTOR][patch_N + PADDING_S2D_GEMV];
 
-  constexpr int N_PER_THREAD = BN_GEMV / THREADS_PER_BLOCK_GEMV;
-  static_assert(N_PER_THREAD == 1,
-                "This kernel version assumes 1 N per thread");
   float acc = 0.0f;
 
   int tid = threadIdx.x;
@@ -329,7 +120,7 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
       if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
         qwt_val = qwt[k_global * (N / PACK_FACTOR) + global_n_packed];
       }
-      smemB[load_row * (patch_N + PADDING_B_GEMV) + load_col] = qwt_val;
+      smemB[load_row * patch_N + load_col] = qwt_val;
     }
     int current_tile_group_idx = tile_k_base / group_size;
     const int num_groups = (K + group_size - 1) / group_size;
@@ -359,13 +150,29 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
     }
 
     __syncthreads();
-
 #pragma unroll(4)
     for (int bk = 0; bk < BK_GEMV; ++bk) {
       float inp_val = static_cast<float>(smemA[bk]);
 
       int n_packed_local = n_local / PACK_FACTOR;
       int j_inner = n_local % PACK_FACTOR;
+      // if (n_packed_local < patch_N) {
+      //   uint32_t regB_packed = smemB[bk * patch_N + n_packed_local];
+      //   uint32_t regZ_packed = smemZeros[n_packed_local];
+      //   ScaleType regS = smemScales[j_inner][n_packed_local];
+
+      //   int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
+      //   int bit_shift = physical_inner_col_idx * BITS;
+      //   uint32_t q_w = (regB_packed >> bit_shift) & 0x0F;
+      //   uint32_t q_z = (regZ_packed >> bit_shift) & 0x0F;
+
+      //   float scale_float = static_cast<float>(regS);
+      //   float dequant_w =
+      //       (static_cast<float>(q_w) - static_cast<float>(q_z)) *
+      //       scale_float;
+
+      //   acc = __fmaf_rn(inp_val, dequant_w, acc);
+      // }
 
       uint32_t regB_packed =
           (n_packed_local < patch_N)
@@ -388,9 +195,8 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
 
       acc = __fmaf_rn(inp_val, dequant_w, acc);
     }
-
-    __syncthreads();
   }
+  __syncthreads();
 
   int n_global = B_block_start + n_local;
   if (n_global < N) {
@@ -399,6 +205,189 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
       final_val += static_cast<float>(bias[n_global]);
     }
     out[n_global] = static_cast<T>(final_val);
+  }
+}
+
+template <typename T, typename ScaleType, int BM = 64, int BN = 64, int BK = 32,
+          int WMMA_M = 16, int WMMA_N = 16, int WMMA_K = 16>
+__global__ void matmul_awq_kernel_prefill_wmma_v1(
+    const T *__restrict__ inp, const int32_t *__restrict__ qwt,
+    const ScaleType *__restrict__ scl, const int32_t *__restrict__ zos,
+    T *__restrict__ out, const int M, const int K, const int N,
+    const int group_size, const T *__restrict__ bias) {
+  static_assert(
+      std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>,
+      "WMMA kernel currently supports only half or bfloat16 inputs/outputs.");
+
+  static_assert(BM % WMMA_M == 0, "BM must be a multiple of WMMA_M");
+  static_assert(BN % WMMA_N == 0, "BN must be a multiple of WMMA_N");
+  static_assert(BK % WMMA_K == 0, "BK must be a multiple of WMMA_K");
+
+  using namespace nvcuda;
+  using FragmentA = wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, T,
+                                   wmma::row_major>;
+  using FragmentB = wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, T,
+                                   wmma::col_major>;
+  using FragmentC =
+      wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>;
+
+  constexpr int SMEM_A_PADDING = 8;
+  __shared__ T smemA[BM][BK + SMEM_A_PADDING];
+
+  constexpr int SMEM_B_PADDING = 8;
+  __shared__ T smemB_dequant[BN][BK + SMEM_B_PADDING];
+
+  constexpr int patch_N = BN / PACK_FACTOR;
+  __shared__ uint32_t smemB_packed[BK * patch_N];
+  __shared__ uint32_t smemZeros[patch_N];
+  __shared__ ScaleType smemScales[BN];
+
+  __shared__ float smem_out[BM][BN];
+
+  const int A_block_start = blockIdx.x * BM;
+  const int B_block_start = blockIdx.y * BN;
+
+  const int warp_id = threadIdx.x / 32;
+  // const int lane_id = threadIdx.x % 32;
+
+  // const int warps_per_block_m = BM / WMMA_M;
+  const int warps_per_block_n = BN / WMMA_N;
+
+  const int warp_m_id = warp_id / warps_per_block_n;
+  const int warp_n_id = warp_id % warps_per_block_n;
+
+  FragmentC fragC;
+  wmma::fill_fragment(fragC, 0.0f);
+
+  for (int tile_k_base = 0; tile_k_base < K; tile_k_base += BK) {
+#pragma unroll
+    for (int load_idx = threadIdx.x; load_idx < BM * BK;
+         load_idx += blockDim.x) {
+      int load_row = load_idx / BK;
+      int load_col = load_idx % BK;
+      int global_row = A_block_start + load_row;
+      int global_col = tile_k_base + load_col;
+
+      if (global_row < M && global_col < K) {
+        smemA[load_row][load_col] = inp[global_row * K + global_col];
+      } else {
+        smemA[load_row][load_col] = static_cast<T>(0.0f);
+      }
+    }
+
+#pragma unroll
+    for (int load_idx = threadIdx.x; load_idx < BK * patch_N;
+         load_idx += blockDim.x) {
+      int load_row_k = load_idx / patch_N;
+      int load_col_n_packed = load_idx % patch_N;
+      int global_n_packed = B_block_start / PACK_FACTOR + load_col_n_packed;
+      int k_global = tile_k_base + load_row_k;
+
+      uint32_t qwt_val = 0;
+      if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
+        qwt_val = qwt[k_global * (N / PACK_FACTOR) + global_n_packed];
+      }
+
+      smemB_packed[load_row_k * patch_N + load_col_n_packed] = qwt_val;
+    }
+
+    int current_tile_group_idx = tile_k_base / group_size;
+    const int num_groups = (K + group_size - 1) / group_size;
+
+#pragma unroll
+    for (int i = threadIdx.x; i < patch_N; i += blockDim.x) {
+      int n_packed_global = B_block_start / PACK_FACTOR + i;
+      uint32_t zos_val = 0;
+      if (current_tile_group_idx < num_groups &&
+          n_packed_global < (N / PACK_FACTOR)) {
+        zos_val =
+            zos[current_tile_group_idx * (N / PACK_FACTOR) + n_packed_global];
+      }
+      smemZeros[i] = zos_val;
+    }
+
+#pragma unroll
+    for (int i = threadIdx.x; i < BN; i += blockDim.x) {
+      int n_global = B_block_start + i;
+      ScaleType scl_val = static_cast<ScaleType>(0.0f);
+      if (current_tile_group_idx < num_groups && n_global < N) {
+        scl_val = scl[current_tile_group_idx * N + n_global];
+      }
+      smemScales[i] = scl_val;
+    }
+
+    __syncthreads();
+
+#pragma unroll
+    for (int dq_idx = threadIdx.x; dq_idx < BN * BK; dq_idx += blockDim.x) {
+      int n_local = dq_idx / BK;
+      int k_local = dq_idx % BK;
+
+      int n_packed_local = n_local / PACK_FACTOR;
+      int n_inner = n_local % PACK_FACTOR;
+
+      uint32_t qwt_packed = smemB_packed[k_local * patch_N + n_packed_local];
+      uint32_t zos_packed = smemZeros[n_packed_local];
+
+      ScaleType scale_val = smemScales[n_local];
+
+      int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[n_inner];
+      int bit_shift = physical_inner_col_idx * BITS;
+
+      uint32_t q_w = (qwt_packed >> bit_shift) & 0x0F;
+      uint32_t q_z = (zos_packed >> bit_shift) & 0x0F;
+
+      float scale_float = static_cast<float>(scale_val);
+      float dequant_w =
+          (static_cast<float>(q_w) - static_cast<float>(q_z)) * scale_float;
+
+      smemB_dequant[n_local][k_local] = static_cast<T>(dequant_w);
+    }
+
+    __syncthreads();
+
+#pragma unroll
+    for (int k_step = 0; k_step < BK; k_step += WMMA_K) {
+      FragmentA fragA;
+      FragmentB fragB;
+
+      const T *smemA_ptr = &smemA[warp_m_id * WMMA_M][k_step];
+      wmma::load_matrix_sync(fragA, smemA_ptr, BK + SMEM_A_PADDING);
+
+      const T *smemB_ptr = &smemB_dequant[warp_n_id * WMMA_N][k_step];
+      wmma::load_matrix_sync(fragB, smemB_ptr, BK + SMEM_B_PADDING);
+
+      wmma::mma_sync(fragC, fragA, fragB, fragC);
+    }
+
+    __syncthreads();
+  }
+
+  const int out_m_base = warp_m_id * WMMA_M;
+  const int out_n_base = warp_n_id * WMMA_N;
+
+  wmma::store_matrix_sync(&smem_out[out_m_base][out_n_base], fragC, BN,
+                          wmma::mem_row_major);
+
+  __syncthreads();
+
+#pragma unroll
+  for (int write_idx = threadIdx.x; write_idx < BM * BN;
+       write_idx += blockDim.x) {
+    int m_local = write_idx / BN;
+    int n_local = write_idx % BN;
+
+    int m_global = A_block_start + m_local;
+    int n_global = B_block_start + n_local;
+
+    if (m_global < M && n_global < N) {
+      float result = smem_out[m_local][n_local];
+      if (bias) {
+        result += static_cast<float>(bias[n_global]);
+      }
+
+      out[m_global * N + n_global] = static_cast<T>(result);
+    }
   }
 }
 
@@ -411,16 +400,37 @@ void matmul_quantized(const Tensor<T> &input, const Tensor<int32_t> &qweight,
   int M = static_cast<int>(input.sizes()[0]);
   int K = static_cast<int>(input.sizes()[1]);
   int N = 0;
-  if (scales_input.sizes().size() == 2)
+
+  if (output->sizes().size() >= 2) {
+    N = static_cast<int>(output->sizes().back());
+  } else if (scales_input.sizes().size() == 2) {
     N = static_cast<int>(scales_input.sizes()[1]);
-  else if (output->sizes().size() == 2)
-    N = static_cast<int>(output->sizes()[1]);
-  else if (qweight.sizes().size() == 2)
+  } else if (qweight.sizes().size() == 2) {
     N = static_cast<int>(qweight.sizes()[1]) * PACK_FACTOR;
-  else
-    throw std::runtime_error("无法确定维度 N");
+  } else if (bias && bias->sizes().size() >= 1) {
+    N = static_cast<int>(bias->sizes().back());
+  } else {
+    throw std::runtime_error(
+        "Cannot determine dimension N from provided tensors (output, scales, "
+        "qweight, bias).");
+  }
+
+  if (K != static_cast<int>(qweight.sizes()[0])) {
+    throw std::runtime_error("Dimension K mismatch between input (" +
+                             std::to_string(K) + ") and qweight (" +
+                             std::to_string(qweight.sizes()[0]) + ")");
+  }
+  int packed_N_dim = (N + PACK_FACTOR - 1) / PACK_FACTOR;
+  if (static_cast<int>(qweight.sizes()[1]) != packed_N_dim) {
+    throw std::runtime_error(
+        "Dimension N/PACK_FACTOR mismatch between inferred N (" +
+        std::to_string(N) + " -> " + std::to_string(packed_N_dim) +
+        ") and qweight (" + std::to_string(qweight.sizes()[1]) + ")");
+  }
 
   using ScaleType = float;
+
+  cudaError_t launch_err = cudaSuccess;
 
   if (M == 1) {
     constexpr int BK_GEMV = 32;
@@ -430,51 +440,75 @@ void matmul_quantized(const Tensor<T> &input, const Tensor<int32_t> &qweight,
     dim3 block_decode(THREADS_PER_BLOCK_GEMV);
     dim3 grid_decode(1, (N + BN_GEMV - 1) / BN_GEMV);
 
-#ifdef DEBUG_AWQ
-    std::cout << "Launching GEMV Kernel v2 (M=1)" << std::endl;
-    std::cout << "Grid: (" << grid_decode.x << ", " << grid_decode.y
-              << "), Block: (" << block_decode.x << ")" << std::endl;
-#endif
-
     matmul_awq_gemv_kernel_v2<T, ScaleType, BK_GEMV, BN_GEMV,
                               THREADS_PER_BLOCK_GEMV>
         <<<grid_decode, block_decode, 0, stream>>>(
             input.data_ptr(), qweight.data_ptr(), scales_input.data_ptr(),
             zeros_input.data_ptr(), output->data_ptr(), K, N, group_size,
             bias ? bias->data_ptr() : nullptr);
+    launch_err = cudaGetLastError();
 
   } else {
-    constexpr int TM_PREFILL = 8;
-    constexpr int TN_PREFILL = 8;
-    constexpr int BK_PREFILL = 32;
-    constexpr int BN_PREFILL = 64;
-    constexpr int BM_PREFILL = 64;
-    constexpr int THREADS_PER_BLOCK_PREFILL_ORIG =
-        (BN_PREFILL / TN_PREFILL) * (BM_PREFILL / TM_PREFILL);
+    if constexpr (std::is_same_v<T, __half> ||
+                  std::is_same_v<T, __nv_bfloat16>) {
+      constexpr int BM_WMMA = 64;
+      constexpr int BN_WMMA = 64;
+      constexpr int BK_WMMA = 32;
+      constexpr int WMMA_M = 16;
+      constexpr int WMMA_N = 16;
+      constexpr int WMMA_K = 16;
 
-    dim3 block_prefill(THREADS_PER_BLOCK_PREFILL_ORIG);
-    dim3 grid_prefill((M + BM_PREFILL - 1) / BM_PREFILL,
-                      (N + BN_PREFILL - 1) / BN_PREFILL);
+      constexpr int WARPS_M = BM_WMMA / WMMA_M;
+      constexpr int WARPS_N = BN_WMMA / WMMA_N;
+      constexpr int THREADS_PER_BLOCK_WMMA = WARPS_M * WARPS_N * 32;
 
-#ifdef DEBUG_AWQ
-    std::cout << "Launching Prefill Kernel v1 (M=" << M << ")" << std::endl;
-    std::cout << "Grid: (" << grid_prefill.x << ", " << grid_prefill.y
-              << "), Block: (" << block_prefill.x << ")" << std::endl;
-#endif
+      dim3 block_wmma(THREADS_PER_BLOCK_WMMA);
+      dim3 grid_wmma((M + BM_WMMA - 1) / BM_WMMA, (N + BN_WMMA - 1) / BN_WMMA);
 
-    matmul_awq_kernel_prefill_v1<T, ScaleType, TM_PREFILL, TN_PREFILL,
-                                 BK_PREFILL, BN_PREFILL, BM_PREFILL>
-        <<<grid_prefill, block_prefill, 0, stream>>>(
-            input.data_ptr(), qweight.data_ptr(), scales_input.data_ptr(),
-            zeros_input.data_ptr(), output->data_ptr(), M, K, N, group_size,
-            bias ? bias->data_ptr() : nullptr);
+      // #ifdef DEBUG_AWQ
+      //       std::cout << "Launching Prefill WMMA Kernel v1 (M=" << M << ")"
+      //                 << std::endl;
+      //       std::cout << "Using BM=" << BM_WMMA << ", BN=" << BN_WMMA
+      //                 << ", BK=" << BK_WMMA << std::endl;
+      //       std::cout << "Grid: (" << grid_wmma.x << ", " << grid_wmma.y <<
+      //       ", "
+      //                 << grid_wmma.z << "), Block: (" << block_wmma.x << ", "
+      //                 << block_wmma.y << ", " << block_wmma.z << ")" <<
+      //                 std::endl;
+      //       std::cout << "M=" << M << ", K=" << K << ", N=" << N
+      //                 << ", group_size=" << group_size << std::endl;
+      //       debug_print_tensor(input, "input (WMMA)");
+      //       debug_print_tensor(qweight, "qweight (WMMA)");
+      //       debug_print_tensor(scales_input, "scales (WMMA)");
+      //       debug_print_tensor(zeros_input, "zeros (WMMA)");
+      //       if (bias) debug_print_tensor(*bias, "bias (WMMA)");
+      // #endif
+
+      matmul_awq_kernel_prefill_wmma_v1<T, ScaleType, BM_WMMA, BN_WMMA, BK_WMMA,
+                                        WMMA_M, WMMA_N, WMMA_K>
+          <<<grid_wmma, block_wmma, 0, stream>>>(
+              input.data_ptr(), qweight.data_ptr(), scales_input.data_ptr(),
+              zeros_input.data_ptr(), output->data_ptr(), M, K, N, group_size,
+              bias ? bias->data_ptr() : nullptr);
+      launch_err = cudaGetLastError();
+
+    } else {
+      std::cerr << "Warning: matmul_quantized WMMA kernel does not support "
+                   "input type "
+                << typeid(T).name()
+                << ". Prefill stage (M > 1) will not execute." << std::endl;
+
+      throw std::runtime_error(
+          "matmul_quantized WMMA kernel currently only supports half/bfloat16 "
+          "input/output types for M > 1.");
+    }
   }
 
-  cudaError_t launch_err = cudaGetLastError();
   if (launch_err != cudaSuccess) {
-    std::cerr << "CUDA kernel 启动错误: " << cudaGetErrorString(launch_err)
-              << std::endl;
-    throw std::runtime_error("CUDA kernel 启动错误");
+    std::cerr << "CUDA kernel launch error in matmul_quantized: "
+              << cudaGetErrorString(launch_err) << std::endl;
+
+    throw std::runtime_error("CUDA kernel launch failed in matmul_quantized");
   }
 }
 
