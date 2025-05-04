@@ -27,6 +27,7 @@ find_package(pybind11 REQUIRED)
 
 # --- 添加子目录和源文件 ---
 add_subdirectory(backend/cpp/src/CUDAoperators)
+add_subdirectory(backend/cpp/src/operators)
 # file(GLOB_RECURSE OPERATOR_SOURCES ...) # 如果需要
 
 # --- 创建 Pybind11 模块 ---
@@ -43,7 +44,7 @@ pybind11_add_module(model_bridge SHARED
 )
 
 # --- 设置链接库 ---
-target_link_libraries(model_bridge PRIVATE operators)
+target_link_libraries(model_bridge PRIVATE operators unified_operators)
 target_link_libraries(model_bridge PRIVATE CUDA::cublas CUDA::cudart)
 # target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES})
 

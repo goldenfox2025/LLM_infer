@@ -223,6 +223,9 @@ QwenModel<T>::QwenModel(
   // Qwen 模型仅支持 CUDA 运行
   device_ = Device::CUDA;
 
+  // 初始化算子接口
+  operators_ = std::make_unique<op::UnifiedOperators<T>>(Device::CUDA);
+
   for (int i = 0; i < 5; ++i) {
     cudaError_t err = cudaStreamCreate(&compute_streams_[i]);
     if (err != cudaSuccess) {
@@ -297,6 +300,9 @@ QwenModel<T>::QwenModel(
   }
   // Qwen 模型仅支持 CUDA 运行
   device_ = Device::CUDA;
+
+  // 初始化算子接口
+  operators_ = std::make_unique<op::UnifiedOperators<T>>(Device::CUDA);
 
   for (int i = 0; i < 5; ++i) {
     cudaError_t err = cudaStreamCreate(&compute_streams_[i]);
@@ -538,8 +544,15 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     // }
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, offset, rope_theta_, nullptr);
-    cuda_OP::rope(&k_buf_view, offset, rope_theta_, nullptr);
+    // 使用新的算子抽象层（二重指针版本）
+    size_t offset_q = offset;
+    size_t offset_k = offset;
+    operators_->rope(&q_buf_view, offset_q, rope_theta_, nullptr);
+    operators_->rope(&k_buf_view, offset_k, rope_theta_, nullptr);
+
+    // 旧算子
+    // cuda_OP::rope(&q_buf_view, offset, rope_theta_, nullptr);
+    // cuda_OP::rope(&k_buf_view, offset, rope_theta_, nullptr);
 
     // 更新KV缓存
     // size_t row_size = n_kv_heads_ * head_dim_;
@@ -1038,8 +1051,15 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
     Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
     // 应用旋转位置编码 (RoPE)
-    cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
-    cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
+    // 使用新的算子抽象层（二重指针版本）
+    size_t offset_q = offset;
+    size_t offset_k = offset;
+    operators_->rope(&q_buf_view, offset_q, rope_theta_, compute_streams_[0]);
+    operators_->rope(&k_buf_view, offset_k, rope_theta_, compute_streams_[1]);
+
+    // 旧算子
+    // cuda_OP::rope(&q_buf_view, offset, rope_theta_, compute_streams_[0]);
+    // cuda_OP::rope(&k_buf_view, offset, rope_theta_, compute_streams_[1]);
 
     for (int j = 0; j < 3; ++j) {
       cudaStreamSynchronize(compute_streams_[j]);
@@ -1325,6 +1345,14 @@ QwenModel<T> &QwenModel<T>::cuda() {
     }
   }
   device_ = Device::CUDA;
+
+  // 更新算子接口
+  if (operators_) {
+    operators_->cuda();
+  } else {
+    operators_ = std::make_unique<op::UnifiedOperators<T>>(Device::CUDA);
+  }
+
   return *this;
 }
 
@@ -1333,6 +1361,11 @@ QwenModel<T> &QwenModel<T>::cuda() {
 // -------------------------------
 template <typename T>
 QwenModel<T> &QwenModel<T>::cpu() {
+  // 更新算子接口（虽然会抛出异常，但保持一致性）
+  if (operators_) {
+    operators_->cpu();
+  }
+
   throw std::runtime_error("QwenModel only supports CUDA execution.");
   return *this;
 }

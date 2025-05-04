@@ -35,9 +35,9 @@ template <typename T,  // 数据类型 (float, half, nv_bfloat16)
 __global__ void gqa_gemm_kernel_v2(
     const T *__restrict__ Q,  // 查询输入 [seq_len, n_q_heads, head_dim]
     const T *__restrict__ K,  // 键输入   [total_seq_len, n_kv_heads, head_dim]
-    T *__restrict__ scores,  // 输出    [seq_len, n_q_heads, total_seq_len]
-    int seq_len,             // Q 序列长度
-    int head_dim,            // 每个头的维度
+    T *__restrict__ scores,   // 输出    [seq_len, n_q_heads, total_seq_len]
+    int seq_len,              // Q 序列长度
+    int head_dim,             // 每个头的维度
     // int batch_size,       // 对于 3D 输入不直接使用，假定为 1
     int n_q_heads,      // 查询头的数量
     int n_kv_heads,     // 键/值头的数量
@@ -447,9 +447,9 @@ template <typename T,  // 数据类型 (float, half, nv_bfloat16)
 __global__ void gqa_gemm_kernel_v1(
     const T *__restrict__ Q,  // 查询输入 [seq_len, n_q_heads, head_dim]
     const T *__restrict__ K,  // 键输入   [total_seq_len, n_kv_heads, head_dim]
-    T *__restrict__ scores,  // 输出    [seq_len, n_q_heads, total_seq_len]
-    int seq_len,             // Q 序列长度
-    int head_dim,            // 每个头的维度
+    T *__restrict__ scores,   // 输出    [seq_len, n_q_heads, total_seq_len]
+    int seq_len,              // Q 序列长度
+    int head_dim,             // 每个头的维度
     // int batch_size,       // 对于 3D 输入不直接使用，假定为 1
     int n_q_heads,      // 查询头的数量
     int n_kv_heads,     // 键/值头的数量
@@ -680,8 +680,8 @@ void launch_gqa_gemm(
   // --- 核函数启动配置 ---
   dim3 blockDim(THREADS_PER_BLOCK);            // 1D 块维度
   dim3 gridDim((total_seq_len + BN - 1) / BN,  // K 序列维度上的块数 (grid.x)
-               (seq_len + BM - 1) / BM,  // Q 序列维度上的块数 (grid.y)
-               n_q_heads                 // Q 头维度上的块数 (grid.z)
+               (seq_len + BM - 1) / BM,        // Q 序列维度上的块数 (grid.y)
+               n_q_heads                       // Q 头维度上的块数 (grid.z)
   );
 
   // 预计算缩放因子

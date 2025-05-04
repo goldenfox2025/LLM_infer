@@ -75,7 +75,7 @@ if [ -d "frontend" ]; then
     --set full
     --target-processes all
     --replay-mode kernel
-    --kernel-name 'matmul_awq_gemv_kernel_v2'
+    --kernel-name 'awq_gemv_warp_vectorized'
     python3 frontend/chat.py
     # ... chat.py 的参数 ...
     )

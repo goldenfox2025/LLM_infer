@@ -13,3 +13,6 @@ cuda_install_options.txt
 CUDA_Environment.md
 clean_cuda_env.sh
 analyze_awq_model.py
+test.cu
+.gitignore
+minimal_test_v2

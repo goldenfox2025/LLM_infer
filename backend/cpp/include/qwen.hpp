@@ -1,13 +1,14 @@
 #pragma once
 #include <cuda_bf16.h>  // For __nv_bfloat16 support
-#include <unordered_map>
+
 #include <stdexcept>
 #include <string>
-
+#include <unordered_map>
 
 #include "base_model.hpp"
 #include "cudaOP.cuh"
 #include "inference.hpp"
+#include "operators/unified_operators.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
 constexpr int kNumStreams = 5;
@@ -19,11 +20,12 @@ class QwenModel : public BaseModel {
             const std::unordered_map<std::string, int>& config);
 
   // 带量化参数的构造函数
-  QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
-            const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
-            const std::unordered_map<std::string, Tensor<float>>& scales_params,
-            const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
-            const std::unordered_map<std::string, int>& config);
+  QwenModel(
+      const std::unordered_map<std::string, Tensor<T>>& params,
+      const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
+      const std::unordered_map<std::string, Tensor<float>>& scales_params,
+      const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
+      const std::unordered_map<std::string, int>& config);
   ~QwenModel() override;
 
   bool verify_params() const override;
@@ -32,16 +34,16 @@ class QwenModel : public BaseModel {
   // Implementation of BaseModel interface:
   // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
   uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                   KVCacheBase* kv_cache, size_t top_k, float temperature,
-                   float top_p, curandState* d_states = nullptr) override {
+                    KVCacheBase* kv_cache, size_t top_k, float temperature,
+                    float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
 
     return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
                            top_k, d_states);
   }
   uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                   KVCacheBase* kv_cache, size_t top_k, float temperature,
-                   float top_p, curandState* d_states = nullptr) override {
+                    KVCacheBase* kv_cache, size_t top_k, float temperature,
+                    float top_p, curandState* d_states = nullptr) override {
     KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
 
     return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p,
@@ -71,13 +73,16 @@ class QwenModel : public BaseModel {
   const std::unordered_map<std::string, Tensor<T>>& get_params() const {
     return params_;
   }
-  const std::unordered_map<std::string, Tensor<int32_t>>& get_qweight_params() const {
+  const std::unordered_map<std::string, Tensor<int32_t>>& get_qweight_params()
+      const {
     return qweight_params_;
   }
-  const std::unordered_map<std::string, Tensor<float>>& get_scales_params() const {
+  const std::unordered_map<std::string, Tensor<float>>& get_scales_params()
+      const {
     return scales_params_;
   }
-  const std::unordered_map<std::string, Tensor<int32_t>>& get_qzeros_params() const {
+  const std::unordered_map<std::string, Tensor<int32_t>>& get_qzeros_params()
+      const {
     return qzeros_params_;
   }
 
@@ -108,14 +113,17 @@ class QwenModel : public BaseModel {
   float rope_theta_;
 
   std::unordered_map<std::string, Tensor<T>> params_;
-  std::unordered_map<std::string, Tensor<int32_t>> qweight_params_; // 量化权重
-  std::unordered_map<std::string, Tensor<float>> scales_params_;    // 缩放因子
-  std::unordered_map<std::string, Tensor<int32_t>> qzeros_params_;  // 零点
-  int quant_type_ = 0;  // 0: 非量化, 1: AWQ量化
-  int group_size_ = 128; // 量化分组大小
+  std::unordered_map<std::string, Tensor<int32_t>> qweight_params_;  // 量化权重
+  std::unordered_map<std::string, Tensor<float>> scales_params_;     // 缩放因子
+  std::unordered_map<std::string, Tensor<int32_t>> qzeros_params_;   // 零点
+  int quant_type_ = 0;    // 0: 非量化, 1: AWQ量化
+  int group_size_ = 128;  // 量化分组大小
   Device device_;
 
   std::array<cudaStream_t, kNumStreams> compute_streams_;
+
+  // 统一算子接口
+  std::unique_ptr<op::UnifiedOperators<T>> operators_;
 };
 
 // 使用 extern template 声明已在别处定义的模板特化

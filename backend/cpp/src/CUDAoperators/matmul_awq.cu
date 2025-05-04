@@ -60,9 +60,189 @@ void debug_print_tensor(const Tensor<T> &tensor, const std::string &name,
 
 constexpr int BITS = 4;
 constexpr int PACK_FACTOR = 32 / BITS;
-
+constexpr int WARP_SIZE = 32;
+// --- 用于 Warp Reduce 的辅助函数 (需要 float 版本) ---
+template <const int kWarpSize = WARP_SIZE>
+__device__ __forceinline__ float warp_reduce_sum_f32(float val) {
+#pragma unroll
+  for (int mask = kWarpSize >> 1; mask >= 1; mask >>= 1) {
+    val += __shfl_xor_sync(0xffffffff, val, mask);
+  }
+  return val;
+}
 __constant__ const int LOGICAL_TO_PHYSICAL_INNER_IDX[PACK_FACTOR] = {
     0, 4, 1, 5, 2, 6, 3, 7};
+
+template <typename T,          // 输入/输出类型 (half 或 __nv_bfloat16)
+          typename ScaleType,  // Scale 类型 (half, __nv_bfloat16, 或 float)
+          int BK_GEMV,   // K 分块大小, 需为 K_PER_ITERATION 且 <= group_size
+          int VEC_SIZE,  // K 维度向量化大小 (例如 2)
+          int WARPS_PER_BLOCK>
+__launch_bounds__(WARPS_PER_BLOCK *WARP_SIZE) __global__
+    void awq_gemv_warp_vectorized(  // Renamed for clarity
+        const T *__restrict__ inp, const int32_t *__restrict__ qwt,
+        const ScaleType *__restrict__ scl, const int32_t *__restrict__ zos,
+        T *__restrict__ out, const int K, const int N, const int group_size,
+        const T *__restrict__ bias) {
+  // --- 类型和常量定义 (不变) ---
+  using TVec = typename std::conditional<
+      VEC_SIZE == 2 && std::is_same<T, half>::value, half2,
+      typename std::conditional<VEC_SIZE == 2 &&
+                                    std::is_same<T, __nv_bfloat16>::value,
+                                __nv_bfloat162, T>::type>::type;
+
+  constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+  constexpr int K_PER_ITERATION = WARP_SIZE * VEC_SIZE;
+
+  // 如果 BK_GEMV > group_size, 一个 K-tile 可能跨越 group, 此优化会出错
+  // static_assert(BK_GEMV <= group_size, "BK_GEMV must be <= group_size for
+  // this optimization");
+  static_assert(BK_GEMV % K_PER_ITERATION == 0,
+                "BK_GEMV 必须是 WARP_SIZE * VEC_SIZE 的倍数");
+
+  // --- 块和线程索引 (不变) ---
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int warp_id = threadIdx.x / WARP_SIZE;
+  const int m =
+      blockIdx.x * WARPS_PER_BLOCK + warp_id;  // 全局行索引 (warp 负责的 n)
+
+  // --- N 相关索引计算 (不变) ---
+  const int n_global = m;
+  const int n_packed_global = n_global / PACK_FACTOR;
+  const int j_inner = n_global % PACK_FACTOR;
+  const int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
+  const int bit_shift = physical_inner_col_idx * BITS;
+  const uint32_t dequant_mask = (1 << BITS) - 1;
+
+  if (n_global >= N) {
+    return;
+  }
+
+  // --- 共享内存 ---
+  __shared__ T smemA[BK_GEMV];  // 输入 Activation
+  __shared__ uint32_t
+      smemB[WARPS_PER_BLOCK][BK_GEMV];          // Packed 权重 (每个 warp 一份)
+  __shared__ ScaleType smemS[WARPS_PER_BLOCK];  // Scales (每个 warp 一个)
+  __shared__ uint32_t smemZ[WARPS_PER_BLOCK];   // Packed Zeros (每个 warp 一个)
+
+  // --- 累加器 (不变) ---
+  float thread_sum = 0.0f;
+
+  // --- K 分块循环 ---
+  const int num_groups = (K + group_size - 1) / group_size;
+  for (int tile_k_base = 0; tile_k_base < K; tile_k_base += BK_GEMV) {
+#pragma unroll
+    for (int load_idx = threadIdx.x * VEC_SIZE; load_idx < BK_GEMV;
+         load_idx += THREADS_PER_BLOCK * VEC_SIZE) {
+      int k_tile = load_idx;
+      int k_global = tile_k_base + k_tile;
+      if (k_tile + VEC_SIZE <= BK_GEMV) {
+        if (k_global + VEC_SIZE <= K) {
+          *reinterpret_cast<TVec *>(&smemA[k_tile]) =
+              *reinterpret_cast<const TVec *>(&inp[k_global]);
+        } else {
+          T *smem_T_ptr = &smemA[k_tile];
+          for (int i = 0; i < VEC_SIZE; ++i) {
+            smem_T_ptr[i] =
+                (k_global + i < K) ? inp[k_global + i] : static_cast<T>(0.0f);
+          }
+        }
+      }
+    }
+
+    if (n_packed_global < (N / PACK_FACTOR)) {
+#pragma unroll
+      for (int k_tile = lane; k_tile < BK_GEMV; k_tile += WARP_SIZE) {
+        int k_global = tile_k_base + k_tile;
+        smemB[warp_id][k_tile] =
+            (k_global < K) ? qwt[k_global * (N / PACK_FACTOR) + n_packed_global]
+                           : 0;
+      }
+    } else {
+#pragma unroll
+      for (int k_tile = lane; k_tile < BK_GEMV; k_tile += WARP_SIZE) {
+        smemB[warp_id][k_tile] = 0;
+      }
+    }
+
+    // --- 加载 smemS 和 smemZ (Scale 和 Zero-point) ---
+    // 计算当前 K-tile 所属的 group index (假设 BK_GEMV <= group_size)
+    int current_group_idx = tile_k_base / group_size;
+
+    // 每个 Warp 的第一个线程负责加载 S 和 Z 到共享内存
+    if (lane == 0) {
+      // 检查 group 索引是否有效
+      bool valid_group = (current_group_idx < num_groups);
+
+      // 加载 Scale
+      bool valid_s = valid_group && (n_global < N);
+      smemS[warp_id] = valid_s ? scl[current_group_idx * N + n_global]
+                               : static_cast<ScaleType>(0.0f);
+
+      // 加载 Packed Zero-point
+      bool valid_z = valid_group && (n_packed_global < (N / PACK_FACTOR));
+      smemZ[warp_id] =
+          valid_z ? zos[current_group_idx * (N / PACK_FACTOR) + n_packed_global]
+                  : 0;
+    }
+
+    __syncthreads();  // 等待 smemA, smemB, smemS, smemZ 全部加载完成
+
+    // --- K 块内计算 ---
+    const int num_k_iterations = BK_GEMV / K_PER_ITERATION;
+
+#pragma unroll
+    for (int w = 0; w < num_k_iterations; ++w) {
+      int k_base_in_tile = (w * WARP_SIZE + lane) * VEC_SIZE;
+      TVec inp_vec = *reinterpret_cast<TVec *>(&smemA[k_base_in_tile]);
+      T *inp_vals = reinterpret_cast<T *>(&inp_vec);
+
+      // 从共享内存读取 Scale 和 Packed Zero
+      const float scale_float = static_cast<float>(smemS[warp_id]);
+      const uint32_t regZ_packed = smemZ[warp_id];
+      // 提取零点 q_z (只需计算一次)
+      const uint32_t q_z = (regZ_packed >> bit_shift) & dequant_mask;
+      const float z_float = static_cast<float>(q_z);
+
+      // --- VEC_SIZE 循环 ---
+      for (int i = 0; i < VEC_SIZE; ++i) {
+        int k_tile = k_base_in_tile + i;
+        int k_global = tile_k_base +
+                       k_tile;  // 用于潜在的调试或边界检查，但S/Z已从smem加载
+
+        // 检查 k_global 边界 (可选，因为smemA/smemB应该已处理)
+        // if (k_global >= K) continue; //
+        // 如果smemA/smemB边界处理确保无效区域为0, 则无需此检查
+
+        // 加载 packed weight from smemB
+        uint32_t regB_packed = smemB[warp_id][k_tile];
+        // 提取 q_w
+        uint32_t q_w = (regB_packed >> bit_shift) & dequant_mask;
+        // 反量化
+        float dequant_w = (static_cast<float>(q_w) - z_float) * scale_float;
+        // 累加
+        thread_sum =
+            fmaf(static_cast<float>(inp_vals[i]), dequant_w, thread_sum);
+      }  // --- 结束 VEC_SIZE 循环 ---
+    }  // 结束 w 循环
+
+    __syncthreads();  // 在下一次 K-tile 开始加载前，确保计算完成
+                      // (技术上可能非必须，但更安全)
+  }  // 结束 K 分块循环
+
+  // --- Warp Reduce (不变) ---
+  thread_sum = warp_reduce_sum_f32<WARP_SIZE>(thread_sum);
+
+  // --- 写回结果 (不变) ---
+  if (lane == 0) {
+    float final_val = thread_sum;
+    if (bias) {
+      final_val += static_cast<float>(bias[n_global]);
+    }
+    out[n_global] = static_cast<T>(final_val);
+  }
+}
+
 template <typename T, typename ScaleType, int BK_GEMV = 32, int BN_GEMV = 128,
           int THREADS_PER_BLOCK_GEMV = 128>
 __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
@@ -80,90 +260,31 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
                 "Need enough threads for packed N");
 
   constexpr int PADDING_A_GEMV = 1;
-  __shared__ T smemA[2][BK_GEMV + PADDING_A_GEMV];
+  __shared__ T smemA[BK_GEMV + PADDING_A_GEMV];
 
   constexpr int PADDING_B_GEMV = 0;
-  __shared__ uint32_t smemB[2][BK_GEMV * (patch_N + PADDING_B_GEMV)];
+  __shared__ uint32_t smemB[BK_GEMV * (patch_N + PADDING_B_GEMV)];
 
   constexpr int PADDING_Z_GEMV = 0;
-  __shared__ uint32_t smemZeros[2][patch_N + PADDING_Z_GEMV];
+  __shared__ uint32_t smemZeros[patch_N + PADDING_Z_GEMV];
 
-  constexpr int PADDING_S2D_GEMV = 0;
-  __shared__ ScaleType smemScales[2][PACK_FACTOR][patch_N + PADDING_S2D_GEMV];
+  constexpr int PADDING_S2D_GEMV = 1;
+  __shared__ ScaleType smemScales[PACK_FACTOR][patch_N + PADDING_S2D_GEMV];
 
   float acc = 0.0f;
 
   int tid = threadIdx.x;
-
   int n_local = tid;
 
-  int ph = 0;
-  int tile_k_base = 0;
-#pragma unroll
-  for (int k_offset = tid; k_offset < BK_GEMV;
-       k_offset += THREADS_PER_BLOCK_GEMV) {
-    int k_global = tile_k_base + k_offset;
-    if (k_global < K) {
-      smemA[ph][k_offset] = inp[k_global];  // Use ph
-    } else {
-      smemA[ph][k_offset] = static_cast<T>(0.0f);  // Use ph
-    }
-  }
-
-#pragma unroll
-  for (int load_idx = tid; load_idx < BK_GEMV * patch_N;
-       load_idx += THREADS_PER_BLOCK_GEMV) {
-    int load_row = load_idx / patch_N;
-    int load_col = load_idx % patch_N;
-    int global_n_packed = B_block_start / PACK_FACTOR + load_col;
-    int k_global = tile_k_base + load_row;
-    uint32_t qwt_val = 0;
-    if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
-      qwt_val = reinterpret_cast<const uint32_t *>(
-          qwt)[k_global * (N / PACK_FACTOR) + global_n_packed];
-    }
-
-    smemB[ph][load_row * (patch_N + PADDING_B_GEMV) + load_col] = qwt_val;
-  }
-
-  int current_tile_group_idx = tile_k_base / group_size;
-  const int num_groups = (K + group_size - 1) / group_size;
-#pragma unroll
-  for (int i = tid; i < patch_N; i += THREADS_PER_BLOCK_GEMV) {
-    int n_packed_global = B_block_start / PACK_FACTOR + i;
-    uint32_t zos_val = 0;
-    if (current_tile_group_idx < num_groups &&
-        n_packed_global < (N / PACK_FACTOR)) {
-      zos_val = reinterpret_cast<const uint32_t *>(
-          zos)[current_tile_group_idx * (N / PACK_FACTOR) + n_packed_global];
-    }
-    smemZeros[ph][i] = zos_val;
-  }
-
-#pragma unroll
-  for (int i = tid; i < BN_GEMV; i += THREADS_PER_BLOCK_GEMV) {
-    int n_global = B_block_start + i;
-    ScaleType scl_val = static_cast<ScaleType>(0.0f);
-    if (current_tile_group_idx < num_groups && n_global < N) {
-      scl_val = scl[current_tile_group_idx * N + n_global];
-    }
-    int scale_row = i % PACK_FACTOR;
-    int scale_col = i / PACK_FACTOR;
-    if (scale_col < patch_N) {
-      smemScales[ph][scale_row][scale_col] = scl_val;
-    }
-  }
-  ph = 1 - ph;
-  __syncthreads();
-  for (tile_k_base = BK_GEMV; tile_k_base <= K; tile_k_base += BK_GEMV) {
+  for (int tile_k_base = 0; tile_k_base < K; tile_k_base += BK_GEMV) {
 #pragma unroll
     for (int k_offset = tid; k_offset < BK_GEMV;
          k_offset += THREADS_PER_BLOCK_GEMV) {
       int k_global = tile_k_base + k_offset;
       if (k_global < K) {
-        smemA[ph][k_offset] = inp[k_global];
+        smemA[k_offset] = inp[k_global];
       } else {
-        smemA[ph][k_offset] = static_cast<T>(0.0f);
+        smemA[k_offset] = static_cast<T>(0.0f);
       }
     }
 
@@ -178,10 +299,8 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
       if (k_global < K && global_n_packed < (N / PACK_FACTOR)) {
         qwt_val = qwt[k_global * (N / PACK_FACTOR) + global_n_packed];
       }
-
-      smemB[ph][load_row * (patch_N + PADDING_B_GEMV) + load_col] = qwt_val;
+      smemB[load_row * patch_N + load_col] = qwt_val;
     }
-
     int current_tile_group_idx = tile_k_base / group_size;
     const int num_groups = (K + group_size - 1) / group_size;
 #pragma unroll
@@ -193,7 +312,7 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
         zos_val =
             zos[current_tile_group_idx * (N / PACK_FACTOR) + n_packed_global];
       }
-      smemZeros[ph][i] = zos_val;
+      smemZeros[i] = zos_val;
     }
 #pragma unroll
     for (int i = tid; i < BN_GEMV; i += THREADS_PER_BLOCK_GEMV) {
@@ -205,22 +324,21 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
       int scale_row = i % PACK_FACTOR;
       int scale_col = i / PACK_FACTOR;
       if (scale_col < patch_N) {
-        smemScales[ph][scale_row][scale_col] = scl_val;
+        smemScales[scale_row][scale_col] = scl_val;
       }
     }
 
     __syncthreads();
 #pragma unroll(4)
     for (int bk = 0; bk < BK_GEMV; ++bk) {
-      float inp_val = static_cast<float>(smemA[ph ^ 1][bk]);
+      float inp_val = static_cast<float>(smemA[bk]);
 
       int n_packed_local = n_local / PACK_FACTOR;
       int j_inner = n_local % PACK_FACTOR;
       // if (n_packed_local < patch_N) {
-      //   uint32_t regB_packed =
-      //       smemB[ph ^ 1][bk * (patch_N + PADDING_B_GEMV) + n_packed_local];
-      //   uint32_t regZ_packed = smemZeros[ph ^ 1][n_packed_local];
-      //   ScaleType regS = smemScales[ph ^ 1][j_inner][n_packed_local];
+      //   uint32_t regB_packed = smemB[bk * patch_N + n_packed_local];
+      //   uint32_t regZ_packed = smemZeros[n_packed_local];
+      //   ScaleType regS = smemScales[j_inner][n_packed_local];
 
       //   int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
       //   int bit_shift = physical_inner_col_idx * BITS;
@@ -234,15 +352,16 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
 
       //   acc = __fmaf_rn(inp_val, dequant_w, acc);
       // }
+
       uint32_t regB_packed =
           (n_packed_local < patch_N)
-              ? smemB[ph ^ 1][bk * (patch_N + PADDING_B_GEMV) + n_packed_local]
+              ? smemB[bk * (patch_N + PADDING_B_GEMV) + n_packed_local]
               : 0;
       uint32_t regZ_packed =
-          (n_packed_local < patch_N) ? smemZeros[ph ^ 1][n_packed_local] : 0;
+          (n_packed_local < patch_N) ? smemZeros[n_packed_local] : 0;
 
       ScaleType regS = (n_packed_local < patch_N)
-                           ? smemScales[ph ^ 1][j_inner][n_packed_local]
+                           ? smemScales[j_inner][n_packed_local]
                            : static_cast<ScaleType>(0.0f);
 
       int physical_inner_col_idx = LOGICAL_TO_PHYSICAL_INNER_IDX[j_inner];
@@ -255,10 +374,7 @@ __global__ void matmul_awq_gemv_kernel_v2(const T *__restrict__ inp,
 
       acc = __fmaf_rn(inp_val, dequant_w, acc);
     }
-
-    ph = 1 - ph;
   }
-
   __syncthreads();
 
   int n_global = B_block_start + n_local;
@@ -495,22 +611,29 @@ void matmul_quantized(const Tensor<T> &input, const Tensor<int32_t> &qweight,
 
   cudaError_t launch_err = cudaSuccess;
 
-  if (M == 1) {
-    constexpr int BK_GEMV = 32;
-    constexpr int BN_GEMV = 128;
-    constexpr int THREADS_PER_BLOCK_GEMV = 128;
+  if (M == 0) {
+    constexpr int BK_GEMV = 128;
+    // constexpr int BN_GEMV = 128;
+    // constexpr int THREADS_PER_BLOCK_GEMV = 128;
+    // dim3 block_decode(THREADS_PER_BLOCK_GEMV);
+    // dim3 grid_decode(1, (N + BN_GEMV - 1) / BN_GEMV);
 
-    dim3 block_decode(THREADS_PER_BLOCK_GEMV);
-    dim3 grid_decode(1, (N + BN_GEMV - 1) / BN_GEMV);
+    constexpr int WARPS_PER_BLOCK = 32;
+    dim3 block(WARPS_PER_BLOCK * WARP_SIZE);
+    dim3 grid((N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK);
 
-    matmul_awq_gemv_kernel_v2<T, ScaleType, BK_GEMV, BN_GEMV,
-                              THREADS_PER_BLOCK_GEMV>
-        <<<grid_decode, block_decode, 0, stream>>>(
+    // matmul_awq_gemv_kernel_v2<T, ScaleType, BK_GEMV, BN_GEMV,
+    //                           THREADS_PER_BLOCK_GEMV>
+    //     <<<grid_decode, block_decode, 0, stream>>>(
+    //         input.data_ptr(), qweight.data_ptr(), scales_input.data_ptr(),
+    //         zeros_input.data_ptr(), output->data_ptr(), K, N, group_size,
+    //         bias ? bias->data_ptr() : nullptr);
+    awq_gemv_warp_vectorized<T, ScaleType, BK_GEMV, 2, WARPS_PER_BLOCK>
+        <<<grid, block, 0, stream>>>(
             input.data_ptr(), qweight.data_ptr(), scales_input.data_ptr(),
             zeros_input.data_ptr(), output->data_ptr(), K, N, group_size,
             bias ? bias->data_ptr() : nullptr);
     launch_err = cudaGetLastError();
-
   } else {
     if constexpr (std::is_same_v<T, __half> ||
                   std::is_same_v<T, __nv_bfloat16>) {
@@ -528,25 +651,6 @@ void matmul_quantized(const Tensor<T> &input, const Tensor<int32_t> &qweight,
       dim3 block_wmma(THREADS_PER_BLOCK_WMMA);
       dim3 grid_wmma((M + BM_WMMA - 1) / BM_WMMA, (N + BN_WMMA - 1) / BN_WMMA);
 
-      // #ifdef DEBUG_AWQ
-      //       std::cout << "Launching Prefill WMMA Kernel v1 (M=" << M << ")"
-      //                 << std::endl;
-      //       std::cout << "Using BM=" << BM_WMMA << ", BN=" << BN_WMMA
-      //                 << ", BK=" << BK_WMMA << std::endl;
-      //       std::cout << "Grid: (" << grid_wmma.x << ", " << grid_wmma.y <<
-      //       ", "
-      //                 << grid_wmma.z << "), Block: (" << block_wmma.x << ", "
-      //                 << block_wmma.y << ", " << block_wmma.z << ")" <<
-      //                 std::endl;
-      //       std::cout << "M=" << M << ", K=" << K << ", N=" << N
-      //                 << ", group_size=" << group_size << std::endl;
-      //       debug_print_tensor(input, "input (WMMA)");
-      //       debug_print_tensor(qweight, "qweight (WMMA)");
-      //       debug_print_tensor(scales_input, "scales (WMMA)");
-      //       debug_print_tensor(zeros_input, "zeros (WMMA)");
-      //       if (bias) debug_print_tensor(*bias, "bias (WMMA)");
-      // #endif
-
       matmul_awq_kernel_prefill_wmma_v1<T, ScaleType, BM_WMMA, BN_WMMA, BK_WMMA,
                                         WMMA_M, WMMA_N, WMMA_K>
           <<<grid_wmma, block_wmma, 0, stream>>>(
@@ -562,7 +666,8 @@ void matmul_quantized(const Tensor<T> &input, const Tensor<int32_t> &qweight,
                 << ". Prefill stage (M > 1) will not execute." << std::endl;
 
       throw std::runtime_error(
-          "matmul_quantized WMMA kernel currently only supports half/bfloat16 "
+          "matmul_quantized WMMA kernel currently only supports "
+          "half/bfloat16 "
           "input/output types for M > 1.");
     }
   }
