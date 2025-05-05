@@ -16,3 +16,4 @@ analyze_awq_model.py
 test.cu
 .gitignore
 minimal_test_v2
+interface/__pycache__/device_config.cpython-312.pyc

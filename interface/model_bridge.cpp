@@ -11,6 +11,7 @@
 
 #include "CudaMemoryPool.hpp"
 #include "base_model.hpp"
+#include "device_manager.hpp"
 #include "inference.hpp"
 #include "llama.hpp"
 #include "qwen.hpp"
@@ -758,11 +759,17 @@ bool init_model(py::dict config, py::dict weights,
           static_cast<int>(config["rope_theta"].cast<float>());
       // 处理 Llama 权重（FP32）
       cpp_weights_fp32 = process_llama_weights(weights);
-      // 创建 Llama 模型（默认在 CUDA 上运行 支持CPU）
+      // 创建 Llama 模型（根据默认设备配置）
+      Device default_device = DeviceManager::instance().getDefaultDevice();
       g_model = ModelFactory::create_model(type, cpp_weights_fp32, cpp_config);
-      g_model->cuda();
+
+      // 如果默认设备是CUDA，则移动模型到CUDA
+      if (default_device == Device::CUDA) {
+        g_model->cuda();
+      }
+
       g_engine =
-          std::make_unique<InferenceEngine<float>>(g_model, Device::CUDA);
+          std::make_unique<InferenceEngine<float>>(g_model, default_device);
 
     } else if (model_type == "qwen") {
       type = ModelType::QWEN;
@@ -784,10 +791,21 @@ bool init_model(py::dict config, py::dict weights,
       // 处理 Qwen FP32 权重
       cpp_weights_fp32 = process_qwen_weights_fp32(weights);
       g_model = ModelFactory::create_model(type, cpp_weights_fp32, cpp_config);
-      // Qwen 模型仅支持 CUDA，故必须移动到 CUDA
+
+      // 获取默认设备
+      Device default_device = DeviceManager::instance().getDefaultDevice();
+
+      // Qwen 模型目前仅支持 CUDA，如果默认设备是CPU，发出警告并强制使用CUDA
+      if (default_device == Device::CPU) {
+        std::cerr
+            << "Warning: Qwen model currently only supports CUDA execution. "
+            << "Forcing CUDA device despite CPU being requested." << std::endl;
+        default_device = Device::CUDA;
+      }
+
       g_model->cuda();
       g_engine =
-          std::make_unique<InferenceEngine<float>>(g_model, Device::CUDA);
+          std::make_unique<InferenceEngine<float>>(g_model, default_device);
 
     } else if (model_type == "qwen_bf16") {
       type = ModelType::QWEN_BF16;
@@ -809,10 +827,22 @@ bool init_model(py::dict config, py::dict weights,
       // 处理 Qwen BF16 权重（输入必须为 PyTorch bf16 类型）
       cpp_weights_bf16 = process_qwen_weights_bf16(weights);
 
+      // 获取默认设备
+      Device default_device = DeviceManager::instance().getDefaultDevice();
+
+      // Qwen 模型目前仅支持 CUDA，如果默认设备是CPU，发出警告并强制使用CUDA
+      if (default_device == Device::CPU) {
+        std::cerr << "Warning: Qwen BF16 model currently only supports CUDA "
+                     "execution. "
+                  << "Forcing CUDA device despite CPU being requested."
+                  << std::endl;
+        default_device = Device::CUDA;
+      }
+
       g_model = std::make_shared<QwenModel<__nv_bfloat16>>(cpp_weights_bf16,
                                                            cpp_config);
-      g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(g_model,
-                                                                  Device::CUDA);
+      g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(
+          g_model, default_device);
       g_model->cuda();
     } else if (model_type == "qwen_awq") {
       type = ModelType::QWEN_AWQ;
@@ -847,13 +877,25 @@ bool init_model(py::dict config, py::dict weights,
       auto [bf16_weights, qweight_params, scales_params, qzeros_params] =
           process_qwen_weights_awq(weights);
 
+      // 获取默认设备
+      Device default_device = DeviceManager::instance().getDefaultDevice();
+
+      // Qwen 模型目前仅支持 CUDA，如果默认设备是CPU，发出警告并强制使用CUDA
+      if (default_device == Device::CPU) {
+        std::cerr << "Warning: Qwen AWQ model currently only supports CUDA "
+                     "execution. "
+                  << "Forcing CUDA device despite CPU being requested."
+                  << std::endl;
+        default_device = Device::CUDA;
+      }
+
       // 创建带量化参数的模型
       g_model = std::make_shared<QwenModel<__nv_bfloat16>>(
           bf16_weights, qweight_params, scales_params, qzeros_params,
           cpp_config);
 
-      g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(g_model,
-                                                                  Device::CUDA);
+      g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(
+          g_model, default_device);
       g_model->cuda();
     } else {
       throw std::runtime_error("Unsupported model type: " + model_type);
@@ -925,8 +967,43 @@ void generate_text_stream(const std::vector<uint32_t>& input_ids,
                                    });
 }
 
-// Pybind11 模块定义
+// 设置默认设备
+bool set_default_device(const std::string& device_str) {
+  try {
+    Device device;
+    if (device_str == "cuda" || device_str == "CUDA") {
+      device = Device::CUDA;
+      // 检查CUDA是否可用
+      if (!DeviceManager::instance().isCudaAvailable()) {
+        std::cerr << "CUDA requested but not available. Falling back to CPU."
+                  << std::endl;
+        device = Device::CPU;
+      }
+    } else if (device_str == "cpu" || device_str == "CPU") {
+      device = Device::CPU;
+    } else {
+      std::cerr << "Invalid device: " << device_str
+                << ". Valid options are 'cuda' or 'cpu'." << std::endl;
+      return false;
+    }
 
+    DeviceManager::instance().setDefaultDevice(device);
+    std::cout << "Default device set to: "
+              << (device == Device::CUDA ? "CUDA" : "CPU") << std::endl;
+    return true;
+  } catch (const std::exception& e) {
+    std::cerr << "Error setting default device: " << e.what() << std::endl;
+    return false;
+  }
+}
+
+// 获取当前默认设备
+std::string get_default_device() {
+  Device device = DeviceManager::instance().getDefaultDevice();
+  return (device == Device::CUDA) ? "cuda" : "cpu";
+}
+
+// Pybind11 模块定义
 PYBIND11_MODULE(model_bridge, m) {
   m.def("init_model", &init_model, py::arg("config"), py::arg("weights"),
         py::arg("model_type") = "llama", "Initialize and verify the model");
@@ -934,4 +1011,8 @@ PYBIND11_MODULE(model_bridge, m) {
         py::arg("callback"), py::arg("max_length") = 100,
         py::arg("temperature") = 1.0f, py::arg("top_p") = 0.9f,
         py::arg("top_k") = 50, "Stream generated tokens via callback");
+  m.def("set_default_device", &set_default_device, py::arg("device"),
+        "Set the default device for model execution (cuda or cpu)");
+  m.def("get_default_device", &get_default_device,
+        "Get the current default device for model execution");
 }

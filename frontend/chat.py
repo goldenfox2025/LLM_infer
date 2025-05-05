@@ -164,6 +164,7 @@ def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen 模型聊天')
     parser.add_argument('--model_path', type=str, default="./quantization_test/Qwen2.5-1.5B-AWQ", help='模型路径')
     parser.add_argument('--model_type', type=str, default="qwen_awq", choices=['llama', 'qwen', 'qwen_bf16', 'qwen_awq'], help='模型类型')
+    parser.add_argument('--device', type=str, default="cuda", choices=['cuda', 'cpu'], help='运行设备 (cuda 或 cpu)')#qwen不支持cpu 会强制使用cuda
     parser.add_argument('--system_prompt', type=str, default="You are a helpful assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=200 + 22, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=1, help='生成温度')
@@ -197,15 +198,31 @@ def main():
     print(f"Model Type: {model_type}")
     if model_type.startswith("qwen"):
         precision = "BF16" if model_type == "qwen_bf16" else "FP32"
+        if model_type == "qwen_awq":
+            precision += " (AWQ Quantized)"
         print(f"Precision: {precision}")
     print(f"Hidden Size: {config['hidden_size']}")
     print(f"Num Attention Heads: {config['num_attention_heads']}")
     print(f"Num Key Value Heads: {config['num_key_value_heads']}")
     print(f"Head Dimension: {config['hidden_size'] // config['num_attention_heads']}")
+    print(f"Requested Device: {args.device}")
 
     # 导入 C++ 模型桥接接口
     sys.path.append("./build")
-    from model_bridge import init_model, generate_text_stream
+    from model_bridge import init_model, generate_text_stream, set_default_device, get_default_device
+
+    # 导入设备配置模块
+    sys.path.append("./interface")
+    import device_config
+
+    # 设置默认设备
+    print(f"\n设置默认设备为: {args.device}")
+    if not set_default_device(args.device):
+        print(f"设置设备 {args.device} 失败，使用默认设备", file=sys.stderr)
+
+    # 打印当前设备
+    current_device = get_default_device()
+    print(f"当前使用设备: {current_device}")
 
     # 初始化模型
     if not init_model(config, weights, model_type):
@@ -296,8 +313,11 @@ def main():
             current_time = time.monotonic()
             if start_time is None:
                 start_time = current_time
+            # 计算每个token的生成时间（仅用于调试）
             if last_token_time is not None:
-                delta = current_time - last_token_time
+                token_time = current_time - last_token_time
+                # 如果需要打印每个token的生成时间，可以取消下面的注释
+                # print(f"Token time: {token_time:.4f}s", end="\r", flush=True)
             last_token_time = current_time
 
             accumulated_tokens.append(token_id)
