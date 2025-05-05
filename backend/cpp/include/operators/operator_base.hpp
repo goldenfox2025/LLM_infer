@@ -148,6 +148,9 @@ class OperatorRegistry {
   void registerOperator(OperatorType type, OperatorPlatform platform,
                         std::shared_ptr<OperatorBase> op) {
     std::string key = getKey(type, platform);
+    if (operators_.find(key) != operators_.end()) {
+      return;
+    }
     operators_[key] = op;
   }
 
