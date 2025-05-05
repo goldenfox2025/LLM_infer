@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <memory>
@@ -17,6 +18,8 @@ enum class OperatorType {
   MATMUL,
   GATHER,
   SOFTMAX,
+  ADD,
+  MULTIPLY,
   // 添加更多算子类型...
 };
 
@@ -56,6 +59,60 @@ class RopeOperator : public OperatorBase {
 
   // 获取算子名称
   std::string name() const override { return "rope"; }
+};
+
+// RMS Norm算子接口
+template <typename T>
+class RmsNormOperator : public OperatorBase {
+ public:
+  virtual ~RmsNormOperator() = default;
+
+  // RMS Norm算子实现 - 使用二重指针以支持CUDA图优化
+  virtual void operator()(Tensor<T>** output, Tensor<T>** input,
+                          Tensor<T>** weight, float* eps,
+                          cudaStream_t stream = nullptr) = 0;
+
+  // 获取算子类型
+  OperatorType type() const override { return OperatorType::RMS_NORM; }
+
+  // 获取算子名称
+  std::string name() const override { return "rms_norm"; }
+};
+
+// Add算子接口
+template <typename T>
+class AddOperator : public OperatorBase {
+ public:
+  virtual ~AddOperator() = default;
+
+  // Add算子实现 - 使用二重指针以支持CUDA图优化
+  virtual void operator()(Tensor<T>** output, Tensor<T>** input_a,
+                          Tensor<T>** input_b,
+                          cudaStream_t stream = nullptr) = 0;
+
+  // 获取算子类型
+  OperatorType type() const override { return OperatorType::ADD; }
+
+  // 获取算子名称
+  std::string name() const override { return "add"; }
+};
+
+// Multiply算子接口
+template <typename T>
+class MultiplyOperator : public OperatorBase {
+ public:
+  virtual ~MultiplyOperator() = default;
+
+  // Multiply算子实现 - 使用二重指针以支持CUDA图优化
+  virtual void operator()(Tensor<T>** output, Tensor<T>** input_a,
+                          Tensor<T>** input_b,
+                          cudaStream_t stream = nullptr) = 0;
+
+  // 获取算子类型
+  OperatorType type() const override { return OperatorType::MULTIPLY; }
+
+  // 获取算子名称
+  std::string name() const override { return "multiply"; }
 };
 
 // 其他算子接口可以在这里添加...

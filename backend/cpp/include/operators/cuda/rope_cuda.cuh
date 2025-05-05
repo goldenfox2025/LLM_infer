@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include "operators/operator_base.hpp"

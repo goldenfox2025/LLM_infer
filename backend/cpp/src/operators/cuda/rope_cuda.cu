@@ -1,39 +1,46 @@
-#include <cmath>
-#include <iostream>
-#include <stdexcept>
+#include <cmath>      // 包含 cmath 用于数学函数，如 powf, cosf, sinf
+#include <iostream>   // 包含 iostream 用于错误输出 (std::cerr)
+#include <stdexcept>  // 包含 stdexcept 用于抛出运行时错误 (std::runtime_error)
 
-#include "operators/cuda/rope_cuda.cuh"
+#include "operators/cuda/rope_cuda.cuh"  // 包含 RoPE CUDA 操作的头文件
 
-namespace op {
+namespace op {  // 定义在 op 命名空间内
 
-// CUDA kernel for RoPE operation (optimized version)
+// RoPE 操作的 CUDA 核函数 (通用模板版本)
 template <typename T>
-__global__ void rope_kernel_v1(T *tensor, size_t seq_len, size_t n_heads,
-                               size_t head_dim, size_t offset, float theta) {
-  // Each thread handles one dimension pair (i, i + head_dim/2) for a specific
-  // (seq_idx, head_idx) Grid dimension should be (seq_len * n_heads * head_dim
-  // / 2)
+__global__ void rope_kernel(T *tensor, size_t seq_len, size_t n_heads,
+                            size_t head_dim, size_t offset, float theta) {
+  // 计算全局线程索引
+  // Grid 维度设计为覆盖所有需要旋转的维度对
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  // 总共需要处理的旋转对数量
   size_t total_rotations = seq_len * n_heads * (head_dim / 2);
 
+  // 检查线程索引是否越界
   if (idx < total_rotations) {
-    // Calculate position indices
-    size_t dim_half = head_dim / 2;
-    size_t rot_dim = idx % dim_half;
+    // 计算当前线程负责处理的维度、头和序列索引
+    size_t dim_half = head_dim / 2;  // 头维度的一半
+    size_t rot_dim =
+        idx % dim_half;  // 当前处理的旋转维度索引 (0 到 dim_half-1)
     size_t tmp = idx / dim_half;
-    size_t head_idx = tmp % n_heads;
-    size_t seq_idx = tmp / n_heads;
+    size_t head_idx = tmp % n_heads;  // 当前处理的头索引
+    size_t seq_idx = tmp / n_heads;   // 当前处理的序列位置索引
 
-    // Calculate pointer to the start of the head
+    // 计算指向当前处理的头的起始位置的指针
     T *head_ptr = tensor + seq_idx * n_heads * head_dim + head_idx * head_dim;
 
-    // Calculate rotation parameters
+    // 计算 RoPE 旋转所需的频率、角度值、余弦和正弦
+    // RoPE 频率计算公式: 1.0 / (theta^(2k / d))
     float freq = 1.0f / powf(theta, (2.0f * rot_dim) / head_dim);
+    // 旋转角度 = (序列位置 + 偏移量) * 频率
     float val = (seq_idx + offset) * freq;
-    float cos_val = cosf(val);
-    float sin_val = sinf(val);
+    float cos_val = cosf(val);  // 计算余弦值
+    float sin_val = sinf(val);  // 计算正弦值
 
-    // Apply rotation
+    // 应用旋转变换：
+    // x_new = x * cos(m*theta_i) - y * sin(m*theta_i)
+    // y_new = x * sin(m*theta_i) + y * cos(m*theta_i)
+    // 其中 x 是 head_ptr[rot_dim], y 是 head_ptr[rot_dim + dim_half]
     float x0 = static_cast<float>(head_ptr[rot_dim]);
     float x1 = static_cast<float>(head_ptr[rot_dim + dim_half]);
     head_ptr[rot_dim] = static_cast<T>(x0 * cos_val - x1 * sin_val);
@@ -41,36 +48,39 @@ __global__ void rope_kernel_v1(T *tensor, size_t seq_len, size_t n_heads,
   }
 }
 
-// Specialized kernel for BF16 data type
+// RoPE 操作的 CUDA 核函数 (__nv_bfloat16 特化版本)
+// 这个版本为 bfloat16 做了优化，每个线程处理两个维度对 (共4个元素)
 template <>
-__global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor,
-                                              size_t seq_len, size_t n_heads,
-                                              size_t head_dim, size_t offset,
-                                              float theta) {
-  // Each thread handles TWO dimension pairs using bfloat162 type
-  // Total number of bfloat162 pairs to process per head is head_dim / 4
-  // Grid dimension should be (seq_len * n_heads * head_dim / 4)
+__global__ void rope_kernel<__nv_bfloat16>(__nv_bfloat16 *tensor,
+                                           size_t seq_len, size_t n_heads,
+                                           size_t head_dim, size_t offset,
+                                           float theta) {
+  // 计算全局线程索引
+  // Grid 维度设计为覆盖所有需要处理的 bf16x2 对
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   size_t head_dim_half = head_dim / 2;
-  size_t pairs_per_head_half =
-      head_dim_half / 2;  // Each bfloat162 holds 2 elements
+  // 每个头需要处理的 bf16 元素对的数量 (head_dim/2 个元素 / 每个线程处理 2
+  // 个元素 = head_dim/4)
+  size_t pairs_per_head_half = head_dim_half / 2;
+  // 总共需要处理的 bf16 元素对数量
   size_t total_vec_rotations = seq_len * n_heads * pairs_per_head_half;
 
+  // 检查线程索引是否越界
   if (idx < total_vec_rotations) {
-    // Calculate position indices
-    size_t rot_dim_vec = idx % pairs_per_head_half;
+    // 计算当前线程负责处理的维度、头和序列索引
+    size_t rot_dim_vec = idx % pairs_per_head_half;  // 当前处理的 bf16 对的索引
     size_t tmp = idx / pairs_per_head_half;
-    size_t head_idx = tmp % n_heads;
-    size_t seq_idx = tmp / n_heads;
+    size_t head_idx = tmp % n_heads;  // 当前处理的头索引
+    size_t seq_idx = tmp / n_heads;   // 当前处理的序列位置索引
 
-    // Calculate pointer to the start of the head
+    // 计算指向当前处理的头的起始位置的指针
     __nv_bfloat16 *head_ptr =
         tensor + seq_idx * n_heads * head_dim + head_idx * head_dim;
 
-    // Process two pairs at once (4 elements total)
-    size_t rot_dim = rot_dim_vec * 2;
+    // 每个线程处理两个相邻的维度对
+    size_t rot_dim = rot_dim_vec * 2;  // 第一个维度对的起始索引
 
-    // First pair
+    // --- 处理第一个维度对 (rot_dim, rot_dim + head_dim_half) ---
     float freq1 = 1.0f / powf(theta, (2.0f * rot_dim) / head_dim);
     float val1 = (seq_idx + offset) * freq1;
     float cos_val1 = cosf(val1);
@@ -83,7 +93,8 @@ __global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor,
     head_ptr[rot_dim + head_dim_half] =
         static_cast<__nv_bfloat16>(x0_1 * sin_val1 + x1_1 * cos_val1);
 
-    // Second pair
+    // --- 处理第二个维度对 (rot_dim + 1, rot_dim + 1 + head_dim_half) ---
+    // 注意：频率需要用 rot_dim + 1 来计算
     float freq2 = 1.0f / powf(theta, (2.0f * (rot_dim + 1)) / head_dim);
     float val2 = (seq_idx + offset) * freq2;
     float cos_val2 = cosf(val2);
@@ -98,108 +109,122 @@ __global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor,
   }
 }
 
-// Generic kernel implementation
-template <typename T>
-__global__ void rope_kernel(T *tensor, size_t seq_len, size_t n_heads,
-                            size_t head_dim, size_t offset, float theta) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < seq_len * n_heads) {
-    size_t seq_idx = idx / n_heads;
-    size_t head_idx = idx % n_heads;
-    T *head_ptr = tensor + seq_idx * n_heads * head_dim + head_idx * head_dim;
-    size_t dim_half = head_dim / 2;
-    for (size_t i = 0; i < dim_half; i++) {
-      float freq = 1.0f / powf(theta, (2.0f * i) / head_dim);
-      float val = (seq_idx + offset) * freq;
-      float cos_val = cosf(val);
-      float sin_val = sinf(val);
-      float x0 = static_cast<float>(head_ptr[i]);
-      float x1 = static_cast<float>(head_ptr[i + dim_half]);
-      head_ptr[i] = static_cast<T>(x0 * cos_val - x1 * sin_val);
-      head_ptr[i + dim_half] = static_cast<T>(x0 * sin_val + x1 * cos_val);
-    }
-  }
-}
-
-// Implementation of the RoPE CUDA operator - 使用二重指针以支持CUDA图优化
+// RoPE CUDA 算子的实现类
 template <typename T>
 void RopeCUDAOperator<T>::operator()(Tensor<T> **x_ptr, size_t *offset_ptr,
                                      float theta, cudaStream_t stream) {
-  // 从二重指针获取实际值
-  Tensor<T> *x = *x_ptr;
-  size_t offset = *offset_ptr;
+  // 使用二重指针 (指向指针的指针) 是为了更好地支持 CUDA Graph。
+  // CUDA Graph 捕获时，图会记录核函数启动时的参数值（包括指针地址）。
+  // 如果我们只想更新数据内容或偏移量而不重新捕获图，就需要传递指向这些变量的指针，
+  // 然后在更新时修改指针所指向的内存。
+  Tensor<T> *x = *x_ptr;        // 获取实际的 Tensor 对象指针
+  size_t offset = *offset_ptr;  // 获取实际的偏移量值
 
+  // 获取输入张量的维度信息
   const auto &sizes = x->sizes();
+  // 输入张量至少需要包含序列长度、头数量和头维度这三维
   if (sizes.size() < 3) {
-    throw std::runtime_error("rope: tensor must be at least 3D");
+    throw std::runtime_error(
+        "RoPE: 输入张量至少需要是 3D (seq_len, n_heads, head_dim)");
   }
 
-  size_t seq_len = sizes[0];
-  size_t n_heads = sizes[1];
-  size_t head_dim = sizes[2];
+  // 确定序列长度、头数和头维度
+  size_t seq_len, n_heads, head_dim;
+  size_t batch_size = 1;
 
-  if (head_dim == 0) return;  // Nothing to do
-  if (head_dim % 2 != 0) {
-    throw std::runtime_error("rope: head_dim must be even");
-  }
-
-  int threads = 256;  // Common block size, can be tuned (128, 512, etc.)
-  int blocks = 0;
-  void *kernel_ptr = nullptr;
-
-  // Select kernel and grid based on type
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-    if (head_dim % 4 != 0) {
-      // BF16 kernel requires head_dim to be a multiple of 4 for bfloat162
-      // loads/stores Fallback to generic kernel or throw error. Here we throw.
-      throw std::runtime_error(
-          "rope: BF16 requires head_dim to be a multiple of 4 for optimized "
-          "kernel");
+  // 根据张量维度确定批次大小和其他参数
+  if (sizes.size() == 3) {
+    // 3D张量: [seq_len, n_heads, head_dim]
+    seq_len = sizes[0];
+    n_heads = sizes[1];
+    head_dim = sizes[2];
+  } else {
+    // 4D或更高维张量: [batch_size, seq_len, n_heads, head_dim]
+    // 计算批次大小（除了最后三个维度外的所有维度的乘积）
+    for (size_t i = 0; i < sizes.size() - 3; ++i) {
+      batch_size *= sizes[i];
     }
-    size_t total_vec_rotations =
-        seq_len * n_heads *
-        (head_dim / 4);  // Each thread handles a bfloat162 pair
+    seq_len = sizes[sizes.size() - 3];
+    n_heads = sizes[sizes.size() - 2];
+    head_dim = sizes[sizes.size() - 1];
+  }
+
+  // 如果头维度为0，则无需执行任何操作
+  if (head_dim == 0) return;
+  // RoPE 操作要求头维度必须是偶数，因为它总是成对操作
+  if (head_dim % 2 != 0) {
+    throw std::runtime_error("RoPE: 头维度 (head_dim) 必须是偶数");
+  }
+
+  // 设置 CUDA 核函数启动配置
+  int threads = 256;  // 每个块的线程数，这是一个常用的值，可以根据具体 GPU
+                      // 架构和问题规模进行调优
+  int blocks = 0;     // 需要启动的块数量，稍后计算
+  void *kernel_ptr = nullptr;  // 指向要启动的核函数的指针
+
+  // 根据数据类型 T 选择合适的核函数并计算 Grid 大小 (blocks)
+  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    // 对于 BF16 类型，我们使用特化的核函数
+    // 特化核函数要求 head_dim 是 4 的倍数，因为它一次处理 4 个 bf16
+    // (两个维度对)
+    if (head_dim % 4 != 0) {
+      // 如果不满足要求，可以选择回退到通用核函数或报错。这里选择报错。
+      throw std::runtime_error(
+          "RoPE (BF16): 优化的 BF16 内核要求 head_dim 是 4 的倍数");
+    }
+    // 计算 BF16 版本核函数需要的总工作项数（每个工作项处理 4 个元素/2对）
+    size_t total_vec_rotations = seq_len * n_heads * (head_dim / 4);
+    // 计算需要的块数 = (总工作项数 + 每个块的线程数 - 1) / 每个块的线程数
+    // (向上取整)
     blocks = (total_vec_rotations + threads - 1) / threads;
-    kernel_ptr = (void *)rope_kernel_v1<__nv_bfloat16>;
-  } else
-#endif
-  {
-    // Generic FP32/FP16 path
-    size_t total_rotations =
-        seq_len * n_heads * (head_dim / 2);  // Each thread handles one pair
+    // 将内核指针指向 BF16 特化版本
+    kernel_ptr = (void *)rope_kernel<__nv_bfloat16>;
+  } else {
+    // 对于其他类型 (如 float, __half)，使用通用模板核函数
+    // 计算通用版本核函数需要的总工作项数（每个工作项处理 2 个元素/1对）
+    size_t total_rotations = seq_len * n_heads * (head_dim / 2);
+    // 计算需要的块数
     blocks = (total_rotations + threads - 1) / threads;
-    kernel_ptr = (void *)rope_kernel_v1<T>;
+    // 将内核指针指向通用模板版本
+    kernel_ptr = (void *)rope_kernel<T>;
   }
 
-  // Kernel Launch
-  if (kernel_ptr == (void *)rope_kernel_v1<T>) {
-    rope_kernel_v1<T><<<blocks, threads, 0, stream>>>(
-        x->data_ptr(), seq_len, n_heads, head_dim, offset, theta);
-  }
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-  else if (kernel_ptr == (void *)rope_kernel_v1<__nv_bfloat16>) {
-    rope_kernel_v1<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<__nv_bfloat16 *>(
-            x->data_ptr()),  // Cast needed if T is bf16
-        seq_len, n_heads, head_dim, offset, theta);
-  }
-#endif
-  else {
-    throw std::runtime_error("Internal error: No valid kernel selected.");
-  }
+  // 对每个批次样本应用RoPE
+  for (size_t b = 0; b < batch_size; b++) {
+    // 计算当前批次样本的数据指针
+    T *batch_ptr = x->data_ptr() + b * seq_len * n_heads * head_dim;
 
-  // Error Checking
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess) {
-    std::cerr << "CUDA error after rope kernel launch: "
-              << cudaGetErrorString(err) << std::endl;
-    throw std::runtime_error("CUDA rope kernel launch failed");
+    // 启动 CUDA 核函数
+    if (kernel_ptr == (void *)rope_kernel<T>) {
+      // 启动通用模板 Kernel
+      rope_kernel<T><<<blocks, threads, 0, stream>>>(
+          batch_ptr, seq_len, n_heads, head_dim, offset, theta);
+    } else if (kernel_ptr == (void *)rope_kernel<__nv_bfloat16>) {
+      // 启动 BF16 特化 Kernel，注意需要将 data_ptr 转换为 __nv_bfloat16*
+      rope_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+          reinterpret_cast<__nv_bfloat16 *>(batch_ptr),  // 类型转换
+          seq_len, n_heads, head_dim, offset, theta);
+    } else {
+      // 理论上不应该执行到这里，因为上面已经覆盖了所有情况
+      throw std::runtime_error("内部错误：未能选择有效的 RoPE CUDA 核函数");
+    }
+
+    // 检查 CUDA API 调用和核函数启动是否出错
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cerr << "CUDA error after RoPE kernel launch: "
+                << cudaGetErrorString(err) << std::endl;
+      throw std::runtime_error("RoPE CUDA kernel launch failed");
+    }
   }
 }
 
-// Explicit template instantiations
+// 显式模板实例化：
+// 这会告诉编译器为 float 和 __nv_bfloat16 这两种类型生成 RopeCUDAOperator
+// 类的完整代码。 如果不显式实例化，链接器可能会找不到这些特定类型的实现。
 template class RopeCUDAOperator<float>;
 template class RopeCUDAOperator<__nv_bfloat16>;
+// 如果需要支持 FP16 (__half)，也需要在这里添加:
+// template class RopeCUDAOperator<__half>;
 
 }  // namespace op

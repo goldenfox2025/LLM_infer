@@ -412,8 +412,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
   // 主循环：遍历所有Transformer层
   std::string l = "layers." + std::to_string(0) + ".";
   auto &attention_norm_weight = params_.at(l + "input_layernorm.weight");
-  cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
-                    rms_norm_eps_);
+  // 使用新的算子抽象层
+  operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight,
+                       rms_norm_eps_);
+  // 旧算子
+  // cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
+  //                  rms_norm_eps_);
   for (size_t i = 0; i < n_layers_; i++) {
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
 
@@ -838,7 +842,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
   // 最终的LayerNorm (RMSNorm)
   auto &norm_weight = params_.at("norm.weight");
   Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA);
-  cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+  // 使用新的算子抽象层
+  operators_->rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+  // 旧算子
+  // cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
 
   // LM head投影到词汇表大小
   auto &lm_head_weight = params_.at("lm_head");
@@ -894,8 +901,12 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
 
     auto &attention_norm_weight =
         params_.at(layer_prefix + "input_layernorm.weight");
-    cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
-                      rms_norm_eps_);
+    // 使用新的算子抽象层
+    operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight,
+                         rms_norm_eps_);
+    // 旧算子
+    // cuda_OP::rms_norm(&hidden_states, &residual, &attention_norm_weight,
+    //                  rms_norm_eps_);
 
     // 获取偏置项（如果存在）
     const Tensor<T> *q_bias = nullptr;
