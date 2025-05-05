@@ -245,7 +245,7 @@ template <typename T>
 QwenModel<T>::QwenModel(
     const std::unordered_map<std::string, Tensor<T>> &params,
     const std::unordered_map<std::string, Tensor<int32_t>> &qweight_params,
-    const std::unordered_map<std::string, Tensor<float>> &scales_params,
+    const std::unordered_map<std::string, Tensor<T>> &scales_params,
     const std::unordered_map<std::string, Tensor<int32_t>> &qzeros_params,
     const std::unordered_map<std::string, int> &config)
     : params_(params),
@@ -285,7 +285,7 @@ QwenModel<T>::QwenModel(
   for (const auto &kv : scales_params) {
     if (kv.second.device() != Device::CUDA) {
       // 创建副本并移动到CUDA
-      Tensor<float> tensor_copy = kv.second;
+      Tensor<T> tensor_copy = kv.second;
       tensor_copy.cuda();
       scales_params_[kv.first] = tensor_copy;
     }
@@ -468,7 +468,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(q_scales_key) != scales_params_.end() &&
           qzeros_params_.find(q_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(q_qweight_key),
             scales_params_.at(q_scales_key), qzeros_params_.at(q_qzeros_key),
             group_size_, &q_buf, nullptr, q_bias);
@@ -482,7 +482,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(k_scales_key) != scales_params_.end() &&
           qzeros_params_.find(k_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(k_qweight_key),
             scales_params_.at(k_scales_key), qzeros_params_.at(k_qzeros_key),
             group_size_, &k_slice, nullptr, k_bias);
@@ -496,7 +496,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(v_scales_key) != scales_params_.end() &&
           qzeros_params_.find(v_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(v_qweight_key),
             scales_params_.at(v_scales_key), qzeros_params_.at(v_qzeros_key),
             group_size_, &v_slice, nullptr, v_bias);
@@ -689,7 +689,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(o_scales_key) != scales_params_.end() &&
           qzeros_params_.find(o_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             att_heads_reshaped, qweight_params_.at(o_qweight_key),
             scales_params_.at(o_scales_key), qzeros_params_.at(o_qzeros_key),
             group_size_, &att_proj, nullptr, o_bias);
@@ -754,11 +754,11 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(gate_scales_key) != scales_params_.end() &&
           qzeros_params_.find(gate_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(hidden_states,
-                                  qweight_params_.at(gate_qweight_key),
-                                  scales_params_.at(gate_scales_key),
-                                  qzeros_params_.at(gate_qzeros_key),
-                                  group_size_, &gate_buf, nullptr, gate_bias);
+        cuda_OP::matmul_quantized_gemv(
+            hidden_states, qweight_params_.at(gate_qweight_key),
+            scales_params_.at(gate_scales_key),
+            qzeros_params_.at(gate_qzeros_key), group_size_, &gate_buf, nullptr,
+            gate_bias);
       } else {
         // 回退到非量化版本
         std::cout << "Some errors." << std::endl;
@@ -770,7 +770,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(up_scales_key) != scales_params_.end() &&
           qzeros_params_.find(up_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(up_qweight_key),
             scales_params_.at(up_scales_key), qzeros_params_.at(up_qzeros_key),
             group_size_, &up_buf, nullptr, up_bias);
@@ -806,11 +806,11 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(down_scales_key) != scales_params_.end() &&
           qzeros_params_.find(down_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(gate_buf,
-                                  qweight_params_.at(down_qweight_key),
-                                  scales_params_.at(down_scales_key),
-                                  qzeros_params_.at(down_qzeros_key),
-                                  group_size_, &ffn_out, nullptr, down_bias);
+        cuda_OP::matmul_quantized_gemv(
+            gate_buf, qweight_params_.at(down_qweight_key),
+            scales_params_.at(down_scales_key),
+            qzeros_params_.at(down_qzeros_key), group_size_, &ffn_out, nullptr,
+            down_bias);
       } else {
         throw std::runtime_error("Some errors.");
       }
@@ -969,7 +969,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 使用量化矩阵乘法
 
         // 使用量化矩阵乘法，确保传递正确的流
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(q_qweight_key),
             scales_params_.at(q_scales_key), qzeros_params_.at(q_qzeros_key),
             group_size_, &q_buf, compute_streams_[0], q_bias);
@@ -977,7 +977,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 检查CUDA错误
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-          std::cerr << "CUDA error in q_proj matmul_quantized: "
+          std::cerr << "CUDA error in q_proj matmul_quantized_gemv: "
                     << cudaGetErrorString(err) << std::endl;
         }
       } else {
@@ -990,7 +990,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
           qzeros_params_.find(k_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
         // 使用量化矩阵乘法，确保传递正确的流
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(k_qweight_key),
             scales_params_.at(k_scales_key), qzeros_params_.at(k_qzeros_key),
             group_size_, &k_buf, compute_streams_[1], k_bias);
@@ -998,7 +998,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 检查CUDA错误
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-          std::cerr << "CUDA error in k_proj matmul_quantized: "
+          std::cerr << "CUDA error in k_proj matmul_quantized_gemv: "
                     << cudaGetErrorString(err) << std::endl;
         }
       } else {
@@ -1010,7 +1010,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
           qzeros_params_.find(v_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
         // 使用量化矩阵乘法，确保传递正确的流
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(v_qweight_key),
             scales_params_.at(v_scales_key), qzeros_params_.at(v_qzeros_key),
             group_size_, &v_buf, compute_streams_[2], v_bias);
@@ -1018,7 +1018,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
         // 检查CUDA错误
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-          std::cerr << "CUDA error in v_proj matmul_quantized: "
+          std::cerr << "CUDA error in v_proj matmul_quantized_gemv: "
                     << cudaGetErrorString(err) << std::endl;
         }
       } else {
@@ -1175,7 +1175,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(o_scales_key) != scales_params_.end() &&
           qzeros_params_.find(o_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             att_heads.view({seq_len, n_heads_ * head_dim_}),
             qweight_params_.at(o_qweight_key), scales_params_.at(o_scales_key),
             qzeros_params_.at(o_qzeros_key), group_size_, &att_proj, nullptr,
@@ -1239,11 +1239,11 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(gate_scales_key) != scales_params_.end() &&
           qzeros_params_.find(gate_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(hidden_states,
-                                  qweight_params_.at(gate_qweight_key),
-                                  scales_params_.at(gate_scales_key),
-                                  qzeros_params_.at(gate_qzeros_key),
-                                  group_size_, &gate_buf, nullptr, gate_bias);
+        cuda_OP::matmul_quantized_gemv(
+            hidden_states, qweight_params_.at(gate_qweight_key),
+            scales_params_.at(gate_scales_key),
+            qzeros_params_.at(gate_qzeros_key), group_size_, &gate_buf, nullptr,
+            gate_bias);
       } else {
         // 回退到非量化版本
         auto &gate_weight = params_.at(gate_weight_key);
@@ -1255,7 +1255,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(up_scales_key) != scales_params_.end() &&
           qzeros_params_.find(up_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(
+        cuda_OP::matmul_quantized_gemv(
             hidden_states, qweight_params_.at(up_qweight_key),
             scales_params_.at(up_scales_key), qzeros_params_.at(up_qzeros_key),
             group_size_, &up_buf, nullptr, up_bias);
@@ -1293,11 +1293,11 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
           scales_params_.find(down_scales_key) != scales_params_.end() &&
           qzeros_params_.find(down_qzeros_key) != qzeros_params_.end()) {
         // 使用量化矩阵乘法
-        cuda_OP::matmul_quantized(gate_buf,
-                                  qweight_params_.at(down_qweight_key),
-                                  scales_params_.at(down_scales_key),
-                                  qzeros_params_.at(down_qzeros_key),
-                                  group_size_, &ffn_out, nullptr, down_bias);
+        cuda_OP::matmul_quantized_gemv(
+            gate_buf, qweight_params_.at(down_qweight_key),
+            scales_params_.at(down_scales_key),
+            qzeros_params_.at(down_qzeros_key), group_size_, &ffn_out, nullptr,
+            down_bias);
       } else {
         // 回退到非量化版本
         auto &down_weight = params_.at(down_weight_key);

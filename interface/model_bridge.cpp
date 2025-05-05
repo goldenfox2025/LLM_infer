@@ -9,12 +9,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "CudaMemoryPool.hpp"
 #include "base_model.hpp"
 #include "inference.hpp"
 #include "llama.hpp"
 #include "qwen.hpp"
-#include "CudaMemoryPool.hpp"
-#include <iostream>
 
 namespace py = pybind11;
 class infer_base;
@@ -62,7 +61,8 @@ class ModelFactory {
       ModelType type,
       const std::unordered_map<std::string, Tensor<__nv_bfloat16>>& weights,
       const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
-      const std::unordered_map<std::string, Tensor<float>>& scales_params,
+      const std::unordered_map<std::string, Tensor<__nv_bfloat16>>&
+          scales_params,
       const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
       const std::unordered_map<std::string, int>& config) {
     switch (type) {
@@ -77,7 +77,8 @@ class ModelFactory {
       }
       default:
         throw std::runtime_error(
-            "Unsupported model type for quantized weights in create_model_quantized");
+            "Unsupported model type for quantized weights in "
+            "create_model_quantized");
     }
   }
 };
@@ -501,12 +502,12 @@ process_qwen_weights_bf16(const py::dict& weights) {
 // 处理 Qwen AWQ 量化权重
 std::tuple<std::unordered_map<std::string, Tensor<__nv_bfloat16>>,
            std::unordered_map<std::string, Tensor<int32_t>>,
-           std::unordered_map<std::string, Tensor<float>>,
+           std::unordered_map<std::string, Tensor<__nv_bfloat16>>,
            std::unordered_map<std::string, Tensor<int32_t>>>
 process_qwen_weights_awq(const py::dict& weights) {
   std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_bf16_weights;
   std::unordered_map<std::string, Tensor<int32_t>> cpp_qweight_params;
-  std::unordered_map<std::string, Tensor<float>> cpp_scales_params;
+  std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_scales_params;
   std::unordered_map<std::string, Tensor<int32_t>> cpp_qzeros_params;
 
   // 全局权重映射表（非量化权重）
@@ -514,8 +515,7 @@ process_qwen_weights_awq(const py::dict& weights) {
       {"model.embed_tokens.weight", "token_embeddings.weight"},
       {"model.norm.weight", "norm.weight"},
       {"lm_head.weight", "lm_head"},
-      {"model.lm_head.weight", "lm_head"}
-  };
+      {"model.lm_head.weight", "lm_head"}};
 
   // 处理非量化的全局权重
   for (const auto& [src_key, dst_key] : global_weights_map) {
@@ -553,16 +553,20 @@ process_qwen_weights_awq(const py::dict& weights) {
       }
 
       std::string full_dst_key = dst_key + ".qweight";
-      std::cout << "Processing Qwen AWQ qweight: " << key << " -> " << full_dst_key << std::endl;
+      std::cout << "Processing Qwen AWQ qweight: " << key << " -> "
+                << full_dst_key << std::endl;
 
       // 转换为int32_t张量
-      py::array_t<int32_t> np_array = item.second.cast<py::array_t<int32_t>>();
+      py::object tensor_obj = py::reinterpret_borrow<py::object>(item.second);
+      py::array_t<int32_t> np_array = tensor_obj.cast<py::array_t<int32_t>>();
       std::vector<size_t> shape;
       for (int i = 0; i < np_array.ndim(); i++) {
         shape.push_back(np_array.shape(i));
       }
-      std::vector<int32_t> data(np_array.data(), np_array.data() + np_array.size());
-      cpp_qweight_params.emplace(full_dst_key, Tensor<int32_t>(std::move(data), shape));
+      std::vector<int32_t> data(np_array.data(),
+                                np_array.data() + np_array.size());
+      cpp_qweight_params.emplace(full_dst_key,
+                                 Tensor<int32_t>(std::move(data), shape));
     }
 
     // 处理量化缩放因子 (scales)
@@ -582,16 +586,30 @@ process_qwen_weights_awq(const py::dict& weights) {
       }
 
       std::string full_dst_key = dst_key + ".scales";
-      std::cout << "Processing Qwen AWQ scales: " << key << " -> " << full_dst_key << std::endl;
+      std::cout << "Processing Qwen AWQ scales: " << key << " -> "
+                << full_dst_key << std::endl;
 
-      // 转换为float张量
-      py::array_t<float> np_array = item.second.cast<py::array_t<float>>();
+      // 转换为bf16张量
+      py::object tensor_obj = py::reinterpret_borrow<py::object>(item.second);
+      py::array_t<float> np_array = tensor_obj.cast<py::array_t<float>>();
       std::vector<size_t> shape;
       for (int i = 0; i < np_array.ndim(); i++) {
         shape.push_back(np_array.shape(i));
       }
-      std::vector<float> data(np_array.data(), np_array.data() + np_array.size());
-      cpp_scales_params.emplace(full_dst_key, Tensor<float>(std::move(data), shape));
+
+      // 先创建float数据
+      std::vector<float> float_data(np_array.data(),
+                                    np_array.data() + np_array.size());
+
+      // 转换为bf16
+      std::vector<__nv_bfloat16> bf16_data;
+      bf16_data.reserve(float_data.size());
+      for (const auto& val : float_data) {
+        bf16_data.push_back(static_cast<__nv_bfloat16>(val));
+      }
+
+      cpp_scales_params.emplace(
+          full_dst_key, Tensor<__nv_bfloat16>(std::move(bf16_data), shape));
     }
 
     // 处理量化零点 (qzeros)
@@ -611,16 +629,20 @@ process_qwen_weights_awq(const py::dict& weights) {
       }
 
       std::string full_dst_key = dst_key + ".qzeros";
-      std::cout << "Processing Qwen AWQ qzeros: " << key << " -> " << full_dst_key << std::endl;
+      std::cout << "Processing Qwen AWQ qzeros: " << key << " -> "
+                << full_dst_key << std::endl;
 
       // 转换为int32_t张量
-      py::array_t<int32_t> np_array = item.second.cast<py::array_t<int32_t>>();
+      py::object tensor_obj = py::reinterpret_borrow<py::object>(item.second);
+      py::array_t<int32_t> np_array = tensor_obj.cast<py::array_t<int32_t>>();
       std::vector<size_t> shape;
       for (int i = 0; i < np_array.ndim(); i++) {
         shape.push_back(np_array.shape(i));
       }
-      std::vector<int32_t> data(np_array.data(), np_array.data() + np_array.size());
-      cpp_qzeros_params.emplace(full_dst_key, Tensor<int32_t>(std::move(data), shape));
+      std::vector<int32_t> data(np_array.data(),
+                                np_array.data() + np_array.size());
+      cpp_qzeros_params.emplace(full_dst_key,
+                                Tensor<int32_t>(std::move(data), shape));
     }
 
     // 处理非量化的层级权重
@@ -629,14 +651,15 @@ process_qwen_weights_awq(const py::dict& weights) {
              key.find(".scales") == std::string::npos &&
              key.find(".qzeros") == std::string::npos) {
       // 处理层级权重（如 layernorm 和 bias）
-      const std::vector<std::pair<std::string, std::string>> qwen_layer_key_mapping = {
-          {"input_layernorm.weight", "input_layernorm.weight"},
-          {"post_attention_layernorm.weight", "post_attention_layernorm.weight"},
-          {"self_attn.q_proj.bias", "self_attn.q_proj.bias"},
-          {"self_attn.k_proj.bias", "self_attn.k_proj.bias"},
-          {"self_attn.v_proj.bias", "self_attn.v_proj.bias"},
-          {"self_attn.o_proj.bias", "self_attn.o_proj.bias"}
-      };
+      const std::vector<std::pair<std::string, std::string>>
+          qwen_layer_key_mapping = {
+              {"input_layernorm.weight", "input_layernorm.weight"},
+              {"post_attention_layernorm.weight",
+               "post_attention_layernorm.weight"},
+              {"self_attn.q_proj.bias", "self_attn.q_proj.bias"},
+              {"self_attn.k_proj.bias", "self_attn.k_proj.bias"},
+              {"self_attn.v_proj.bias", "self_attn.v_proj.bias"},
+              {"self_attn.o_proj.bias", "self_attn.o_proj.bias"}};
 
       for (const auto& [src_suffix, dst_suffix] : qwen_layer_key_mapping) {
         std::string pattern = "." + src_suffix;
@@ -645,8 +668,10 @@ process_qwen_weights_awq(const py::dict& weights) {
           size_t end = key.find('.', start);
           std::string layer_str = key.substr(start, end - start);
           int layer = std::stoi(layer_str);
-          std::string dst_key = "layers." + std::to_string(layer) + "." + dst_suffix;
-          std::cout << "Processing Qwen AWQ layer key: " << key << " -> " << dst_key << std::endl;
+          std::string dst_key =
+              "layers." + std::to_string(layer) + "." + dst_suffix;
+          std::cout << "Processing Qwen AWQ layer key: " << key << " -> "
+                    << dst_key << std::endl;
           py::object tensor = weights[key.c_str()];
           Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
           cpp_bf16_weights.emplace(dst_key, std::move(bf16_tensor));
@@ -666,8 +691,10 @@ process_qwen_weights_awq(const py::dict& weights) {
   // 如果 lm_head 缺失，则尝试从 token_embeddings.weight 转置生成
   if (cpp_bf16_weights.find("lm_head") == cpp_bf16_weights.end()) {
     std::cout << "Warning: lm_head not found in AWQ weights, creating from "
-                 "token_embeddings.weight" << std::endl;
-    if (cpp_bf16_weights.find("token_embeddings.weight") != cpp_bf16_weights.end()) {
+                 "token_embeddings.weight"
+              << std::endl;
+    if (cpp_bf16_weights.find("token_embeddings.weight") !=
+        cpp_bf16_weights.end()) {
       Tensor<__nv_bfloat16> lm_head =
           cpp_bf16_weights.at("token_embeddings.weight").transpose(-1, -2);
       cpp_bf16_weights.emplace("lm_head", std::move(lm_head));
@@ -677,7 +704,8 @@ process_qwen_weights_awq(const py::dict& weights) {
     }
   }
 
-  return {cpp_bf16_weights, cpp_qweight_params, cpp_scales_params, cpp_qzeros_params};
+  return {cpp_bf16_weights, cpp_qweight_params, cpp_scales_params,
+          cpp_qzeros_params};
 }
 
 bool init_model(py::dict config, py::dict weights,
@@ -712,7 +740,7 @@ bool init_model(py::dict config, py::dict weights,
     std::unordered_map<std::string, Tensor<float>> cpp_weights_fp32;
     std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_weights_bf16;
     std::unordered_map<std::string, Tensor<int32_t>> cpp_qweight_params;
-    std::unordered_map<std::string, Tensor<float>> cpp_scales_params;
+    std::unordered_map<std::string, Tensor<__nv_bfloat16>> cpp_scales_params;
     std::unordered_map<std::string, Tensor<int32_t>> cpp_qzeros_params;
 
     if (model_type == "llama") {
@@ -805,7 +833,7 @@ bool init_model(py::dict config, py::dict weights,
           static_cast<int>(config["rope_theta"].cast<float>());
 
       // 设置量化类型和分组大小
-      cpp_config["quant_type"] = 1; // AWQ量化
+      cpp_config["quant_type"] = 1;  // AWQ量化
 
       // 如果配置中有分组大小，则使用配置中的值
       if (config.contains("group_size")) {
@@ -821,7 +849,8 @@ bool init_model(py::dict config, py::dict weights,
 
       // 创建带量化参数的模型
       g_model = std::make_shared<QwenModel<__nv_bfloat16>>(
-          bf16_weights, qweight_params, scales_params, qzeros_params, cpp_config);
+          bf16_weights, qweight_params, scales_params, qzeros_params,
+          cpp_config);
 
       g_engine = std::make_unique<InferenceEngine<__nv_bfloat16>>(g_model,
                                                                   Device::CUDA);
@@ -837,9 +866,10 @@ bool init_model(py::dict config, py::dict weights,
       size_t hidden_dim = cpp_config["hidden_size"];
 
       // 获取最大序列长度，如果配置中有的话
-      size_t seq_len = 32; // 默认序列长度
+      size_t seq_len = 32;  // 默认序列长度
       if (cpp_config.find("max_position_embeddings") != cpp_config.end()) {
-        seq_len = std::min(seq_len, static_cast<size_t>(cpp_config["max_position_embeddings"]));
+        seq_len = std::min(seq_len, static_cast<size_t>(
+                                        cpp_config["max_position_embeddings"]));
       }
 
       // 检查GPU内存状态
@@ -853,19 +883,22 @@ bool init_model(py::dict config, py::dict weights,
         // 只有当可用内存超过1GB时才开启prefill模式
         if (free_memory > 1024 * 1024 * 1024) {
           // 计算prefill内存大小，使用可用内存的10%，但不超过256MB
-          size_t prefill_size = std::min(free_memory / 10, static_cast<size_t>(256 * 1024 * 1024));
+          size_t prefill_size = std::min(
+              free_memory / 10, static_cast<size_t>(256 * 1024 * 1024));
 
           // 开启prefill模式
           std::cout << "Enabling prefill mode with initial buffer size: "
                     << (prefill_size / (1024 * 1024)) << " MB" << std::endl;
           GlobalCudaMemoryPool::enable_prefill_mode(prefill_size);
         } else {
-          std::cout << "Skipping prefill mode due to low available memory" << std::endl;
+          std::cout << "Skipping prefill mode due to low available memory"
+                    << std::endl;
         }
       }
     } catch (const std::exception& e) {
       // 如果prefill模式初始化失败，只打印警告，不影响模型加载
-      std::cerr << "Warning: Failed to initialize prefill mode: " << e.what() << std::endl;
+      std::cerr << "Warning: Failed to initialize prefill mode: " << e.what()
+                << std::endl;
     }
 
     return true;

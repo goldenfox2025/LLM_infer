@@ -48,12 +48,12 @@ union Vec_2 {
 namespace cuda_OP {
 
 // 定义支持的数据类型别名
-template <typename T>
-void matmul_quantized_gemv(          // Renamed wrapper
-    const Tensor<T> &input,          // [M, K]
-    const Tensor<int32_t> &qweight,  // [N, K/8] <- Expected GEMV layout
-    const Tensor<float> &scales,     // [N, G_padded] (G_padded >= G)
-    const Tensor<int32_t> &zeros,    // [N, G/8]
+template <typename T, typename ScaleType = float>
+void matmul_quantized_gemv(           // Renamed wrapper
+    const Tensor<T> &input,           // [M, K]
+    const Tensor<int32_t> &qweight,   // [N, K/8] <- Expected GEMV layout
+    const Tensor<ScaleType> &scales,  // [N, G_padded] (G_padded >= G)
+    const Tensor<int32_t> &zeros,     // [N, G/8]
     int group_size,
     Tensor<T> *output,  // [M, N] - DIMS NOT CHECKED HERE
     cudaStream_t stream, const Tensor<T> *bias);
@@ -260,11 +260,11 @@ void dynamic_flash_attention_wrapper(Tensor<T> &Q, const Tensor<T> &total_K,
                                      cudaStream_t stream = nullptr);
 
 // AWQ量化矩阵乘法
-template <typename T>
+template <typename T, typename ScaleType = float>
 void matmul_quantized(const Tensor<T> &input, const Tensor<int32_t> &qweight,
-                      const Tensor<float> &scales, const Tensor<int32_t> &zeros,
-                      int group_size, Tensor<T> *output,
-                      cudaStream_t stream = nullptr,
+                      const Tensor<ScaleType> &scales,
+                      const Tensor<int32_t> &zeros, int group_size,
+                      Tensor<T> *output, cudaStream_t stream = nullptr,
                       const Tensor<T> *bias = nullptr);
 
 }  // namespace cuda_OP

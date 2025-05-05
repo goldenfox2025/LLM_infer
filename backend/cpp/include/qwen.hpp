@@ -23,7 +23,7 @@ class QwenModel : public BaseModel {
   QwenModel(
       const std::unordered_map<std::string, Tensor<T>>& params,
       const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
-      const std::unordered_map<std::string, Tensor<float>>& scales_params,
+      const std::unordered_map<std::string, Tensor<T>>& scales_params,
       const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
       const std::unordered_map<std::string, int>& config);
   ~QwenModel() override;
@@ -77,8 +77,7 @@ class QwenModel : public BaseModel {
       const {
     return qweight_params_;
   }
-  const std::unordered_map<std::string, Tensor<float>>& get_scales_params()
-      const {
+  const std::unordered_map<std::string, Tensor<T>>& get_scales_params() const {
     return scales_params_;
   }
   const std::unordered_map<std::string, Tensor<int32_t>>& get_qzeros_params()
@@ -114,7 +113,7 @@ class QwenModel : public BaseModel {
 
   std::unordered_map<std::string, Tensor<T>> params_;
   std::unordered_map<std::string, Tensor<int32_t>> qweight_params_;  // 量化权重
-  std::unordered_map<std::string, Tensor<float>> scales_params_;     // 缩放因子
+  std::unordered_map<std::string, Tensor<T>> scales_params_;         // 缩放因子
   std::unordered_map<std::string, Tensor<int32_t>> qzeros_params_;   // 零点
   int quant_type_ = 0;    // 0: 非量化, 1: AWQ量化
   int group_size_ = 128;  // 量化分组大小
