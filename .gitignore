@@ -17,3 +17,4 @@ test.cu
 .gitignore
 minimal_test_v2
 interface/__pycache__/device_config.cpython-312.pyc
+frontend/__pycache__/device_config.cpython-312.pyc

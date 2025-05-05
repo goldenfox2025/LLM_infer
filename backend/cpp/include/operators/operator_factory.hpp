@@ -2,10 +2,14 @@
 
 #include <memory>
 
+#include "operators/cpu/multiply_cpu.hpp"
 #include "operators/cpu/rms_norm_cpu.hpp"
 #include "operators/cpu/rope_cpu.hpp"
+#include "operators/cpu/silu_cpu.hpp"
+#include "operators/cuda/multiply_cuda.cuh"
 #include "operators/cuda/rms_norm_cuda.cuh"
 #include "operators/cuda/rope_cuda.cuh"
+#include "operators/cuda/silu_cuda.cuh"
 #include "operators/operator_base.hpp"
 
 namespace op {
@@ -28,6 +32,16 @@ class OperatorFactory {
     registry.registerOperator(OperatorType::RMS_NORM, OperatorPlatform::CPU,
                               rms_norm_cpu);
 
+    // 注册Multiply CPU算子
+    auto multiply_cpu = std::make_shared<MultiplyCPUOperator<T>>();
+    registry.registerOperator(OperatorType::MULTIPLY, OperatorPlatform::CPU,
+                              multiply_cpu);
+
+    // 注册SiLU CPU算子
+    auto silu_cpu = std::make_shared<SiluCPUOperator<T>>();
+    registry.registerOperator(OperatorType::SILU, OperatorPlatform::CPU,
+                              silu_cpu);
+
     // 注册其他CPU算子...
   }
 
@@ -44,6 +58,16 @@ class OperatorFactory {
     auto rms_norm_cuda = std::make_shared<RmsNormCUDAOperator<T>>();
     registry.registerOperator(OperatorType::RMS_NORM, OperatorPlatform::CUDA,
                               rms_norm_cuda);
+
+    // 注册Multiply CUDA算子
+    auto multiply_cuda = std::make_shared<MultiplyCUDAOperator<T>>();
+    registry.registerOperator(OperatorType::MULTIPLY, OperatorPlatform::CUDA,
+                              multiply_cuda);
+
+    // 注册SiLU CUDA算子
+    auto silu_cuda = std::make_shared<SiluCUDAOperator<T>>();
+    registry.registerOperator(OperatorType::SILU, OperatorPlatform::CUDA,
+                              silu_cuda);
 
     // 注册其他CUDA算子...
   }
@@ -62,6 +86,22 @@ class OperatorFactory {
     auto& registry = OperatorRegistry<T>::instance();
     return registry.template getOperator<RmsNormOperator<T>>(
         OperatorType::RMS_NORM, platform);
+  }
+
+  // 获取Multiply算子
+  static std::shared_ptr<MultiplyOperator<T>> getMultiplyOperator(
+      OperatorPlatform platform) {
+    auto& registry = OperatorRegistry<T>::instance();
+    return registry.template getOperator<MultiplyOperator<T>>(
+        OperatorType::MULTIPLY, platform);
+  }
+
+  // 获取SiLU算子
+  static std::shared_ptr<SiluOperator<T>> getSiluOperator(
+      OperatorPlatform platform) {
+    auto& registry = OperatorRegistry<T>::instance();
+    return registry.template getOperator<SiluOperator<T>>(OperatorType::SILU,
+                                                          platform);
   }
 
   // 添加其他算子的获取方法...

@@ -20,6 +20,7 @@ enum class OperatorType {
   SOFTMAX,
   ADD,
   MULTIPLY,
+  SILU,
   // 添加更多算子类型...
 };
 
@@ -113,6 +114,23 @@ class MultiplyOperator : public OperatorBase {
 
   // 获取算子名称
   std::string name() const override { return "multiply"; }
+};
+
+// SiLU算子接口
+template <typename T>
+class SiluOperator : public OperatorBase {
+ public:
+  virtual ~SiluOperator() = default;
+
+  // SiLU算子实现 - 使用二重指针以支持CUDA图优化
+  virtual void operator()(Tensor<T>** output, Tensor<T>** input,
+                          cudaStream_t stream = nullptr) = 0;
+
+  // 获取算子类型
+  OperatorType type() const override { return OperatorType::SILU; }
+
+  // 获取算子名称
+  std::string name() const override { return "silu"; }
 };
 
 // 其他算子接口可以在这里添加...

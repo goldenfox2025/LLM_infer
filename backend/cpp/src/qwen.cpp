@@ -790,9 +790,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
                       gate_bias);
       cuda_OP::matmul(hidden_states, up_weight, &up_buf, nullptr, up_bias);
     }
+    // cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
+    // cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
-    cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
-    cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
+    // 使用新的算子抽象层
+    operators_->silu(&gate_buf, &gate_buf);               // SiLU激活
+    operators_->multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
     // 投影回原始维度
     Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA);

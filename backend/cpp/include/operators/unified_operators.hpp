@@ -100,6 +100,61 @@ class UnifiedOperators {
     (*op)(&output_ptr_, &input_ptr_, &weight_ptr_, &eps_ptr_, stream);
   }
 
+  // Multiply算子 - 使用二重指针以支持CUDA图优化
+  void multiply(Tensor<T>* output, Tensor<T>* input_a, Tensor<T>* input_b,
+                cudaStream_t stream = nullptr) {
+    // 存储指针，以便通过二重指针传递
+    multiply_output_ptr_ = output;
+    multiply_input_a_ptr_ = input_a;
+    multiply_input_b_ptr_ = input_b;
+
+    auto op = OperatorFactory<T>::getMultiplyOperator(platform_);
+    if (!op) {
+      // 检查是否是CPU平台
+      if (platform_ == OperatorPlatform::CPU) {
+        // 检查是否是__nv_bfloat16类型
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+          throw std::runtime_error(
+              "Multiply operator for __nv_bfloat16 not supported on CPU "
+              "platform");
+        }
+      }
+      // 如果不是特殊情况，抛出通用错误
+      throw std::runtime_error(
+          "Multiply operator not registered for the current platform");
+    }
+
+    // 通过二重指针调用算子
+    (*op)(&multiply_output_ptr_, &multiply_input_a_ptr_, &multiply_input_b_ptr_,
+          stream);
+  }
+
+  // SiLU算子 - 使用二重指针以支持CUDA图优化
+  void silu(Tensor<T>* output, Tensor<T>* input,
+            cudaStream_t stream = nullptr) {
+    // 存储指针，以便通过二重指针传递
+    silu_output_ptr_ = output;
+    silu_input_ptr_ = input;
+
+    auto op = OperatorFactory<T>::getSiluOperator(platform_);
+    if (!op) {
+      // 检查是否是CPU平台
+      if (platform_ == OperatorPlatform::CPU) {
+        // 检查是否是__nv_bfloat16类型
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+          throw std::runtime_error(
+              "SiLU operator for __nv_bfloat16 not supported on CPU platform");
+        }
+      }
+      // 如果不是特殊情况，抛出通用错误
+      throw std::runtime_error(
+          "SiLU operator not registered for the current platform");
+    }
+
+    // 通过二重指针调用算子
+    (*op)(&silu_output_ptr_, &silu_input_ptr_, stream);
+  }
+
  private:
   Device device_;
   OperatorPlatform platform_;
@@ -114,6 +169,15 @@ class UnifiedOperators {
   Tensor<T>* input_ptr_;
   Tensor<T>* weight_ptr_;
   float eps_ptr_;
+
+  // Multiply算子
+  Tensor<T>* multiply_output_ptr_;
+  Tensor<T>* multiply_input_a_ptr_;
+  Tensor<T>* multiply_input_b_ptr_;
+
+  // SiLU算子
+  Tensor<T>* silu_output_ptr_;
+  Tensor<T>* silu_input_ptr_;
 
   // 添加其他算子的接口...
 };
