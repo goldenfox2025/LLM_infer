@@ -29,12 +29,10 @@ std::string vec_to_string(const std::vector<T>& vec) {
 
 // CUDA 操作命名空间
 namespace cuda_OP {
-
 // --- 常量定义 ---
 constexpr int BITS = 4;                 // AWQ 量化位数
 constexpr int PACK_FACTOR = 32 / BITS;  // 一个 int32 可以打包多少个 4bit 数字
 constexpr int WARP_SIZE = 32;           // CUDA Warp 大小
-
 // --- GEMM Kernel (M > 1, N-Major 优化版) ---
 // 针对 M > 1 的情况优化，假设权重、scales、zeros 为 N-Major 布局
 // 优化点:
@@ -64,7 +62,6 @@ __global__ void matmul_awq_gemm_kernel_opt(
   if (m >= M || n >= N) {
     return;
   }
-
   // --- 静态共享内存声明 ---
   // 注意：共享内存大小在编译时确定
   __shared__ T sh_inp[TILE_K];
@@ -411,14 +408,14 @@ __global__ void matmul_awq_gemv_bf16_vectorized_kernel(  // <--- 重命名 Kerne
 // --- Host 端启动函数 ---
 template <typename T, typename ScaleType>
 void matmul_quantized_gemv(
-    const Tensor<T>& input,             // 输入 [M, K]
-    const Tensor<int32_t>& qweight,     // 权重 [N, K/8] (N-Major)
-    const Tensor<ScaleType>& scales,    // Scales [N, G_padded] (N-Major)
-    const Tensor<int32_t>& zeros,       // Zeros [N, G/8] (N-Major)
-    int group_size,                     // Group 大小
-    Tensor<T>* output,                  // 输出 [M, N]
-    cudaStream_t stream,                // CUDA 流
-    const Tensor<T>* bias = nullptr) {  // 偏置 [N] (可选)
+    const Tensor<T>& input,           // 输入 [M, K]
+    const Tensor<int32_t>& qweight,   // 权重 [N, K/8] (N-Major)
+    const Tensor<ScaleType>& scales,  // Scales [N, G_padded] (N-Major)
+    const Tensor<int32_t>& zeros,     // Zeros [N, G/8] (N-Major)
+    int group_size,                   // Group 大小
+    Tensor<T>* output,                // 输出 [M, N]
+    cudaStream_t stream,              // CUDA 流
+    const Tensor<T>* bias) {          // 偏置 [N] (可选)
 
   // --- 输入参数检查 ---
   if (input.sizes().size() != 2) throw std::runtime_error("输入张量必须是 2D");

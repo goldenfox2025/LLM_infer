@@ -1,7 +1,7 @@
 # backend/cpp/src/CUDAoperators/CMakeLists.txt
 set(CMAKE_CXX_STANDARD 17)
 
-# 设置CUDA编译器选项以处理GCC兼容性问题
+# 设置CUDA编译器选项以处理GCC兼容性问题和抑制特定警告
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler --expt-relaxed-constexpr --extended-lambda")
 
 # 确保使用兼容的GCC版本
@@ -53,11 +53,10 @@ target_include_directories(operators PUBLIC
 target_compile_options(operators PRIVATE
     # --- C++ 编译器选项 (例如 g++, clang++) ---
     # $<CONFIG:Debug>: 仅在 Debug 模式下应用的选项。
-    # -g: 添加调试信息。
-    # -O0: 关闭优化。
+    # -g1: 添加最小调试信息。
+    # -O2: 适度优化，减少请求数量。
     # -mavx2, -mfma: 启用 AVX2 和 FMA 指令集 (如果 CPU 支持，可以提升性能)。
-    #               如果 operators 库中的 C++ 代码需要这些指令，则添加。
-    $<$<CONFIG:Debug>:-g;-O0;-mavx2;-mfma;-DDEBUG_AWQ>
+    $<$<CONFIG:Debug>:-g1;-O2;-mavx2;-mfma;-DDEBUG_AWQ>
 
     # $<CONFIG:Release>: 仅在 Release 模式下应用的选项。
     # -O3: 开启高级别优化。
@@ -71,10 +70,10 @@ target_compile_options(operators PRIVATE
     # --- CUDA 编译器选项 (nvcc) ---
     # 使用 $<COMPILE_LANGUAGE:CUDA> 来确保这些选项只传递给 nvcc。
     # $<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>: 仅在 Debug 模式下编译 CUDA 代码时应用。
-    # -G: 生成设备端调试信息。
-    # -O0: 关闭优化。
+    # -lineinfo: 添加行信息而不是完整调试信息，减少请求数量。
+    # -O2: 适度优化，减少请求数量。
     # -DDEBUG_AWQ: 启用AWQ调试输出
-    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-G;-O0;-DDEBUG_AWQ>
+    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-lineinfo;-O2;--generate-line-info;--resource-usage;--display-error-number;-DDEBUG_AWQ>
 
     # $<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>: 仅在 Release 模式下编译 CUDA 代码时应用。
     # -O3: 开启优化。
@@ -87,9 +86,11 @@ target_compile_options(operators PRIVATE
     # --expt-relaxed-constexpr:  【关键】允许在 __host__ __device__ 函数中调用 __host__ constexpr 函数，
     #                           解决你遇到的 Cutlass 警告 #20015-D。
     # -gencode arch=compute_XX,code=sm_XX: 指定目标 GPU 架构。
-    #                                    这里的 89 对应于 Ampere 架构 (如 A100, RTX 30系列)。
+    #                                    这里的 89 对应于 Hopper 架构 (H100)。
     #                                    确保这个值与你的目标硬件以及主 CMakeLists.txt 中的设置一致。
-    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr;-gencode;arch=compute_89,code=sm_89>
+    # --threads 0: 使用所有可用的CPU线程进行编译，加快编译速度。
+    # --maxrregcount=64: 限制每个线程使用的寄存器数量，可能有助于减少请求数量。
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr;-gencode;arch=compute_89,code=sm_89;--threads;0;--maxrregcount=64>
 )
 
 # --- (可选) 设置 CUDA 特定属性 ---
