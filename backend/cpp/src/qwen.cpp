@@ -401,9 +401,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     offset = kv_cache->size() - seq_len;
   }
 
-  // 创建residual和hidden_states张量(没有batch维度)
-  Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA);
-  Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
+  // 创建residual和hidden_states张量(没有batch维度)，使用标签固定内存
+  Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA, false, "residual");
+  Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA, false,
+                          "hidden_states");
 
   // Token嵌入 (从embedding_table中获取token嵌入)
   cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
@@ -423,7 +424,9 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     std::string layer_prefix = "layers." + std::to_string(i) + ".";
 
     // 2. Self-Attention
-    Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA);
+    std::string q_tag = "q_buf_" + std::to_string(i);
+    Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA, false,
+                    q_tag);
     Tensor<T> &k_slice = kv_cache->k_cache(i, offset);
     Tensor<T> &v_slice = kv_cache->v_cache(i, offset);
 
@@ -627,7 +630,9 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
       total_V = v_buf_view;
     }
 
-    Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA);
+    std::string att_heads_tag = "att_heads_" + std::to_string(i);
+    Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA, false,
+                        att_heads_tag);
 
     // Tensor<T> att_heads_1({n_heads_ * (head_dim_ + 2)}, Device::CUDA);
 
@@ -679,7 +684,9 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     //                             att_heads, n_kv_heads_);
 
     Tensor<T> att_heads_reshaped = att_heads.view({1, n_heads_ * head_dim_});
-    Tensor<T> att_proj({seq_len, hidden_size_}, Device::CUDA);
+    std::string att_proj_tag = "att_proj_" + std::to_string(i);
+    Tensor<T> att_proj({seq_len, hidden_size_}, Device::CUDA, false,
+                       att_proj_tag);
 
     if (quant_type_ == 1) {
       // AWQ量化版本
@@ -736,8 +743,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
       intermediate_size = gate_weight.sizes()[1];
     }
 
-    Tensor<T> gate_buf({seq_len, intermediate_size}, Device::CUDA);
-    Tensor<T> up_buf({seq_len, intermediate_size}, Device::CUDA);
+    std::string gate_buf_tag = "gate_buf_" + std::to_string(i);
+    std::string up_buf_tag = "up_buf_" + std::to_string(i);
+    Tensor<T> gate_buf({seq_len, intermediate_size}, Device::CUDA, false,
+                       gate_buf_tag);
+    Tensor<T> up_buf({seq_len, intermediate_size}, Device::CUDA, false,
+                     up_buf_tag);
 
     if (quant_type_ == 1) {
       // AWQ量化版本
@@ -799,7 +810,9 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     operators_->multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
     // 投影回原始维度
-    Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA);
+    std::string ffn_out_tag = "ffn_out_" + std::to_string(i);
+    Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA, false,
+                      ffn_out_tag);
 
     if (quant_type_ == 1) {
       // AWQ量化版本
@@ -845,7 +858,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
 
   // 最终的LayerNorm (RMSNorm)
   auto &norm_weight = params_.at("norm.weight");
-  Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA);
+  Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA, false, "final_h");
   // 使用新的算子抽象层
   operators_->rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
   // 旧算子
@@ -860,7 +873,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
   // } catch (const std::out_of_range&) {
   // }
 
-  Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
+  Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA, false, "logits");
   cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
 
   // 返回最后一个token的logits

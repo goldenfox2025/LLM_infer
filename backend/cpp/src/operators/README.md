@@ -9,7 +9,7 @@
 1. **平台无关性**：通过抽象接口，模型代码不需要关心算子的具体实现是在CPU还是CUDA上
 2. **易于扩展**：新增算子或新增平台实现只需遵循统一接口
 3. **运行时选择**：根据设备类型和张量类型动态选择最合适的算子实现
-4. **CUDA图优化支持**：通过二重指针传递算子数据，便于实现CUDA图优化
+4. **简洁明了**：使用一重指针传递算子数据，接口更加简洁
 
 ### 1.2 架构设计
 
@@ -32,10 +32,10 @@
 
 ### 1.3 关键技术点
 
-1. **二重指针设计**：
-   - 对于需要在CUDA图中更新的参数，使用二重指针传递
+1. **一重指针设计**：
+   - 使用一重指针传递张量参数，接口更加简洁
    - 对于固定不变的参数，直接传值
-   - 这种设计使得CUDA图可以在不重建的情况下更新参数
+   - 通过标签固定内存分配，确保张量内存地址固定，便于CUDA图优化
 
 2. **类型安全**：
    - 使用模板参数`<T>`确保类型安全，支持不同数据类型（float、__nv_bfloat16等）
@@ -61,13 +61,13 @@ template <typename T>
 class NewOperator : public OperatorBase {
 public:
     virtual ~NewOperator() = default;
-    
-    // 新算子实现 - 使用二重指针以支持CUDA图优化
-    virtual void operator()(Tensor<T>** input, size_t* param, float fixed_param, cudaStream_t stream = nullptr) = 0;
-    
+
+    // 新算子实现 - 使用一重指针
+    virtual void operator()(Tensor<T>* input, size_t param, float fixed_param, cudaStream_t stream = nullptr) = 0;
+
     // 获取算子类型
     OperatorType type() const override { return OperatorType::NEW_OP; }
-    
+
     // 获取算子名称
     std::string name() const override { return "new_op"; }
 };
@@ -101,16 +101,12 @@ class NewOpCPUOperator : public NewOperator<T> {
 public:
     NewOpCPUOperator() = default;
     ~NewOpCPUOperator() override = default;
-    
+
     // 实现CPU版本
-    void operator()(Tensor<T>** input, size_t* param, float fixed_param, cudaStream_t stream = nullptr) override {
-        // 从二重指针获取实际值
-        Tensor<T>* input_tensor = *input;
-        size_t param_value = *param;
-        
+    void operator()(Tensor<T>* input, size_t param, float fixed_param, cudaStream_t stream = nullptr) override {
         // CPU实现逻辑...
     }
-    
+
     // 获取算子平台
     OperatorPlatform platform() const override { return OperatorPlatform::CPU; }
 };
@@ -150,10 +146,10 @@ class NewOpCUDAOperator : public NewOperator<T> {
 public:
     NewOpCUDAOperator() = default;
     ~NewOpCUDAOperator() override = default;
-    
+
     // 实现CUDA版本
-    void operator()(Tensor<T>** input, size_t* param, float fixed_param, cudaStream_t stream = nullptr) override;
-    
+    void operator()(Tensor<T>* input, size_t param, float fixed_param, cudaStream_t stream = nullptr) override;
+
     // 获取算子平台
     OperatorPlatform platform() const override { return OperatorPlatform::CUDA; }
 };
@@ -179,22 +175,19 @@ __global__ void new_op_kernel(T* input, size_t param, float fixed_param) {
 
 // 实现CUDA版本
 template <typename T>
-void NewOpCUDAOperator<T>::operator()(Tensor<T>** input, size_t* param, float fixed_param, cudaStream_t stream) {
-    // 从二重指针获取实际值
-    Tensor<T>* input_tensor = *input;
-    size_t param_value = *param;
-    
+void NewOpCUDAOperator<T>::operator()(Tensor<T>* input, size_t param, float fixed_param, cudaStream_t stream) {
+
     // 参数检查
     // ...
-    
+
     // 计算kernel启动参数
     int threads = 256;
-    int blocks = (input_tensor->numel() + threads - 1) / threads;
-    
+    int blocks = (input->numel() + threads - 1) / threads;
+
     // 启动kernel
     new_op_kernel<T><<<blocks, threads, 0, stream>>>(
-        input_tensor->data_ptr(), param_value, fixed_param);
-    
+        input->data_ptr(), param, fixed_param);
+
     // 错误检查
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -219,9 +212,9 @@ template class NewOpCUDAOperator<__nv_bfloat16>;
 // 创建并注册所有CPU算子
 static void registerCPUOperators() {
     auto& registry = OperatorRegistry<T>::instance();
-    
+
     // 注册已有算子...
-    
+
     // 注册新算子
     auto new_op_cpu = std::make_shared<NewOpCPUOperator<T>>();
     registry.registerOperator(OperatorType::NEW_OP, OperatorPlatform::CPU, new_op_cpu);
@@ -230,9 +223,9 @@ static void registerCPUOperators() {
 // 创建并注册所有CUDA算子
 static void registerCUDAOperators() {
     auto& registry = OperatorRegistry<T>::instance();
-    
+
     // 注册已有算子...
-    
+
     // 注册新算子
     auto new_op_cuda = std::make_shared<NewOpCUDAOperator<T>>();
     registry.registerOperator(OperatorType::NEW_OP, OperatorPlatform::CUDA, new_op_cuda);
@@ -252,30 +245,15 @@ static std::shared_ptr<NewOperator<T>> getNewOperator(OperatorPlatform platform)
 ```cpp
 // 新算子接口
 void new_op(Tensor<T>* input, size_t param, float fixed_param, cudaStream_t stream = nullptr) {
-    // 存储指针，以便通过二重指针传递
-    tensor_ptr_ = input;
-    param_ptr_ = param;
-    
     auto op = OperatorFactory<T>::getNewOperator(platform_);
     if (!op) {
         // 错误处理...
         throw std::runtime_error("New operator not registered for the current platform");
     }
-    
-    // 通过二重指针调用算子
-    (*op)(&tensor_ptr_, &param_ptr_, fixed_param, stream);
+
+    // 直接调用算子
+    (*op)(input, param, fixed_param, stream);
 }
-```
-
-同时，在私有成员变量中添加新的指针存储：
-
-```cpp
-private:
-    // 已有成员变量...
-    
-    // 用于新算子的成员变量
-    Tensor<T>* tensor_ptr_;
-    size_t param_ptr_;
 ```
 
 ### 2.6 使用新算子
@@ -292,10 +270,10 @@ operators_->new_op(&input_tensor, param_value, 3.14f, compute_streams_[0]);
 
 ### 3.1 CUDA图优化
 
-使用二重指针设计使得算子可以轻松支持CUDA图优化：
+通过标签固定内存分配，使得算子可以支持CUDA图优化：
 
 1. **图创建**：在第一次调用时创建CUDA图
-2. **图更新**：通过二重指针更新参数，无需重建图
+2. **固定内存**：通过标签确保张量内存地址固定，无需重建图
 3. **图执行**：重复执行已创建的图，减少内核启动开销
 
 ### 3.2 算子融合
@@ -304,8 +282,8 @@ operators_->new_op(&input_tensor, param_value, 3.14f, compute_streams_[0]);
 
 ```cpp
 // 融合算子示例：RMS Norm + Add
-void add_rms(Tensor<T>** input, Tensor<T>** residual, Tensor<T>** output, 
-             Tensor<T>** weight, float* eps, cudaStream_t stream = nullptr) {
+void add_rms(Tensor<T>* input, Tensor<T>* residual, Tensor<T>* output,
+             Tensor<T>* weight, float eps, cudaStream_t stream = nullptr) {
     // 实现逻辑...
 }
 ```
@@ -316,17 +294,17 @@ void add_rms(Tensor<T>** input, Tensor<T>** residual, Tensor<T>** output,
 
 ```cpp
 // 量化矩阵乘法算子
-void matmul_quantized(Tensor<T>** input, Tensor<int8_t>** weight, 
-                      Tensor<float>** scales, Tensor<int8_t>** zeros,
-                      int* group_size, Tensor<T>** output, 
-                      cudaStream_t stream = nullptr, const Tensor<T>** bias = nullptr) {
+void matmul_quantized(Tensor<T>* input, Tensor<int8_t>* weight,
+                      Tensor<float>* scales, Tensor<int8_t>* zeros,
+                      int group_size, Tensor<T>* output,
+                      cudaStream_t stream = nullptr, const Tensor<T>* bias = nullptr) {
     // 实现逻辑...
 }
 ```
 
 ## 4. 最佳实践
 
-1. **参数分析**：仔细分析每个参数，确定哪些需要使用二重指针
+1. **参数分析**：仔细分析每个参数，确定哪些需要使用标签固定内存
 2. **错误处理**：提供清晰的错误信息，便于调试
 3. **性能优化**：针对不同的硬件平台优化算子实现
 4. **测试验证**：编写单元测试，确保算子在各种情况下都能正确工作

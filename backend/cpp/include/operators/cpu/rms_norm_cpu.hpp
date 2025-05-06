@@ -12,21 +12,14 @@ class RmsNormCPUOperator : public RmsNormOperator<T> {
   RmsNormCPUOperator() = default;
   ~RmsNormCPUOperator() override = default;
 
-  // 实现CPU版本的RMS Norm - 使用二重指针以支持CUDA图优化
-  void operator()(Tensor<T>** output_ptr, Tensor<T>** input_ptr,
-                  Tensor<T>** weight_ptr, float* eps_ptr,
-                  cudaStream_t stream = nullptr) override {
+  // 实现CPU版本的RMS Norm - 使用一重指针
+  void operator()(Tensor<T>* output, Tensor<T>* input, Tensor<T>* weight,
+                  float eps, cudaStream_t stream = nullptr) override {
     // 检查是否是BF16类型，CPU不支持BF16
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       throw std::runtime_error(
           "RMS Norm operator for __nv_bfloat16 not supported on CPU platform");
     } else {
-      // 从二重指针获取实际值
-      Tensor<T>* output = *output_ptr;
-      Tensor<T>* input = *input_ptr;
-      Tensor<T>* weight = *weight_ptr;
-      float eps = *eps_ptr;
-
       // 获取输入张量的形状
       const auto& sizes = input->sizes();
 

@@ -12,18 +12,14 @@ class SiluCPUOperator : public SiluOperator<T> {
   SiluCPUOperator() = default;
   ~SiluCPUOperator() override = default;
 
-  // 实现CPU版本的SiLU - 使用二重指针以支持CUDA图优化
-  void operator()(Tensor<T>** output_ptr, Tensor<T>** input_ptr,
+  // 实现CPU版本的SiLU - 使用一重指针
+  void operator()(Tensor<T>* output, Tensor<T>* input,
                   cudaStream_t stream = nullptr) override {
     // 检查是否是BF16类型，CPU不支持BF16
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       throw std::runtime_error(
           "SiLU operator for __nv_bfloat16 not supported on CPU platform");
     } else {
-      // 从二重指针获取实际值
-      Tensor<T>* output = *output_ptr;
-      Tensor<T>* input = *input_ptr;
-
       // 获取输入张量的大小
       size_t total = input->numel();
 

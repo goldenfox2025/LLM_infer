@@ -78,8 +78,6 @@ __global__ void matmul_awq_gemm_kernel_opt(
   __shared__ T smemB[BK * BN];
   __shared__ float smem_out[BM][BN];
   FragmentC fragC;
-  const int tid_in_block = threadIdx.x;
-  const int threads_in_block = blockDim.x;
   wmma::fill_fragment(fragC, 0.0f);
   constexpr int vec_unit = 16 / sizeof(T);
   for (int tile_k = 0; tile_k < K; tile_k += BK) {
@@ -124,9 +122,6 @@ __global__ void matmul_awq_gemm_kernel_opt(
     // float4 可一次性加载 32 个数据
     // 考虑到复杂性，仍然先实现单加载
     // 或者说 int32 本身即可以理解为向量化加载
-
-    constexpr int NUM_K_ELEMENTS_PER_PACK = PACK_FACTOR;
-
     for (int load_idx = threadIdx.x; load_idx < BN * BK / 8;
          load_idx += blockDim.x) {
       int load_row = load_idx / (BK / 8);

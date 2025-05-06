@@ -111,15 +111,8 @@ __global__ void rope_kernel<__nv_bfloat16>(__nv_bfloat16 *tensor,
 
 // RoPE CUDA 算子的实现类
 template <typename T>
-void RopeCUDAOperator<T>::operator()(Tensor<T> **x_ptr, size_t *offset_ptr,
-                                     float theta, cudaStream_t stream) {
-  // 使用二重指针 (指向指针的指针) 是为了更好地支持 CUDA Graph。
-  // CUDA Graph 捕获时，图会记录核函数启动时的参数值（包括指针地址）。
-  // 如果我们只想更新数据内容或偏移量而不重新捕获图，就需要传递指向这些变量的指针，
-  // 然后在更新时修改指针所指向的内存。
-  Tensor<T> *x = *x_ptr;        // 获取实际的 Tensor 对象指针
-  size_t offset = *offset_ptr;  // 获取实际的偏移量值
-
+void RopeCUDAOperator<T>::operator()(Tensor<T> *x, size_t offset, float theta,
+                                     cudaStream_t stream) {
   // 获取输入张量的维度信息
   const auto &sizes = x->sizes();
   // 输入张量至少需要包含序列长度、头数量和头维度这三维

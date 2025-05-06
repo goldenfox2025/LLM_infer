@@ -10,20 +10,14 @@ class MultiplyCPUOperator : public MultiplyOperator<T> {
   MultiplyCPUOperator() = default;
   ~MultiplyCPUOperator() override = default;
 
-  // 实现CPU版本的Multiply - 使用二重指针以支持CUDA图优化
-  void operator()(Tensor<T>** output_ptr, Tensor<T>** input_a_ptr,
-                  Tensor<T>** input_b_ptr,
+  // 实现CPU版本的Multiply - 使用一重指针
+  void operator()(Tensor<T>* output, Tensor<T>* input_a, Tensor<T>* input_b,
                   cudaStream_t stream = nullptr) override {
     // 检查是否是BF16类型，CPU不支持BF16
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       throw std::runtime_error(
           "Multiply operator for __nv_bfloat16 not supported on CPU platform");
     } else {
-      // 从二重指针获取实际值
-      Tensor<T>* output = *output_ptr;
-      Tensor<T>* input_a = *input_a_ptr;
-      Tensor<T>* input_b = *input_b_ptr;
-
       // 获取输入张量的大小
       size_t total = input_a->numel();
 

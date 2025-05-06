@@ -1,7 +1,8 @@
-#include "operators/cuda/silu_cuda.cuh"
-
 #include <cuda_runtime.h>
+
 #include <stdexcept>
+
+#include "operators/cuda/silu_cuda.cuh"
 
 namespace op {
 
@@ -17,12 +18,8 @@ __global__ void silu_kernel(T* output, const T* input, int total) {
 
 // Implementation of SiLU CUDA operator
 template <typename T>
-void SiluCUDAOperator<T>::operator()(Tensor<T>** output_ptr, Tensor<T>** input_ptr,
+void SiluCUDAOperator<T>::operator()(Tensor<T>* output, Tensor<T>* input,
                                      cudaStream_t stream) {
-  // 从二重指针获取实际值
-  Tensor<T>* output = *output_ptr;
-  Tensor<T>* input = *input_ptr;
-
   // 获取输入张量的大小
   size_t total = input->numel();
 

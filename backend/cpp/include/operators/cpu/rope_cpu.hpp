@@ -12,18 +12,14 @@ class RopeCPUOperator : public RopeOperator<T> {
   RopeCPUOperator() = default;
   ~RopeCPUOperator() override = default;
 
-  // 实现CPU版本的RoPE - 使用二重指针以支持CUDA图优化
-  void operator()(Tensor<T>** x_ptr, size_t* offset_ptr, float theta,
+  // 实现CPU版本的RoPE - 使用一重指针
+  void operator()(Tensor<T>* x, size_t offset, float theta,
                   cudaStream_t stream = nullptr) override {
     // 检查是否是BF16类型，CPU不支持BF16
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       throw std::runtime_error(
           "RoPE operator for __nv_bfloat16 not supported on CPU platform");
     } else {
-      // 从二重指针获取实际值
-      Tensor<T>* x = *x_ptr;
-      size_t offset = *offset_ptr;
-
       const auto& sizes = x->sizes();
 
       // 检查张量维度

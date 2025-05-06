@@ -51,8 +51,8 @@ class RopeOperator : public OperatorBase {
  public:
   virtual ~RopeOperator() = default;
 
-  // RoPE算子实现 - 使用二重指针以支持CUDA图优化
-  virtual void operator()(Tensor<T>** tensor, size_t* offset, float theta,
+  // RoPE算子实现 - 使用一重指针
+  virtual void operator()(Tensor<T>* tensor, size_t offset, float theta,
                           cudaStream_t stream = nullptr) = 0;
 
   // 获取算子类型
@@ -68,9 +68,9 @@ class RmsNormOperator : public OperatorBase {
  public:
   virtual ~RmsNormOperator() = default;
 
-  // RMS Norm算子实现 - 使用二重指针以支持CUDA图优化
-  virtual void operator()(Tensor<T>** output, Tensor<T>** input,
-                          Tensor<T>** weight, float* eps,
+  // RMS Norm算子实现 - 使用一重指针
+  virtual void operator()(Tensor<T>* output, Tensor<T>* input,
+                          Tensor<T>* weight, float eps,
                           cudaStream_t stream = nullptr) = 0;
 
   // 获取算子类型
@@ -86,9 +86,9 @@ class AddOperator : public OperatorBase {
  public:
   virtual ~AddOperator() = default;
 
-  // Add算子实现 - 使用二重指针以支持CUDA图优化
-  virtual void operator()(Tensor<T>** output, Tensor<T>** input_a,
-                          Tensor<T>** input_b,
+  // Add算子实现 - 使用一重指针
+  virtual void operator()(Tensor<T>* output, Tensor<T>* input_a,
+                          Tensor<T>* input_b,
                           cudaStream_t stream = nullptr) = 0;
 
   // 获取算子类型
@@ -104,9 +104,9 @@ class MultiplyOperator : public OperatorBase {
  public:
   virtual ~MultiplyOperator() = default;
 
-  // Multiply算子实现 - 使用二重指针以支持CUDA图优化
-  virtual void operator()(Tensor<T>** output, Tensor<T>** input_a,
-                          Tensor<T>** input_b,
+  // Multiply算子实现 - 使用一重指针
+  virtual void operator()(Tensor<T>* output, Tensor<T>* input_a,
+                          Tensor<T>* input_b,
                           cudaStream_t stream = nullptr) = 0;
 
   // 获取算子类型
@@ -122,8 +122,8 @@ class SiluOperator : public OperatorBase {
  public:
   virtual ~SiluOperator() = default;
 
-  // SiLU算子实现 - 使用二重指针以支持CUDA图优化
-  virtual void operator()(Tensor<T>** output, Tensor<T>** input,
+  // SiLU算子实现 - 使用一重指针
+  virtual void operator()(Tensor<T>* output, Tensor<T>* input,
                           cudaStream_t stream = nullptr) = 0;
 
   // 获取算子类型

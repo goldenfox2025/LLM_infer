@@ -1,7 +1,8 @@
-#include "operators/cuda/multiply_cuda.cuh"
-
 #include <cuda_runtime.h>
+
 #include <stdexcept>
+
+#include "operators/cuda/multiply_cuda.cuh"
 
 namespace op {
 
@@ -13,7 +14,8 @@ struct Vec {
 
 // CUDA kernel for element-wise multiplication (vectorized version)
 template <typename T>
-__global__ void multiply_kernel(const T* input_a, const T* input_b, T* output, int total) {
+__global__ void multiply_kernel(const T* input_a, const T* input_b, T* output,
+                                int total) {
   // 计算每次载入的 T 元素个数
   constexpr int vec_unit = 16 / sizeof(T);
   typedef Vec<T, vec_unit> VecT;
@@ -50,13 +52,9 @@ __global__ void multiply_kernel(const T* input_a, const T* input_b, T* output, i
 
 // Implementation of Multiply CUDA operator
 template <typename T>
-void MultiplyCUDAOperator<T>::operator()(Tensor<T>** output_ptr, Tensor<T>** input_a_ptr,
-                                         Tensor<T>** input_b_ptr, cudaStream_t stream) {
-  // 从二重指针获取实际值
-  Tensor<T>* output = *output_ptr;
-  Tensor<T>* input_a = *input_a_ptr;
-  Tensor<T>* input_b = *input_b_ptr;
-
+void MultiplyCUDAOperator<T>::operator()(Tensor<T>* output, Tensor<T>* input_a,
+                                         Tensor<T>* input_b,
+                                         cudaStream_t stream) {
   // 获取输入张量的大小
   size_t total = input_a->numel();
 

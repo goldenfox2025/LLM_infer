@@ -99,16 +99,9 @@ __global__ void rms_norm_kernel(const T* __restrict__ input,
   }
 }
 template <typename T>
-void RmsNormCUDAOperator<T>::operator()(Tensor<T>** output_ptr,
-                                        Tensor<T>** input_ptr,
-                                        Tensor<T>** weight_ptr, float* eps_ptr,
+void RmsNormCUDAOperator<T>::operator()(Tensor<T>* output, Tensor<T>* input,
+                                        Tensor<T>* weight, float eps,
                                         cudaStream_t stream) {
-  // 从二重指针获取实际值
-  Tensor<T>* output = *output_ptr;
-  Tensor<T>* input = *input_ptr;
-  Tensor<T>* weight = *weight_ptr;
-  float eps = *eps_ptr;
-
   // 获取输入张量的形状
   const auto& sizes = input->sizes();
 

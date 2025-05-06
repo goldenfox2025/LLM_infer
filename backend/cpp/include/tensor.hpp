@@ -70,12 +70,15 @@ class Tensor {
 
   // 从 initializer_list 构造，分配新的数据，并指定设备
   // is_prefill: 是否是prefill阶段的内存分配
-  Tensor(std::initializer_list<size_t> shape, Device device = Device::CPU, bool is_prefill = false)
+  // tag: 内存标签，用于固定内存分配
+  Tensor(std::initializer_list<size_t> shape, Device device = Device::CPU,
+         bool is_prefill = false, const std::string& tag = "")
       : shape_(shape),
         offset_(0),
         length_(1),
         device_(device),
-        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }),
+        tag_(tag) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -86,8 +89,16 @@ class Tensor {
     } else if (device_ == Device::CUDA) {
       data_.reset();
       // 通过内存池申请 GPU 内存
-      T* gpu_ptr = static_cast<T*>(
-          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T), is_prefill));
+      T* gpu_ptr = nullptr;
+      if (!tag_.empty()) {
+        // 使用标签分配固定内存
+        gpu_ptr = static_cast<T*>(GlobalCudaMemoryPool::allocate_tagged(
+            tag_, length_ * sizeof(T), is_prefill));
+      } else {
+        // 常规内存分配
+        gpu_ptr = static_cast<T*>(GlobalCudaMemoryPool::instance().allocate(
+            length_ * sizeof(T), is_prefill));
+      }
       gpu_data_ = std::shared_ptr<T>(
           gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
@@ -96,21 +107,22 @@ class Tensor {
   }
 
   // 这个仅限gpu_ptr已经被分配了内存，用于sample返回gpu指针的从尝试版本
-  Tensor(T* gpu_ptr,const std::vector<size_t>& shape,Device device)
+  Tensor(T* gpu_ptr, const std::vector<size_t>& shape, Device device)
       : shape_(shape),
         offset_(0),
         length_(1),
         device_(Device::CUDA),
         data_(nullptr),
-        gpu_data_(gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); }) {
-    if(device == Device::CPU){
-      throw std::runtime_error("Invalid device specified in Tensor constructor");
+        gpu_data_(gpu_ptr,
+                  [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); }) {
+    if (device == Device::CPU) {
+      throw std::runtime_error(
+          "Invalid device specified in Tensor constructor");
     }
     for (size_t dim : shape_) {
       length_ *= dim;
     }
     strides_ = compute_strides(shape_);
-
   }
   // 从右值 vector 数据和形状构造（CPU 模式）
   Tensor(std::vector<T>&& data, const std::vector<size_t>& shape)
@@ -173,12 +185,15 @@ class Tensor {
 
   // 从 shape 和 device 构造
   // is_prefill: 是否是prefill阶段的内存分配
-  Tensor(const std::vector<size_t>& shape, Device device, bool is_prefill = false)
+  // tag: 内存标签，用于固定内存分配
+  Tensor(const std::vector<size_t>& shape, Device device,
+         bool is_prefill = false, const std::string& tag = "")
       : shape_(shape),
         offset_(0),
         length_(1),
         device_(device),
-        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }) {
+        gpu_data_(nullptr, [](T* ptr) { /* no-op */ }),
+        tag_(tag) {
     for (size_t dim : shape_) {
       length_ *= dim;
     }
@@ -188,8 +203,17 @@ class Tensor {
       gpu_data_.reset();
     } else if (device_ == Device::CUDA) {
       data_.reset();
-      T* gpu_ptr = static_cast<T*>(
-          GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T), is_prefill));
+      // 通过内存池申请 GPU 内存
+      T* gpu_ptr = nullptr;
+      if (!tag_.empty()) {
+        // 使用标签分配固定内存
+        gpu_ptr = static_cast<T*>(GlobalCudaMemoryPool::allocate_tagged(
+            tag_, length_ * sizeof(T), is_prefill));
+      } else {
+        // 常规内存分配
+        gpu_ptr = static_cast<T*>(GlobalCudaMemoryPool::instance().allocate(
+            length_ * sizeof(T), is_prefill));
+      }
       gpu_data_ = std::shared_ptr<T>(
           gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
     } else {
@@ -239,9 +263,7 @@ class Tensor {
       return tensor_convert<T, float>(*this);
     }
   }
-  int nbytes() const {
-    return sizeof(T)*length_;
-  }
+  int nbytes() const { return sizeof(T) * length_; }
   // 返回数据指针（const 版本）
   const T* data_ptr() const {
     if (device_ == Device::CPU) {
@@ -475,10 +497,27 @@ class Tensor {
 
   // 转换到 CUDA：将数据从 CPU 拷贝到 GPU，通过内存池申请 GPU 内存
   // is_prefill: 是否是prefill阶段的内存分配
-  Tensor<T>& cuda(bool is_prefill = false) {
+  // tag: 内存标签，用于固定内存分配
+  Tensor<T>& cuda(bool is_prefill = false, const std::string& tag = "") {
     if (device_ == Device::CUDA) return *this;
-    T* gpu_ptr = static_cast<T*>(
-        GlobalCudaMemoryPool::instance().allocate(length_ * sizeof(T), is_prefill));
+
+    // 如果提供了新标签，则使用新标签
+    if (!tag.empty()) {
+      tag_ = tag;
+    }
+
+    // 通过内存池申请 GPU 内存
+    T* gpu_ptr = nullptr;
+    if (!tag_.empty()) {
+      // 使用标签分配固定内存
+      gpu_ptr = static_cast<T*>(GlobalCudaMemoryPool::allocate_tagged(
+          tag_, length_ * sizeof(T), is_prefill));
+    } else {
+      // 常规内存分配
+      gpu_ptr = static_cast<T*>(GlobalCudaMemoryPool::instance().allocate(
+          length_ * sizeof(T), is_prefill));
+    }
+
     checkCudaError(cudaMemcpy(gpu_ptr, data_ptr(), length_ * sizeof(T),
                               cudaMemcpyHostToDevice));
     data_.reset();
@@ -503,6 +542,44 @@ class Tensor {
   Device device() const { return device_; }
   size_t offset() const { return offset_; }
 
+  // 获取内存标签
+  const std::string& tag() const { return tag_; }
+
+  // 设置内存标签（仅在CUDA模式下有效）
+  void set_tag(const std::string& tag) {
+    if (device_ != Device::CUDA) {
+      return;  // 仅CUDA模式支持标签
+    }
+
+    // 如果已有标签相同，则不做任何操作
+    if (tag_ == tag) {
+      return;
+    }
+
+    // 如果当前没有标签，但要设置标签，需要重新分配内存
+    if (tag_.empty() && !tag.empty()) {
+      // 保存当前数据
+      std::vector<T> host_data(length_);
+      checkCudaError(cudaMemcpy(host_data.data(), gpu_data_.get(),
+                                length_ * sizeof(T), cudaMemcpyDeviceToHost));
+
+      // 使用新标签分配内存
+      T* gpu_ptr = static_cast<T*>(
+          GlobalCudaMemoryPool::allocate_tagged(tag, length_ * sizeof(T)));
+
+      // 复制数据
+      checkCudaError(cudaMemcpy(gpu_ptr, host_data.data(), length_ * sizeof(T),
+                                cudaMemcpyHostToDevice));
+
+      // 更新指针和标签
+      gpu_data_ = std::shared_ptr<T>(
+          gpu_ptr, [](T* ptr) { GlobalCudaMemoryPool::instance().free(ptr); });
+    }
+
+    // 更新标签
+    tag_ = tag;
+  }
+
  private:
   // 计算 strides
   static std::vector<size_t> compute_strides(const std::vector<size_t>& shape) {
@@ -523,6 +600,7 @@ class Tensor {
   size_t offset_;
   size_t length_;
   Device device_;
+  std::string tag_;  // 内存标签，用于固定内存分配
 };
 
 // 实现类型转换辅助函数

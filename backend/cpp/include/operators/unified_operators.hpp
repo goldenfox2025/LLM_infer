@@ -42,13 +42,9 @@ class UnifiedOperators {
     OperatorFactory<T>::registerCPUOperators();
   }
 
-  // RoPE算子 - 使用二重指针以支持CUDA图优化
+  // RoPE算子
   void rope(Tensor<T>* tensor, size_t offset, float theta,
             cudaStream_t stream = nullptr) {
-    // 存储指针，以便通过二重指针传递
-    tensor_ptr_ = tensor;
-    offset_ptr_ = offset;
-
     auto op = OperatorFactory<T>::getRopeOperator(platform_);
     if (!op) {
       // 检查是否是CPU平台
@@ -67,19 +63,13 @@ class UnifiedOperators {
           "RoPE operator not registered for the current platform");
     }
 
-    // 通过二重指针调用算子
-    (*op)(&tensor_ptr_, &offset_ptr_, theta, stream);
+    // 直接调用算子
+    (*op)(tensor, offset, theta, stream);
   }
 
-  // RMS Norm算子 - 使用二重指针以支持CUDA图优化
+  // RMS Norm算子
   void rms_norm(Tensor<T>* output, Tensor<T>* input, Tensor<T>* weight,
                 float eps, cudaStream_t stream = nullptr) {
-    // 存储指针，以便通过二重指针传递
-    output_ptr_ = output;
-    input_ptr_ = input;
-    weight_ptr_ = weight;
-    eps_ptr_ = eps;
-
     auto op = OperatorFactory<T>::getRmsNormOperator(platform_);
     if (!op) {
       // 检查是否是CPU平台
@@ -96,18 +86,13 @@ class UnifiedOperators {
           "RMS Norm operator not registered for the current platform");
     }
 
-    // 通过二重指针调用算子
-    (*op)(&output_ptr_, &input_ptr_, &weight_ptr_, &eps_ptr_, stream);
+    // 直接调用算子
+    (*op)(output, input, weight, eps, stream);
   }
 
-  // Multiply算子 - 使用二重指针以支持CUDA图优化
+  // Multiply算子
   void multiply(Tensor<T>* output, Tensor<T>* input_a, Tensor<T>* input_b,
                 cudaStream_t stream = nullptr) {
-    // 存储指针，以便通过二重指针传递
-    multiply_output_ptr_ = output;
-    multiply_input_a_ptr_ = input_a;
-    multiply_input_b_ptr_ = input_b;
-
     auto op = OperatorFactory<T>::getMultiplyOperator(platform_);
     if (!op) {
       // 检查是否是CPU平台
@@ -124,18 +109,13 @@ class UnifiedOperators {
           "Multiply operator not registered for the current platform");
     }
 
-    // 通过二重指针调用算子
-    (*op)(&multiply_output_ptr_, &multiply_input_a_ptr_, &multiply_input_b_ptr_,
-          stream);
+    // 直接调用算子
+    (*op)(output, input_a, input_b, stream);
   }
 
-  // SiLU算子 - 使用二重指针以支持CUDA图优化
+  // SiLU算子
   void silu(Tensor<T>* output, Tensor<T>* input,
             cudaStream_t stream = nullptr) {
-    // 存储指针，以便通过二重指针传递
-    silu_output_ptr_ = output;
-    silu_input_ptr_ = input;
-
     auto op = OperatorFactory<T>::getSiluOperator(platform_);
     if (!op) {
       // 检查是否是CPU平台
@@ -151,33 +131,13 @@ class UnifiedOperators {
           "SiLU operator not registered for the current platform");
     }
 
-    // 通过二重指针调用算子
-    (*op)(&silu_output_ptr_, &silu_input_ptr_, stream);
+    // 直接调用算子
+    (*op)(output, input, stream);
   }
 
  private:
   Device device_;
   OperatorPlatform platform_;
-
-  // 用于存储指针的成员变量，以支持二重指针传递
-  // RoPE算子
-  Tensor<T>* tensor_ptr_;
-  size_t offset_ptr_;
-
-  // RMS Norm算子
-  Tensor<T>* output_ptr_;
-  Tensor<T>* input_ptr_;
-  Tensor<T>* weight_ptr_;
-  float eps_ptr_;
-
-  // Multiply算子
-  Tensor<T>* multiply_output_ptr_;
-  Tensor<T>* multiply_input_a_ptr_;
-  Tensor<T>* multiply_input_b_ptr_;
-
-  // SiLU算子
-  Tensor<T>* silu_output_ptr_;
-  Tensor<T>* silu_input_ptr_;
 
   // 添加其他算子的接口...
 };
