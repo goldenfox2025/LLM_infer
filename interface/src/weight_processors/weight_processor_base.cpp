@@ -2,6 +2,7 @@
 
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -10,6 +11,7 @@ size_t WeightProcessorBase::total_weights_ = 0;
 size_t WeightProcessorBase::processed_weights_ = 0;
 std::string WeightProcessorBase::current_model_type_ = "";
 bool WeightProcessorBase::progress_initialized_ = false;
+size_t WeightProcessorBase::total_params_count_ = 0;
 
 // 辅助函数：将 PyTorch 张量转换为 __nv_bfloat16 类型的 Tensor
 Tensor<__nv_bfloat16> WeightProcessorBase::convert_bf16_tensor(
@@ -129,6 +131,22 @@ std::vector<size_t> WeightProcessorBase::get_tensor_shape(
   return shape;
 }
 
+// 辅助函数：计算张量中的参数数量
+size_t WeightProcessorBase::calculate_params_count(const py::object& tensor) {
+  std::vector<size_t> shape = get_tensor_shape(tensor);
+  return calculate_params_from_shape(shape);
+}
+
+// 辅助函数：计算张量形状中的参数数量
+size_t WeightProcessorBase::calculate_params_from_shape(
+    const std::vector<size_t>& shape) {
+  if (shape.empty()) {
+    return 0;
+  }
+  return std::accumulate(shape.begin(), shape.end(), 1,
+                         std::multiplies<size_t>());
+}
+
 // 辅助函数：打印权重处理进度
 void WeightProcessorBase::print_processing_info(const std::string& key,
                                                 const std::string& dst_key) {
@@ -154,6 +172,7 @@ void WeightProcessorBase::init_progress(size_t total_weights,
   // 重置所有状态变量
   total_weights_ = total_weights;
   processed_weights_ = 0;
+  total_params_count_ = 0;  // 重置参数计数
   current_model_type_ = model_type;
   progress_initialized_ = true;
 
@@ -211,11 +230,24 @@ void WeightProcessorBase::finish_progress() {
 
   // 打印完成信息
   std::cout << "\r进度: [" << std::string(50, '=') << "] 100%";
-  std::cout << "\n\033[1;32m✓ 权重处理完成!\033[0m\n" << std::endl;
+  std::cout << "\n\033[1;32m✓ 权重处理完成!\033[0m" << std::endl;
+
+  // 打印总参数量信息
+  if (total_params_count_ > 0) {
+    double params_in_millions =
+        static_cast<double>(total_params_count_) / 1000000.0;
+    std::cout << "总参数量: " << std::fixed << std::setprecision(2)
+              << params_in_millions << " 百万 (" << total_params_count_
+              << " 个参数)\n"
+              << std::endl;
+  } else {
+    std::cout << std::endl;
+  }
 
   // 重置进度条状态
   progress_initialized_ = false;
   processed_weights_ = 0;
   total_weights_ = 0;
+  total_params_count_ = 0;
   current_model_type_ = "";
 }

@@ -362,6 +362,11 @@ void QwenWeightProcessor::process_global_weights_awq(
     if (weights.contains(src_key)) {
       print_processing_info(src_key, dst_key);
       py::object tensor = weights[src_key.c_str()];
+
+      // 计算参数数量并累加到总数
+      size_t params_count = calculate_params_count(tensor);
+      total_params_count_ += params_count;
+
       Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
       if (dst_key == "lm_head") {
         cpp_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
@@ -375,6 +380,11 @@ void QwenWeightProcessor::process_global_weights_awq(
   if (weights.contains("lm_head.weight")) {
     print_processing_info("lm_head.weight", "lm_head");
     py::object tensor = weights["lm_head.weight"];
+
+    // 计算参数数量并累加到总数
+    size_t params_count = calculate_params_count(tensor);
+    total_params_count_ += params_count;
+
     Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
     cpp_weights.emplace("lm_head", bf16_tensor.transpose(-1, -2));
   }
@@ -411,6 +421,13 @@ void QwenWeightProcessor::process_quantized_weights_awq(
 
       // 转换为int32_t张量
       py::object tensor_obj = py::reinterpret_borrow<py::object>(item.second);
+
+      // 计算参数数量并累加到总数
+      // 对于量化权重，每个INT4值代表一个参数，但存储在INT32中
+      // 所以实际参数数量是INT32元素数量的8倍（每个INT32存储8个INT4值）
+      size_t params_count = calculate_params_count(tensor_obj) * 8;
+      total_params_count_ += params_count;
+
       py::array_t<int32_t> np_array = tensor_obj.cast<py::array_t<int32_t>>();
       std::vector<size_t> shape;
       for (int i = 0; i < np_array.ndim(); i++) {
@@ -443,6 +460,11 @@ void QwenWeightProcessor::process_quantized_weights_awq(
 
       // 转换为bf16张量
       py::object tensor_obj = py::reinterpret_borrow<py::object>(item.second);
+
+      // 计算参数数量并累加到总数
+      size_t params_count = calculate_params_count(tensor_obj);
+      total_params_count_ += params_count;
+
       py::array_t<float> np_array = tensor_obj.cast<py::array_t<float>>();
       std::vector<size_t> shape;
       for (int i = 0; i < np_array.ndim(); i++) {
@@ -485,6 +507,11 @@ void QwenWeightProcessor::process_quantized_weights_awq(
 
       // 转换为int32_t张量
       py::object tensor_obj = py::reinterpret_borrow<py::object>(item.second);
+
+      // 计算参数数量并累加到总数
+      size_t params_count = calculate_params_count(tensor_obj);
+      total_params_count_ += params_count;
+
       py::array_t<int32_t> np_array = tensor_obj.cast<py::array_t<int32_t>>();
       std::vector<size_t> shape;
       for (int i = 0; i < np_array.ndim(); i++) {
@@ -523,6 +550,11 @@ void QwenWeightProcessor::process_quantized_weights_awq(
               "layers." + std::to_string(layer) + "." + dst_suffix;
           print_processing_info(key, dst_key);
           py::object tensor = weights[key.c_str()];
+
+          // 计算参数数量并累加到总数
+          size_t params_count = calculate_params_count(tensor);
+          total_params_count_ += params_count;
+
           Tensor<__nv_bfloat16> bf16_tensor = convert_bf16_tensor(tensor);
           cpp_weights.emplace(dst_key, std::move(bf16_tensor));
           break;

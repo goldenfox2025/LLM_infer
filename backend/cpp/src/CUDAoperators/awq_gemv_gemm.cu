@@ -2,6 +2,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 #include <stdint.h>
 
 #include <cmath>
@@ -33,16 +34,18 @@ namespace cuda_OP {
 constexpr int BITS = 4;                 // AWQ 量化位数
 constexpr int PACK_FACTOR = 32 / BITS;  // 一个 int32 可以打包多少个 4bit 数字
 constexpr int WARP_SIZE = 32;           // CUDA Warp 大小
-// --- GEMM Kernel (M > 1, N-Major 优化版) ---
-// 针对 M > 1 的情况优化，假设权重、scales、zeros 为 N-Major 布局
-// 优化点:
-// 1. 改进了 sh_inp 的加载方式，让所有线程参与。
-// 2. 缓存了当前 K-Tile group 的 scale 和 zero 到共享内存，减少全局内存读取。
-// 前提假设: TILE_K <= group_size
-template <typename T,   // 输入/输出数据类型 (half, bfloat16, float)
-          typename S,   // Scale 数据类型 (通常是 float)
-          int TILE_K,   // K 维度分块大小
-          int BLOCK_N>  // Block 处理的 N 维度大小 (等于 Block 的线程数)
+
+// gemv 格式的 awq 权重打包是顺序的
+// 仅支持bf16
+template <typename T,    // 输入/输出数据类型 (half, bfloat16, float)
+          typename S,    // Scale 数据类型 (通常是 float)
+          int BM,        // M 方向的 Block 大小
+          int BN,        // N 方向的 Block 大小
+          int BK,        // K 方向的 Block 大小
+          int WMMA_M,    // WMMA 指令的 M 方向大小
+          int WMMA_N,    // WMMA 指令的 N 方向大小
+          int WMMA_K,    // WMMA 指令的 K 方向大小
+          int WARP_CNT>  // 每个 Block 的 Warp 数量
 __global__ void matmul_awq_gemm_kernel_opt(
     const T* __restrict__ inp,        // 输入矩阵 [M, K]
     const int32_t* __restrict__ qwt,  // 量化权重 [N, K/8] (N-Major)
@@ -52,115 +55,157 @@ __global__ void matmul_awq_gemm_kernel_opt(
     int M, int K, int N,
     int group_size,  // AWQ group 大小
     int G_PADDED,    // !!! 新增: Scales 张量的实际第二维度 (Padding) !!!
-    const T* __restrict__ bias) {  // 偏置向量 [N] (可选)
-  // --- Grid/Block 映射 ---
-  int m = blockIdx.y;                  // 输入行 (batch 索引)
-  int tid = threadIdx.x;               // Block 内线程 ID (0 to BLOCK_N-1)
-  int n = blockIdx.x * BLOCK_N + tid;  // 此线程负责的输出列 n
+    const T* __restrict__ bias) {
+  const int G = K / group_size;
+  const int K_PACKED = (K + PACK_FACTOR - 1) / PACK_FACTOR;
+  const int G_PACKED = (G + PACK_FACTOR - 1) / PACK_FACTOR;
+  const int WarpsN = BN / WMMA_N;
 
-  // --- 边界检查 ---
-  if (m >= M || n >= N) {
-    return;
-  }
-  // --- 静态共享内存声明 ---
-  // 注意：共享内存大小在编译时确定
-  __shared__ T sh_inp[TILE_K];
-  constexpr int K_PACKED_PER_TILE = (TILE_K + PACK_FACTOR - 1) / PACK_FACTOR;
-  __shared__ int32_t sh_qwt[BLOCK_N][K_PACKED_PER_TILE];
-  __shared__ S sh_scl_tile[BLOCK_N];
-  __shared__ int32_t sh_zos_tile[BLOCK_N];
+  int warp_id = threadIdx.x / WARP_SIZE;
+  int warp_m_id = warp_id / WarpsN;
+  int warp_n_id = warp_id % WarpsN;
 
-  // --- 常量计算 ---
-  const int K_PACKED =
-      (K + PACK_FACTOR - 1) / PACK_FACTOR;  // 总的 packed K 维度
-  const int G = K / group_size;  // Group 的总数 (假设 K 可被 group_size 整除)
-  const int G_PACKED =
-      (G + PACK_FACTOR - 1) / PACK_FACTOR;  // Packed Group 的总数
-
-  float acc = 0.0f;  // 累加器
-
-  // --- K 维度分块循环 ---
-  for (int kb = 0; kb < K; kb += TILE_K) {
-    // --- 优化点 2: sh_inp 加载 (所有线程参与) ---
-    __syncthreads();  // 在加载新 Tile 数据前同步
-    for (int k_offset = tid; k_offset < TILE_K; k_offset += BLOCK_N) {
-      int k_idx = kb + k_offset;
-      sh_inp[k_offset] = (k_idx < K) ? inp[m * K + k_idx]
-                                     : static_cast<T>(0.0f);  // K 边界检查
-    }
-
-    // --- 优化点 1: 加载 Scales & Zeros 到共享内存 ---
-    int current_group_idx = kb / group_size;  // Tile 起始位置所属的 group
-    if (current_group_idx < G) {
-      // 使用传入的 G_PADDED 来计算正确的 stride
-      sh_scl_tile[tid] = scl[n * G_PADDED + current_group_idx];
-
-      int packed_g = current_group_idx / PACK_FACTOR;
-      sh_zos_tile[tid] =
-          zos[n * G_PACKED + packed_g];  // zos 使用 G_PACKED stride
-    } else {
-      sh_scl_tile[tid] = static_cast<S>(0.0f);
-      sh_zos_tile[tid] = 0;
-    }
-
-    // --- 加载 Packed Weights 到共享内存 ---
-    // 这里的全局内存访问模式是 Strided (跳跃 K_PACKED), 但索引是正确的
-    for (int k_packed_offset = 0; k_packed_offset < K_PACKED_PER_TILE;
-         ++k_packed_offset) {
-      int k_local_start = k_packed_offset * PACK_FACTOR;
-      int global_packed_k_idx = (kb + k_local_start) / PACK_FACTOR;
-      if (global_packed_k_idx < K_PACKED) {
-        sh_qwt[tid][k_packed_offset] =
-            qwt[n * K_PACKED + global_packed_k_idx];  // N-Major 访问
+  int m_global_start = blockIdx.x * BM;
+  int n_global_start = blockIdx.y * BN;
+  using namespace nvcuda;
+  using FragmentA = wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, T,
+                                   wmma::row_major>;
+  using FragmentB = wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, T,
+                                   wmma::row_major>;
+  using FragmentC =
+      wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>;
+  __shared__ T smemA[BM * BK];
+  __shared__ T smemB[BK * BN];
+  __shared__ float smem_out[BM][BN];
+  FragmentC fragC;
+  const int tid_in_block = threadIdx.x;
+  const int threads_in_block = blockDim.x;
+  wmma::fill_fragment(fragC, 0.0f);
+  constexpr int vec_unit = 16 / sizeof(T);
+  for (int tile_k = 0; tile_k < K; tile_k += BK) {
+    // 加载A矩阵
+    for (int load_idx = threadIdx.x; load_idx < BM * BK / vec_unit;
+         load_idx += blockDim.x) {
+      int load_row = load_idx / (BK / vec_unit);
+      int load_pack_col = load_idx % (BK / vec_unit);
+      int global_row = m_global_start + load_row;
+      int global_col = tile_k + load_pack_col * vec_unit;
+      if (global_row < M) {
+        if (global_col + vec_unit <= K) {
+          reinterpret_cast<float4*>(
+              smemA)[load_row * (BK / vec_unit) + load_pack_col] =
+              reinterpret_cast<const float4*>(
+                  inp)[(m_global_start + load_row) * (K / vec_unit) +
+                       global_col / vec_unit];
+        } else if (global_col < K) {
+          for (int i = 0; i < vec_unit; ++i) {
+            if (global_col + i < K) {
+              smemA[load_row * BK + load_pack_col * vec_unit + i] =
+                  inp[(m_global_start + load_row) * K + global_col + i];
+            } else {
+              smemA[load_row * BK + load_pack_col * vec_unit + i] = 0.0f;
+            }
+          }
+        } else {
+          for (int i = 0; i < vec_unit; ++i) {
+            smemA[load_row * BK + load_pack_col * vec_unit + i] = 0.0f;
+          }
+        }
       } else {
-        sh_qwt[tid][k_packed_offset] = 0;
+        for (int i = 0; i < vec_unit; ++i) {
+          smemA[load_row * BK + load_pack_col * vec_unit + i] = 0.0f;
+        }
       }
     }
+    // 加载B矩阵
 
-    __syncthreads();  // 确保所有共享内存加载完成
+    // BN 最初设置为 128
+    // 单个 int32 打包 8 个权重
+    // float4 可一次性加载 32 个数据
+    // 考虑到复杂性，仍然先实现单加载
+    // 或者说 int32 本身即可以理解为向量化加载
 
-    // --- 计算核心循环 ---
-    for (int t = 0; t < TILE_K; ++t) {
-      int current_k = kb + t;     // 当前处理的全局 K 索引
-      if (current_k >= K) break;  // K 边界检查
+    constexpr int NUM_K_ELEMENTS_PER_PACK = PACK_FACTOR;
 
-      float iv = static_cast<float>(sh_inp[t]);  // 从共享内存读输入
+    for (int load_idx = threadIdx.x; load_idx < BN * BK / 8;
+         load_idx += blockDim.x) {
+      int load_row = load_idx / (BK / 8);
+      int load_col = load_idx % (BK / 8);
+      int global_row = n_global_start + load_row;
+      int global_col = tile_k + load_col * 8;
 
-      // 从共享内存读取 Scale 和 Packed Zero (对应当前 Tile 的 group)
-      S cur_s = sh_scl_tile[tid];
-      int32_t cur_z_packed = sh_zos_tile[tid];
+      int32_t qwt_val = 0;
+      if (global_row < N && global_col < K) {
+        qwt_val = qwt[global_row * K_PACKED + (tile_k + load_col * 8) / 8];
+      }
 
-      // 提取当前 k 对应的 Zero-point
-      int g =
-          current_k / group_size;  // 重新计算 g (这里假设 TILE_K<=group_size, g
-                                   // == current_group_idx)
-      int inner_g = g % PACK_FACTOR;
-      int shift_z = inner_g * BITS;
-      uint32_t z = (cur_z_packed >> shift_z) & ((1 << BITS) - 1);
+      int32_t zeros_val = 0;
+      if (global_row < N && global_col < K) {
+        zeros_val = zos[global_row * G_PACKED +
+                        ((tile_k + load_col * 8) / group_size) / 8];
+      }
 
-      // 从共享内存读取 Packed Weight
-      int packed_k_in_tile = t / PACK_FACTOR;
-      int32_t pw = sh_qwt[tid][packed_k_in_tile];
+      for (int i = 0; i < 8; ++i) {
+        int current_k = global_col + i;
+        int inner_k = current_k % PACK_FACTOR;
+        int group_idx = current_k / group_size;
+        S scale_val = (global_row < N && current_k < K)
+                          ? scl[global_row * G_PADDED + group_idx]
+                          : S(0);
+        int shift_w = inner_k * BITS;
+        uint32_t w = (qwt_val >> shift_w) & ((1 << BITS) - 1);
+        int inner_g = (current_k / group_size) % PACK_FACTOR;
+        int shift_z = inner_g * BITS;
+        uint32_t z = (zeros_val >> shift_z) & ((1 << BITS) - 1);
+        float temp_val = (static_cast<float>(w) - static_cast<float>(z)) *
+                         static_cast<float>(scale_val);
+        T dequantized_val = static_cast<T>(temp_val);  // 最后转换
 
-      // 提取当前 k 对应的 Weight
-      // !!! 修正: 使用 current_k 计算 inner_k !!!
-      int inner_k = current_k % PACK_FACTOR;
-      int shift_w = inner_k * BITS;
-      uint32_t w = (pw >> shift_w) & ((1 << BITS) - 1);
-
-      // 反量化并累加 (FMA)
-      float scale_val = static_cast<float>(cur_s);
-      acc = __fmaf_rn(
-          iv, (static_cast<float>(w) - static_cast<float>(z)) * scale_val, acc);
+        int n_local = load_row;
+        int k_local = load_col * 8 + i;
+        if (n_local < BN && k_local < BK) {
+          smemB[k_local * BN + n_local] = dequantized_val;
+        }
+      }
     }
-  }  // 结束 K 分块循环
+    __syncthreads();
 
-  // --- 写回结果 ---
-  if (bias) {
-    acc += static_cast<float>(bias[n]);
+    for (int k_step = 0; k_step < BK; k_step += WMMA_K) {
+      FragmentA fragA_load;
+      FragmentB fragB_load;
+      const T* smemA_ptr = smemA + (warp_m_id * WMMA_M * BK) + k_step;
+      wmma::load_matrix_sync(fragA_load, smemA_ptr, BK);
+      const T* smemB_ptr = smemB + (k_step * BN) + (warp_n_id * WMMA_N);
+      wmma::load_matrix_sync(fragB_load, smemB_ptr, BN);
+
+      wmma::mma_sync(fragC, fragA_load, fragB_load, fragC);
+    }
   }
-  out[m * N + n] =
-      static_cast<T>(acc);  // N-Major 输出? 不，输出通常是 M-Major [M, N]
+
+  const int out_m_base = warp_m_id * WMMA_M;
+  const int out_n_base = warp_n_id * WMMA_N;
+
+  wmma::store_matrix_sync(&smem_out[out_m_base][out_n_base], fragC, BN,
+                          wmma::mem_row_major);
+  __syncthreads();
+#pragma unroll
+  for (int write_idx = threadIdx.x; write_idx < BM * BN;
+       write_idx += blockDim.x) {
+    int m_local = write_idx / BN;
+    int load_row = write_idx % BN;
+
+    int m_global = m_global_start + m_local;
+    int n_global = n_global_start + load_row;
+
+    if (m_global < M && n_global < N) {
+      float result = smem_out[m_local][load_row];
+      if (bias) {
+        result += static_cast<float>(bias[n_global]);
+      }
+
+      out[m_global * N + n_global] = static_cast<T>(result);
+    }
+  }
 }
 
 // --- GEMV Kernel (M = 1, N-Major 优化版) ---
@@ -296,7 +341,7 @@ __global__ void matmul_awq_gemv_bf16_vectorized_kernel(  // <--- 重命名 Kerne
   int32_t* sh_zos =
       reinterpret_cast<int32_t*>(&sh_scl[warps_per_block * G_PADDED]);
   constexpr int vec_unit = 16 / sizeof(__nv_bfloat16);
-  // --- 加载共享内存 (保持不变) ---
+
   // 加载 sh_inp (BF16)
   // 注意 默认K是8倍数
   for (int k_idx = threadIdx.x; k_idx < K / vec_unit; k_idx += BLOCK_N_GEMV) {
@@ -330,7 +375,6 @@ __global__ void matmul_awq_gemv_bf16_vectorized_kernel(  // <--- 重命名 Kerne
       packed_w_val = qwt[n * K_PACKED + packed_k_idx];
     }
 
-    // --- Scale & Zero 加载 (简化版) ---
     // !!! 警告: 假设 k_thread_start 到 k_thread_start + 7 均在同一 group 内 !!!
     // 基于 k_thread_start 确定 group, scale, 和 packed_zero
     int g = k_thread_start / group_size;
@@ -511,32 +555,33 @@ void matmul_quantized_gemv(
               bias ? bias->data_ptr() : nullptr);
 
   } else {
-    // --- GEMM 路径 (M > 1) ---
-    constexpr int BLOCK_N_GEMM = 256;  // GEMM Kernel 的 Block 线程数
-    constexpr int TILE_K_GEMM = 32;    // K 分块大小
-
-    // 检查前提
-    if (TILE_K_GEMM > group_size) {
-      std::cerr << "警告: GEMM Kernel 优化假设 TILE_K <= group_size。否则 "
-                   "Scale/Zero 缓存逻辑需修改。"
-                << std::endl;
-    }
-
-    const dim3 threads_gemm(BLOCK_N_GEMM);                           // 1D Block
-    const dim3 grid_gemm((N + BLOCK_N_GEMM - 1) / BLOCK_N_GEMM, M);  // 2D Grid
+    constexpr int BM = 16;
+    constexpr int BN = 64;
+    constexpr int BK = 16;
+    constexpr int WMMA_M = 16;
+    constexpr int WMMA_N = 16;
+    constexpr int WMMA_K = 16;
+    constexpr int WARP_CNT = BM / WMMA_M * BN / WMMA_N;
+    const dim3 threads_gemm(WARP_CNT * WARP_SIZE);               // 1D Block
+    const dim3 grid_gemm((M + BM - 1) / BM, (N + BN - 1) / BN);  // 2D Grid
 
 #ifndef NDEBUG  // 调试输出
     std::cout << "--- 启动优化版 GEMM Kernel (M > 1) ---" << std::endl;
     std::cout << "Grid: (" << grid_gemm.x << ", " << grid_gemm.y
               << "), Block: (" << threads_gemm.x << ")" << std::endl;
 #endif
-    // 调用 GEMM Kernel, 传递 G_PADDED
-    matmul_awq_gemm_kernel_opt<T, ScaleType, TILE_K_GEMM, BLOCK_N_GEMM>
-        <<<grid_gemm, threads_gemm, 0, stream>>>(  // 使用静态共享内存
-            input.data_ptr(), qweight.data_ptr(), scales.data_ptr(),
-            zeros.data_ptr(), output->data_ptr(), M, K, N, group_size,
-            G_PADDED,  // !!! 传递 G_PADDED !!!
-            bias ? bias->data_ptr() : nullptr);
+    if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+      matmul_awq_gemm_kernel_opt<T, ScaleType, BM, BN, BK, WMMA_M, WMMA_N,
+                                 WMMA_K, WARP_CNT>
+          <<<grid_gemm, threads_gemm, 0, stream>>>(  // 使用静态共享内存
+              input.data_ptr(), qweight.data_ptr(), scales.data_ptr(),
+              zeros.data_ptr(), output->data_ptr(), M, K, N, group_size,
+              G_PADDED,  // !!! 传递 G_PADDED !!!
+              bias ? bias->data_ptr() : nullptr);
+    } else {
+      throw std::runtime_error(
+          "Unsupported input type for AWQ gemv GEMM kernel");
+    }
   }
 
   // --- CUDA 错误检查 ---

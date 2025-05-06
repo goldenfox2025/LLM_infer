@@ -28,6 +28,12 @@ class WeightProcessorBase {
   static void print_processing_info(const std::string& key,
                                     const std::string& dst_key);
 
+  // 辅助函数：计算张量中的参数数量
+  static size_t calculate_params_count(const py::object& tensor);
+
+  // 辅助函数：计算张量形状中的参数数量
+  static size_t calculate_params_from_shape(const std::vector<size_t>& shape);
+
   // 进度条相关函数
   static void init_progress(size_t total_weights,
                             const std::string& model_type);
@@ -35,10 +41,11 @@ class WeightProcessorBase {
                               const std::string& dst_key);
   static void finish_progress();
 
- private:
+ protected:
   // 进度条状态
   static size_t total_weights_;
   static size_t processed_weights_;
   static std::string current_model_type_;
   static bool progress_initialized_;
+  static size_t total_params_count_;
 };

@@ -308,9 +308,7 @@ __global__ void gqa_gemm_kernel_v2(
 #pragma unroll
         for (int i = 0; i < vec_unit; ++i) {
           int current_smem_col = smem_q_col_start + i;
-          if (current_smem_col < BK) {  // 检查 smem 列边界
-            smemQ[ph & 1][smem_q_row][current_smem_col] = 0.0f;
-          }
+          smemQ[ph & 1][smem_q_row][current_smem_col] = 0.0f;
         }
       }
     }  // 结束 Q 加载循环
