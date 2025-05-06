@@ -12,10 +12,10 @@
 #include "CudaMemoryPool.hpp"
 #include "base_model.hpp"
 #include "device_manager.hpp"
+#include "include/weight_processor.hpp"
 #include "inference.hpp"
 #include "model_factory.hpp"
 #include "model_initializer.hpp"
-#include "weight_processor.hpp"
 
 namespace py = pybind11;
 class infer_base;
@@ -53,7 +53,7 @@ bool init_model(py::dict config, py::dict weights,
 
     if (result) {
       // 打印模型信息
-      g_model->print_model_info();
+      //   g_model->print_model_info();
 
       // 构建基础配置用于初始化CUDA内存池
       std::unordered_map<std::string, int> cpp_config =

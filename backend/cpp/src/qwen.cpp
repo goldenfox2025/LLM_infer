@@ -340,6 +340,7 @@ QwenModel<T>::~QwenModel() {
 // -------------------------------
 template <typename T>
 bool QwenModel<T>::verify_params() const {
+  // 禁用
   std::cout << "Not checking parameters" << std::endl;
   return true;
 }

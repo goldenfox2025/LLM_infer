@@ -1,7 +1,7 @@
 #pragma once
 
-#include "weight_processors/llama_weight_processor.hpp"
-#include "weight_processors/qwen_weight_processor.hpp"
+#include "include/llama_weight_processor.hpp"
+#include "include/qwen_weight_processor.hpp"
 
 // 权重处理器类，提供统一的接口访问各种模型的权重处理器
 class WeightProcessor {

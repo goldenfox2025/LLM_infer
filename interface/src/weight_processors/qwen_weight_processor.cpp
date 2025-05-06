@@ -1,4 +1,4 @@
-#include "qwen_weight_processor.hpp"
+#include "include/qwen_weight_processor.hpp"
 
 #include <iostream>
 
