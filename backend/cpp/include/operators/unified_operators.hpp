@@ -135,6 +135,28 @@ class UnifiedOperators {
     (*op)(output, input, stream);
   }
 
+  // Add算子
+  void add(Tensor<T>* output, Tensor<T>* input_a, Tensor<T>* input_b,
+           cudaStream_t stream = nullptr) {
+    auto op = OperatorFactory<T>::getAddOperator(platform_);
+    if (!op) {
+      // 检查是否是CPU平台
+      if (platform_ == OperatorPlatform::CPU) {
+        // 检查是否是__nv_bfloat16类型
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+          throw std::runtime_error(
+              "Add operator for __nv_bfloat16 not supported on CPU platform");
+        }
+      }
+      // 如果不是特殊情况，抛出通用错误
+      throw std::runtime_error(
+          "Add operator not registered for the current platform");
+    }
+
+    // 直接调用算子
+    (*op)(output, input_a, input_b, stream);
+  }
+
  private:
   Device device_;
   OperatorPlatform platform_;

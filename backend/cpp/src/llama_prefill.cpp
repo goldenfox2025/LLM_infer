@@ -1,4 +1,4 @@
-#include <cuda_runtime.h>  // 如果要在此处使用cudaMemcpy，需要包含
+#include <cuda_runtime.h>
 
 #include <algorithm>  // std::min
 #include <cmath>
@@ -16,7 +16,6 @@
 #include "thread_pool.hpp"
 
 template <typename T>
-// =========== 1. debugPrintTensor
 void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
                       size_t num_to_print = 10) {
   std::cout << "[Debug] " << tensor_name << ":\n";
@@ -474,9 +473,9 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
 }
 
 uint32_t* LlamaModel::prefill(const Tensor<uint32_t>* input,
-                             ThreadPool& thread_pool, KVCacheBase* kv_cache,
-                             size_t top_k, float temperature, float top_p,
-                             curandState* d_states) {
+                              ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                              size_t top_k, float temperature, float top_p,
+                              curandState* d_states) {
   if (!input) {
     throw std::invalid_argument("Input tensor cannot be null");
   }

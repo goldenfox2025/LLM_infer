@@ -2,10 +2,12 @@
 
 #include <memory>
 
+#include "operators/cpu/add_cpu.hpp"
 #include "operators/cpu/multiply_cpu.hpp"
 #include "operators/cpu/rms_norm_cpu.hpp"
 #include "operators/cpu/rope_cpu.hpp"
 #include "operators/cpu/silu_cpu.hpp"
+#include "operators/cuda/add_cuda.cuh"
 #include "operators/cuda/multiply_cuda.cuh"
 #include "operators/cuda/rms_norm_cuda.cuh"
 #include "operators/cuda/rope_cuda.cuh"
@@ -42,6 +44,11 @@ class OperatorFactory {
     registry.registerOperator(OperatorType::SILU, OperatorPlatform::CPU,
                               silu_cpu);
 
+    // 注册Add CPU算子
+    auto add_cpu = std::make_shared<AddCPUOperator<T>>();
+    registry.registerOperator(OperatorType::ADD, OperatorPlatform::CPU,
+                              add_cpu);
+
     // 注册其他CPU算子...
   }
 
@@ -68,6 +75,11 @@ class OperatorFactory {
     auto silu_cuda = std::make_shared<SiluCUDAOperator<T>>();
     registry.registerOperator(OperatorType::SILU, OperatorPlatform::CUDA,
                               silu_cuda);
+
+    // 注册Add CUDA算子
+    auto add_cuda = std::make_shared<AddCUDAOperator<T>>();
+    registry.registerOperator(OperatorType::ADD, OperatorPlatform::CUDA,
+                              add_cuda);
 
     // 注册其他CUDA算子...
   }
@@ -102,6 +114,14 @@ class OperatorFactory {
     auto& registry = OperatorRegistry<T>::instance();
     return registry.template getOperator<SiluOperator<T>>(OperatorType::SILU,
                                                           platform);
+  }
+
+  // 获取Add算子
+  static std::shared_ptr<AddOperator<T>> getAddOperator(
+      OperatorPlatform platform) {
+    auto& registry = OperatorRegistry<T>::instance();
+    return registry.template getOperator<AddOperator<T>>(OperatorType::ADD,
+                                                         platform);
   }
 
   // 添加其他算子的获取方法...

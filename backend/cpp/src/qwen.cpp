@@ -2,16 +2,12 @@
 #include "qwen.hpp"
 
 #include <cmath>
-#include <cmath>    // For std::fabs (for tolerance comparison if needed)
-#include <cstring>  // For memcmp (binary comparison)
+#include <cstring>
 #include <iostream>
-#include <limits>  // For std::numeric_limits (for tolerance comparison if needed)
+#include <limits>
 #include <vector>
 
 #include "cudaOP.cuh"
-
-// Assuming Tensor class and Device enum are defined as before
-// Assuming checkCudaError is available
 
 template <typename T>
 bool compareGpuTensors(const Tensor<T> &t1, const Tensor<T> &t2,
@@ -1338,7 +1334,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input,
     }
 
     // 残差连接
-    cuda_OP::add(&residual, &residual, &ffn_out);
+    operators_->add(&residual, &residual, &ffn_out);
+    // cuda_OP::add(&residual, &residual, &ffn_out);
   }
 
   // 最终的LayerNorm (RMSNorm)
