@@ -7,6 +7,7 @@
 #include "base_model.hpp"
 #include "llama.hpp"
 #include "qwen.hpp"
+#include "qwen3.hpp"
 
 // 模型类型枚举
 enum class ModelType {
@@ -14,6 +15,8 @@ enum class ModelType {
   QWEN,
   QWEN_BF16,
   QWEN_AWQ,
+  QWEN3_BF16,
+  QWEN3_AWQ,
 };
 
 // 从字符串转换为模型类型
@@ -26,6 +29,10 @@ inline ModelType model_type_from_string(const std::string& type_str) {
     return ModelType::QWEN_BF16;
   } else if (type_str == "qwen_awq") {
     return ModelType::QWEN_AWQ;
+  } else if (type_str == "qwen3_bf16") {
+    return ModelType::QWEN3_BF16;
+  } else if (type_str == "qwen3_awq") {
+    return ModelType::QWEN3_AWQ;
   } else {
     throw std::runtime_error("Unsupported model type: " + type_str);
   }
@@ -69,7 +76,17 @@ class ModelFactory {
       const std::unordered_map<std::string, int>& config) {
     switch (type) {
       case ModelType::QWEN_BF16: {
-        auto model = std::make_shared<QwenModel<__nv_bfloat16>>(weights, config);
+        auto model =
+            std::make_shared<QwenModel<__nv_bfloat16>>(weights, config);
+        model->print_model_info();
+        if (!model->verify_params()) {
+          throw std::runtime_error("Model parameter verification failed");
+        }
+        return model;
+      }
+      case ModelType::QWEN3_BF16: {
+        auto model =
+            std::make_shared<Qwen3Model<__nv_bfloat16>>(weights, config);
         model->print_model_info();
         if (!model->verify_params()) {
           throw std::runtime_error("Model parameter verification failed");
@@ -94,6 +111,15 @@ class ModelFactory {
     switch (type) {
       case ModelType::QWEN_AWQ: {
         auto model = std::make_shared<QwenModel<__nv_bfloat16>>(
+            weights, qweight_params, scales_params, qzeros_params, config);
+        model->print_model_info();
+        if (!model->verify_params()) {
+          throw std::runtime_error("Model parameter verification failed");
+        }
+        return model;
+      }
+      case ModelType::QWEN3_AWQ: {
+        auto model = std::make_shared<Qwen3Model<__nv_bfloat16>>(
             weights, qweight_params, scales_params, qzeros_params, config);
         model->print_model_info();
         if (!model->verify_params()) {

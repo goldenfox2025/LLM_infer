@@ -1,68 +1,55 @@
 #pragma once
-#include <cuda_bf16.h>  // For __nv_bfloat16 support
-
+#include <array>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 
 #include "base_model.hpp"
-#include "cudaOP.cuh"
 #include "inference.hpp"
 #include "operators/unified_operators.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
-#include "weight_tensor.hpp"
 
 template <typename T>
-class QwenModel : public BaseModel {
+class Qwen3Model : public BaseModel {
  public:
-  QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
-            const std::unordered_map<std::string, int>& config);
+  Qwen3Model(const std::unordered_map<std::string, Tensor<T>>& params,
+             const std::unordered_map<std::string, int>& config);
 
   // 带量化参数的构造函数
-  QwenModel(
+  Qwen3Model(
       const std::unordered_map<std::string, Tensor<T>>& params,
       const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
       const std::unordered_map<std::string, Tensor<T>>& scales_params,
       const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
       const std::unordered_map<std::string, int>& config);
-  ~QwenModel() override;
+  ~Qwen3Model() override;
 
   bool verify_params() const override;
   void print_model_info() const override;
 
   // Implementation of BaseModel interface:
-  // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
   uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                     KVCacheBase* kv_cache, size_t top_k, float temperature,
-                    float top_p, curandState* d_states = nullptr) override {
-    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-
-    return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
-                           top_k, d_states);
-  }
+                    float top_p, curandState* d_states = nullptr) override;
   uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
                     KVCacheBase* kv_cache, size_t top_k, float temperature,
-                    float top_p, curandState* d_states = nullptr) override {
-    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
+                    float top_p, curandState* d_states = nullptr) override;
 
-    return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p,
-                           top_k, d_states);
-  }
+  // Device management
+  Qwen3Model& cuda() override;
+  Qwen3Model& cpu() override;
+  Device device() const override { return device_; }
 
-  // Token generation
-  std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
-                                 size_t max_length, float temperature = 1.0f,
-                                 float top_p = 0.9f, size_t top_k = 50);
-
-  // Getter methods
+  // Getters for model properties
   size_t get_n_layers() const override { return n_layers_; }
   size_t get_max_seq_len() const override { return max_position_embeddings_; }
   size_t get_head_dim() const override { return head_dim_; }
   size_t get_n_kv_heads() const override { return n_kv_heads_; }
   uint32_t get_eos_token_id() const override { return eos_token_id_; }
 
-  // Additional getter methods for qwen_decode.cpp
+  // Additional getter methods
   size_t get_n_heads() const { return n_heads_; }
   size_t get_hidden_size() const { return hidden_size_; }
   size_t get_intermediate_size() const { return intermediate_size_; }
@@ -85,56 +72,9 @@ class QwenModel : public BaseModel {
     return qzeros_params_;
   }
 
-  // CUDA versions of forward and prefill.
-  // Their implementations can be filled in later (currently as stubs mimicking
-  // Llama).
+  // CUDA versions of forward and prefill
   Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
   Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
-
-  // 获取权重（普通或量化）
-  op::WeightTensor<T> get_weight(const std::string& key) {
-    if (quant_type_ == 1) {
-      // 尝试获取量化权重
-      std::string qweight_key = key + ".qweight";
-      std::string scales_key = key + ".scales";
-      std::string qzeros_key = key + ".qzeros";
-
-      auto qweight_it = qweight_params_.find(qweight_key);
-      auto scales_it = scales_params_.find(scales_key);
-      auto qzeros_it = qzeros_params_.find(qzeros_key);
-
-      if (qweight_it != qweight_params_.end() &&
-          scales_it != scales_params_.end() &&
-          qzeros_it != qzeros_params_.end()) {
-        // 返回量化权重
-        return op::WeightTensor<T>(&qweight_it->second, &scales_it->second,
-                                   &qzeros_it->second, group_size_);
-      }
-    }
-
-    auto weight_it = params_.find(key);
-    if (weight_it != params_.end()) {
-      return op::WeightTensor<T>(&weight_it->second);
-    }
-    // 尝试返回普通权重
-    std::string weight_key = key + ".weight";
-    weight_it = params_.find(weight_key);
-
-    if (weight_it != params_.end()) {
-      return op::WeightTensor<T>(&weight_it->second);
-    }
-
-    // 如果找不到权重，抛出更明确的错误
-    throw std::runtime_error("Weight not found: " + key +
-                             (quant_type_ == 1
-                                  ? " (tried both quantized and regular)"
-                                  : " (tried regular)"));
-  }
-
-  // Device management
-  QwenModel& cuda() override;
-  QwenModel& cpu() override;
-  Device device() const override { return device_; }
 
  private:
   std::array<cudaEvent_t, 3> fa_done_events_;
@@ -166,7 +106,6 @@ class QwenModel : public BaseModel {
 };
 
 // 使用 extern template 声明已在别处定义的模板特化
-// QwenModel<float> 特化
-extern template class QwenModel<float>;
-// QwenModel<__nv_bfloat16> 特化
-extern template class QwenModel<__nv_bfloat16>;
+// Qwen3Model<__nv_bfloat16> 特化
+extern template class Qwen3Model<__nv_bfloat16>;
+

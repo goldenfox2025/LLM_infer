@@ -31,15 +31,20 @@ add_subdirectory(backend/cpp/src/operators)
 pybind11_add_module(model_bridge SHARED
     interface/model_bridge.cpp
     interface/model_initializer.cpp
+    interface/src/qwen3_initializer.cpp
     interface/src/weight_processors/weight_processor_base.cpp
     interface/src/weight_processors/llama_weight_processor.cpp
     interface/src/weight_processors/qwen_weight_processor.cpp
+    interface/src/weight_processors/qwen3_weight_processor.cpp
     # ${OPERATOR_SOURCES}
     backend/cpp/src/llama_decode.cpp
     backend/cpp/src/llama_prefill.cpp
     backend/cpp/src/inference.cpp
     backend/cpp/src/thread_pool.cpp
     backend/cpp/src/qwen.cpp
+    backend/cpp/src/qwen3.cpp
+    backend/cpp/src/qwen3_forward.cpp
+    backend/cpp/src/qwen3_prefill.cpp
     backend/cpp/src/CudaMemoryPool.cpp
 )
 

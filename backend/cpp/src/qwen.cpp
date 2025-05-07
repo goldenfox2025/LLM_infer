@@ -1303,26 +1303,7 @@ std::vector<uint32_t> QwenModel<T>::generate(
   return std::vector<uint32_t>();
 }
 
-// -------------------------------
-// 辅助函数：将 FP32 权重转换为 __nv_bfloat16 权重
-// -------------------------------
-std::unordered_map<std::string, Tensor<__nv_bfloat16>> convert_weights_to_bf16(
-    const std::unordered_map<std::string, Tensor<float>> &float_weights) {
-  std::unordered_map<std::string, Tensor<__nv_bfloat16>> bf16_weights;
-  for (const auto &kv : float_weights) {
-    const std::string &key = kv.first;
-    const Tensor<float> &tensor = kv.second;
-    std::vector<__nv_bfloat16> bf16_data;
-    bf16_data.reserve(tensor.numel());
-    const float *data_ptr = tensor.data_ptr();
-    for (size_t i = 0; i < tensor.numel(); ++i) {
-      bf16_data.push_back(__nv_bfloat16(data_ptr[i]));
-    }
-    bf16_weights.emplace(
-        key, Tensor<__nv_bfloat16>(std::move(bf16_data), tensor.sizes()));
-  }
-  return bf16_weights;
-}
+
 
 // 显式模板实例化
 template class QwenModel<float>;

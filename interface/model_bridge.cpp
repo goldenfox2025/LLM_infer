@@ -47,6 +47,12 @@ bool init_model(py::dict config, py::dict weights,
     } else if (model_type == "qwen_awq") {
       result = ModelInitializer::init_qwen_awq_model(config, weights, g_model,
                                                      g_engine);
+    } else if (model_type == "qwen3_bf16") {
+      result = ModelInitializer::init_qwen3_bf16_model(config, weights, g_model,
+                                                       g_engine);
+    } else if (model_type == "qwen3_awq") {
+      result = ModelInitializer::init_qwen3_awq_model(config, weights, g_model,
+                                                      g_engine);
     } else {
       throw std::runtime_error("Unsupported model type: " + model_type);
     }

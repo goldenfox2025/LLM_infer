@@ -18,7 +18,7 @@
 // Forward declaration of KVCache
 template <typename T>
 class KVCache;
-
+constexpr int kNumStreams = 5;
 // Base model class that will be used for both LlamaModel and QwenModel
 class BaseModel {
  public:
@@ -26,13 +26,13 @@ class BaseModel {
 
   // Core inference methods that must be implemented by derived classes
   virtual uint32_t* forward(const Tensor<uint32_t>* input,
-                           ThreadPool& thread_pool, KVCacheBase* kv_cache,
-                           size_t top_k, float temperature, float top_p,
-                           curandState* d_states = nullptr) = 0;
+                            ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                            size_t top_k, float temperature, float top_p,
+                            curandState* d_states = nullptr) = 0;
   virtual uint32_t* prefill(const Tensor<uint32_t>* input,
-                           ThreadPool& thread_pool, KVCacheBase* kv_cache,
-                           size_t top_k, float temperature, float top_p,
-                           curandState* d_states = nullptr) = 0;
+                            ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                            size_t top_k, float temperature, float top_p,
+                            curandState* d_states = nullptr) = 0;
 
   // Common methods for all model types
   virtual bool verify_params() const = 0;
