@@ -11,6 +11,7 @@
 #include "operators/unified_operators.hpp"
 #include "tensor.hpp"
 #include "thread_pool.hpp"
+#include "weight_tensor.hpp"
 constexpr int kNumStreams = 5;
 
 template <typename T>
@@ -90,6 +91,46 @@ class QwenModel : public BaseModel {
   // Llama).
   Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
   Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+
+  // 获取权重（普通或量化）
+  op::WeightTensor<T> get_weight(const std::string& key) {
+    if (quant_type_ == 1) {
+      // 尝试获取量化权重
+      std::string qweight_key = key + ".qweight";
+      std::string scales_key = key + ".scales";
+      std::string qzeros_key = key + ".qzeros";
+
+      auto qweight_it = qweight_params_.find(qweight_key);
+      auto scales_it = scales_params_.find(scales_key);
+      auto qzeros_it = qzeros_params_.find(qzeros_key);
+
+      if (qweight_it != qweight_params_.end() &&
+          scales_it != scales_params_.end() &&
+          qzeros_it != qzeros_params_.end()) {
+        // 返回量化权重
+        return op::WeightTensor<T>(&qweight_it->second, &scales_it->second,
+                                   &qzeros_it->second, group_size_);
+      }
+    }
+
+    auto weight_it = params_.find(key);
+    if (weight_it != params_.end()) {
+      return op::WeightTensor<T>(&weight_it->second);
+    }
+    // 尝试返回普通权重
+    std::string weight_key = key + ".weight";
+    weight_it = params_.find(weight_key);
+
+    if (weight_it != params_.end()) {
+      return op::WeightTensor<T>(&weight_it->second);
+    }
+
+    // 如果找不到权重，抛出更明确的错误
+    throw std::runtime_error("Weight not found: " + key +
+                             (quant_type_ == 1
+                                  ? " (tried both quantized and regular)"
+                                  : " (tried regular)"));
+  }
 
   // Device management
   QwenModel& cuda() override;

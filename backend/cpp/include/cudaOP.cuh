@@ -56,7 +56,7 @@ void matmul_quantized_gemv(           // Renamed wrapper
     const Tensor<int32_t> &zeros,     // [N, G/8]
     int group_size,
     Tensor<T> *output,  // [M, N] - DIMS NOT CHECKED HERE
-    cudaStream_t stream, const Tensor<T> *bias);
+    cudaStream_t stream = nullptr, const Tensor<T> *bias = nullptr);
 using nvbf16 = __nv_bfloat16;
 void init_curand(curandState *d_states, unsigned long long seed, int offset,
                  cudaStream_t stream = nullptr);

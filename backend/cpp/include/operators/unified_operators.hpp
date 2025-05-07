@@ -8,6 +8,7 @@
 #include "operators/operator_base.hpp"
 #include "operators/operator_factory.hpp"
 #include "tensor.hpp"
+#include "weight_tensor.hpp"
 
 namespace op {
 
@@ -155,6 +156,22 @@ class UnifiedOperators {
 
     // 直接调用算子
     (*op)(output, input_a, input_b, stream);
+  }
+
+  // 统一的矩阵乘法接口，支持普通权重和量化权重
+  void matmul(Tensor<T>* output, Tensor<T>* input,
+              const WeightTensor<T>& weight, const Tensor<T>* bias = nullptr,
+              cudaStream_t stream = nullptr) {
+    // 根据权重类型自动选择合适的实现
+    if (weight.is_quantized()) {
+      // 使用AWQ量化矩阵乘法
+      cuda_OP::matmul_quantized_gemv(*input, *weight.qweight(),
+                                     *weight.scales(), *weight.qzeros(),
+                                     weight.group_size(), output, stream, bias);
+    } else {
+      // 使用普通矩阵乘法
+      cuda_OP::matmul(*input, *weight.tensor(), output, stream, bias);
+    }
   }
 
  private:
