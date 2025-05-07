@@ -469,7 +469,7 @@ Tensor<float> LlamaModel::prefill_cuda(const Tensor<uint32_t>* input,
   Tensor<float> logits({seq_len, vocab_size}, Device::CUDA);
   cuda_OP::matmul(final_h, lm_head, &logits);
 
-  return logits.cpu();
+  return logits;
 }
 
 uint32_t* LlamaModel::prefill(const Tensor<uint32_t>* input,
@@ -490,15 +490,20 @@ uint32_t* LlamaModel::prefill(const Tensor<uint32_t>* input,
 
       size_t seq_len = input->numel();
 
-      // 从 prefill 的最后一行 logits 中采样第一个生成 token
+      // 从 prefill 的最后一行 logits 中提取最后一个 token 的 logits
       const size_t vocab_size = prefill_logits.sizes()[1];
-      std::vector<float> last_row_data(vocab_size, 0.f);
-      const float* prefill_ptr =
-          prefill_logits.data_ptr() + (seq_len - 1) * vocab_size;
-      std::copy(prefill_ptr, prefill_ptr + vocab_size, last_row_data.begin());
-      Tensor<float> last_logits(std::move(last_row_data), {1, vocab_size},
-                                Device::CPU);  // 强制使用CPU设备
-      return OP::sample(&last_logits, temperature, top_p, top_k);
+
+      // 创建一个新的 CUDA 张量，只包含最后一行的 logits
+      Tensor<float> last_logits({1, vocab_size}, Device::CUDA);
+
+      // 复制最后一行的 logits 到新的张量
+      cudaMemcpy(last_logits.data_ptr(),
+                 prefill_logits.data_ptr() + (seq_len - 1) * vocab_size,
+                 vocab_size * sizeof(float), cudaMemcpyDeviceToDevice);
+
+      // 使用 cuda_OP::sample 在 GPU 上进行采样，返回 GPU 内存上的指针
+      return cuda_OP::sample(std::move(last_logits), temperature, top_p, top_k,
+                             d_states);
 
     } else {
       Tensor<float> prefill_logits =

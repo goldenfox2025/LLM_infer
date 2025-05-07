@@ -550,13 +550,13 @@ Tensor<float> LlamaModel::forward_cuda(const Tensor<uint32_t>* input,
   size_t vocab_size = lm_head.sizes()[1];
   Tensor<float> logits({seq_len, vocab_size}, Device::CUDA);
   cuda_OP::matmul(final_h, lm_head, &logits);
-  return logits.cpu();
+  return logits;
 }
 
 uint32_t* LlamaModel::forward(const Tensor<uint32_t>* input,
-                             ThreadPool& thread_pool, KVCacheBase* kv_cache,
-                             size_t top_k, float temperature, float top_p,
-                             curandState* d_states) {
+                              ThreadPool& thread_pool, KVCacheBase* kv_cache,
+                              size_t top_k, float temperature, float top_p,
+                              curandState* d_states) {
   // 对输入检查
   if (!input) {
     throw std::invalid_argument("Input tensor cannot be null");
@@ -573,8 +573,10 @@ uint32_t* LlamaModel::forward(const Tensor<uint32_t>* input,
   }
   if (device_ == Device::CUDA) {
     Tensor<float> logits = forward_cuda(input, typed_kv_cache);
-    uint32_t* next_token = OP::sample(&logits, temperature, top_p, top_k);
-    return next_token;
+    // uint32_t* next_token = OP::sample(&logits, temperature, top_p, top_k);
+    // return next_token;
+    return cuda_OP::sample(std::move(logits), temperature, top_p, top_k,
+                           d_states);
   } else {
     Tensor<float> logits = forward_cpu(input, thread_pool, typed_kv_cache);
     uint32_t* next_token = OP::sample(&logits, temperature, top_p, top_k);

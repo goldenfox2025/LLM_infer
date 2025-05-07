@@ -1,21 +1,16 @@
 #include "include/weight_processor_base.hpp"
 
-#include <iomanip>
-#include <iostream>
-#include <numeric>
-#include <stdexcept>
-#include <string>
+namespace weight_processor_utils {
 
-// 初始化静态成员变量
-size_t WeightProcessorBase::total_weights_ = 0;
-size_t WeightProcessorBase::processed_weights_ = 0;
-std::string WeightProcessorBase::current_model_type_ = "";
-bool WeightProcessorBase::progress_initialized_ = false;
-size_t WeightProcessorBase::total_params_count_ = 0;
+// 初始化静态变量
+size_t total_weights = 0;
+size_t processed_weights = 0;
+std::string current_model_type = "";
+bool progress_initialized = false;
+size_t total_params_count = 0;
 
-// 辅助函数：将 PyTorch 张量转换为 __nv_bfloat16 类型的 Tensor
-Tensor<__nv_bfloat16> WeightProcessorBase::convert_bf16_tensor(
-    const py::object& tensor) {
+// 将 PyTorch 张量转换为 __nv_bfloat16 类型的 Tensor
+Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
   try {
     py::object torch_module = py::module::import("torch");
 
@@ -53,11 +48,6 @@ Tensor<__nv_bfloat16> WeightProcessorBase::convert_bf16_tensor(
         }
       } else {
         // 如果不是2字节元素，先转换为float再处理 以防万一
-        // std::cerr
-        //     << "Warning: Input tensor is not bfloat16, converting through
-        //     float"
-        //     << std::endl;
-
         py::object float_tensor =
             cpu_tensor.attr("to")(torch_module.attr("float"));
 
@@ -93,9 +83,8 @@ Tensor<__nv_bfloat16> WeightProcessorBase::convert_bf16_tensor(
   }
 }
 
-// 辅助函数：将 PyTorch 张量转换为 float 类型的 Tensor
-Tensor<float> WeightProcessorBase::convert_float_tensor(
-    const py::object& tensor) {
+// 将 PyTorch 张量转换为 float 类型的 Tensor
+Tensor<float> convert_float_tensor(const py::object& tensor) {
   try {
     // 确保张量在CPU上，便于数据访问
     py::object cpu_tensor = tensor.attr("detach")().attr("cpu")();
@@ -120,9 +109,8 @@ Tensor<float> WeightProcessorBase::convert_float_tensor(
   }
 }
 
-// 辅助函数：从 PyTorch 张量提取形状信息
-std::vector<size_t> WeightProcessorBase::get_tensor_shape(
-    const py::object& tensor) {
+// 从 PyTorch 张量提取形状信息
+std::vector<size_t> get_tensor_shape(const py::object& tensor) {
   py::tuple shape_tuple = tensor.attr("shape");
   std::vector<size_t> shape;
   for (size_t i = 0; i < py::len(shape_tuple); ++i) {
@@ -131,26 +119,9 @@ std::vector<size_t> WeightProcessorBase::get_tensor_shape(
   return shape;
 }
 
-// 辅助函数：计算张量中的参数数量
-size_t WeightProcessorBase::calculate_params_count(const py::object& tensor) {
-  std::vector<size_t> shape = get_tensor_shape(tensor);
-  return calculate_params_from_shape(shape);
-}
-
-// 辅助函数：计算张量形状中的参数数量
-size_t WeightProcessorBase::calculate_params_from_shape(
-    const std::vector<size_t>& shape) {
-  if (shape.empty()) {
-    return 0;
-  }
-  return std::accumulate(shape.begin(), shape.end(), 1,
-                         std::multiplies<size_t>());
-}
-
-// 辅助函数：打印权重处理进度
-void WeightProcessorBase::print_processing_info(const std::string& key,
-                                                const std::string& dst_key) {
-  if (progress_initialized_) {
+// 打印权重处理进度
+void print_processing_info(const std::string& key, const std::string& dst_key) {
+  if (progress_initialized) {
     // 如果进度条已初始化，则更新进度
     update_progress(key, dst_key);
   } else {
@@ -159,22 +130,35 @@ void WeightProcessorBase::print_processing_info(const std::string& key,
   }
 }
 
+// 计算张量形状中的参数数量
+size_t calculate_params_from_shape(const std::vector<size_t>& shape) {
+  if (shape.empty()) {
+    return 0;
+  }
+  return std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
+}
+
+// 计算张量中的参数数量
+size_t calculate_params_count(const py::object& tensor) {
+  std::vector<size_t> shape = get_tensor_shape(tensor);
+  return calculate_params_from_shape(shape);
+}
+
 // 初始化进度条
-void WeightProcessorBase::init_progress(size_t total_weights,
-                                        const std::string& model_type) {
+void init_progress(size_t total_weights_count, const std::string& model_type) {
   // 如果上一次进度条没有正确完成，先强制完成它
-  if (progress_initialized_) {
+  if (progress_initialized) {
     std::cout << "\r进度: [" << std::string(50, '=') << "] 100%";
     std::cout << "\n\033[1;32m✓ 上一次权重处理已强制完成!\033[0m\n"
               << std::endl;
   }
 
   // 重置所有状态变量
-  total_weights_ = total_weights;
-  processed_weights_ = 0;
-  total_params_count_ = 0;  // 重置参数计数
-  current_model_type_ = model_type;
-  progress_initialized_ = true;
+  total_weights = total_weights_count;
+  processed_weights = 0;
+  total_params_count = 0;  // 重置参数计数
+  current_model_type = model_type;
+  progress_initialized = true;
 
   // 打印进度条标题
   std::cout << "\n\033[1;36m处理 " << model_type << " 模型权重\033[0m"
@@ -184,18 +168,16 @@ void WeightProcessorBase::init_progress(size_t total_weights,
 }
 
 // 更新进度条
-void WeightProcessorBase::update_progress(const std::string& key,
-                                          const std::string& dst_key) {
-  if (!progress_initialized_) {
+void update_progress(const std::string& key, const std::string& dst_key) {
+  if (!progress_initialized) {
     return;
   }
 
   // 更新处理的权重数
-  processed_weights_++;
+  processed_weights++;
 
   // 计算进度百分比
-  float percentage =
-      static_cast<float>(processed_weights_) / total_weights_ * 100.0f;
+  float percentage = static_cast<float>(processed_weights) / total_weights * 100.0f;
   int bar_width = static_cast<int>(percentage / 2.0f);
 
   // 清除当前行
@@ -212,19 +194,12 @@ void WeightProcessorBase::update_progress(const std::string& key,
   }
   std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%";
 
-  // 打印当前处理的键
-  //   if (key.length() > 30) {
-  //     std::cout << " " << key.substr(0, 27) << "...";
-  //   } else {
-  //     std::cout << " " << key;
-  //   }
-
   std::cout << std::flush;
 }
 
 // 完成进度条
-void WeightProcessorBase::finish_progress() {
-  if (!progress_initialized_) {
+void finish_progress() {
+  if (!progress_initialized) {
     return;
   }
 
@@ -233,11 +208,10 @@ void WeightProcessorBase::finish_progress() {
   std::cout << "\n\033[1;32m✓ 权重处理完成!\033[0m" << std::endl;
 
   // 打印总参数量信息
-  if (total_params_count_ > 0) {
-    double params_in_millions =
-        static_cast<double>(total_params_count_) / 1000000.0;
+  if (total_params_count > 0) {
+    double params_in_millions = static_cast<double>(total_params_count) / 1000000.0;
     std::cout << "总参数量: " << std::fixed << std::setprecision(2)
-              << params_in_millions << " 百万 (" << total_params_count_
+              << params_in_millions << " 百万 (" << total_params_count
               << " 个参数)\n"
               << std::endl;
   } else {
@@ -245,9 +219,11 @@ void WeightProcessorBase::finish_progress() {
   }
 
   // 重置进度条状态
-  progress_initialized_ = false;
-  processed_weights_ = 0;
-  total_weights_ = 0;
-  total_params_count_ = 0;
-  current_model_type_ = "";
+  progress_initialized = false;
+  processed_weights = 0;
+  total_weights = 0;
+  total_params_count = 0;
+  current_model_type = "";
 }
+
+} // namespace weight_processor_utils
