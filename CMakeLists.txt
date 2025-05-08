@@ -52,6 +52,7 @@ target_link_libraries(model_bridge PRIVATE CUDA::cublas CUDA::cudart)
 target_include_directories(model_bridge PUBLIC
     backend/cpp/include
     interface
+
 )
 # target_include_directories(model_bridge PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 

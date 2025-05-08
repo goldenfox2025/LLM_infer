@@ -162,8 +162,8 @@ def create_callback(q: queue.Queue):
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen 模型聊天')
-    parser.add_argument('--model_path', type=str, default="quantization_test/Qwen2.5-1.5B-AWQ", help='模型路径')
-    parser.add_argument('--model_type', type=str, default="qwen_awq", choices=['llama', 'qwen', 'qwen_bf16', 'qwen_awq'], help='模型类型')
+    parser.add_argument('--model_path', type=str, default="./models/Qwen2.5-1.5B-Instruct", help='模型路径')
+    parser.add_argument('--model_type', type=str, default="qwen_bf16", choices=['llama', 'qwen', 'qwen_bf16', 'qwen_awq'], help='模型类型')
     parser.add_argument('--device', type=str, default="cuda", choices=['cuda', 'cpu'], help='运行设备 (cuda 或 cpu)') # qwen不支持cpu 会强制使用cuda
     parser.add_argument('--system_prompt', type=str, default="You are a helpful assistant.", help='系统提示词')
     parser.add_argument('--max_length', type=int, default=200 + 22, help='生成文本的最大长度')

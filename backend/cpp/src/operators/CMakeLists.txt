@@ -38,6 +38,13 @@ target_include_directories(unified_operators PUBLIC
     ${CMAKE_SOURCE_DIR}
 )
 
+# Add CUTLASS include paths
+set(CUTLASS_DIR "${CMAKE_SOURCE_DIR}/cutlass")
+target_include_directories(unified_operators PUBLIC
+    ${CUTLASS_DIR}/include
+    ${CUTLASS_DIR}/tools/util/include
+)
+
 # 链接CUDA库
 target_link_libraries(unified_operators PUBLIC
     CUDA::cudart
