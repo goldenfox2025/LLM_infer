@@ -17,10 +17,18 @@ file(GLOB CPU_OPERATOR_SOURCES "cpu/*.cpp")
 # 添加CUDA算子源文件
 file(GLOB CUDA_OPERATOR_SOURCES "cuda/*.cu")
 
+# 添加MatMul算子源文件
+file(GLOB MATMUL_OPERATOR_SOURCES
+    "cuda/matmul/*.cu"
+    "cpu/matmul*.cpp"
+    "cuda/matmul_selector.cpp"
+)
+
 # 创建算子库 - 使用不同的名称避免冲突
 add_library(unified_operators STATIC
     ${CPU_OPERATOR_SOURCES}
     ${CUDA_OPERATOR_SOURCES}
+    ${MATMUL_OPERATOR_SOURCES}
 )
 
 # 设置包含目录
