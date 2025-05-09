@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <set>
 #include <tuple>
 
 #include "weight_processor_utils.hpp"
@@ -23,27 +24,6 @@ inline void process_quantized_weights_awq(const py::dict& weights,
                                           std::unordered_map<std::string, Tensor<int32_t>>& cpp_qweight_params,
                                           std::unordered_map<std::string, Tensor<__nv_bfloat16>>& cpp_scales_params,
                                           std::unordered_map<std::string, Tensor<int32_t>>& cpp_qzeros_params);
-
-// 转置AWQ量化权重的辅助函数
-// 这个版本仅打印日志，但不实际转置，保持原始的KN格式
-inline void transpose_awq_weight(const std::string& key, const std::vector<size_t>& original_shape,
-                                 std::unordered_map<std::string, Tensor<int32_t>>& qweights,
-                                 std::unordered_map<std::string, Tensor<__nv_bfloat16>>& scales,
-                                 std::unordered_map<std::string, Tensor<int32_t>>& qzeros) {
-    if (qweights.find(key) == qweights.end() || scales.find(key) == scales.end() || qzeros.find(key) == qzeros.end()) {
-        std::cerr << "警告: 缺少量化参数: " << key << std::endl;
-        return;
-    }
-
-    // 获取原始形状
-    size_t K = original_shape[0];  // 输入维度
-    size_t N = original_shape[1];  // 输出维度
-
-    std::cout << "  保持量化权重: " << key << " 原始格式 [" << K << ", " << N << "]" << std::endl;
-    std::cout << "  不执行转置，保持KN格式以便与矩阵乘法匹配" << std::endl;
-
-    // 不做任何操作，保持原始权重格式
-}
 
 // 处理 BF16 全局权重
 inline void process_global_weights_bf16(const py::dict& weights,
@@ -198,11 +178,42 @@ inline void process_quantized_weights_awq(const py::dict& weights,
     std::unordered_set<std::string> weights_to_transpose;
     std::unordered_map<std::string, std::vector<size_t>> original_shapes;
 
+    // 收集所有层索引和权重类型，用于后续检查缺失的权重
+    std::set<int> all_layers;
+    std::set<std::string> all_weight_types = {"wq", "wk", "wv", "wo", "w_gate", "w_up", "w_down"};
+
+    // 收集所有已找到的权重键，用于检测缺失的权重
+    std::set<std::string> found_qweight_keys;
+    std::set<std::string> found_scales_keys;
+    std::set<std::string> found_qzeros_keys;
+
+    // 调试信息：列出所有权重键
+    std::cout << "\n=== AWQ权重处理开始 ===" << std::endl;
+    std::cout << "所有权重键名：" << std::endl;
+    for (auto item : weights) {
+        std::string key = py::str(item.first).cast<std::string>();
+        std::cout << "  " << key << std::endl;
+    }
+    std::cout << "=== 开始处理权重 ===" << std::endl;
+
     for (auto item : weights) {
         std::string key = py::str(item.first).cast<std::string>();
 
         // 处理层级权重
         if (key.find("model.layers.") == 0) {
+            // 提取层索引，不论权重类型
+            size_t start = std::string("model.layers.").size();
+            size_t end = key.find('.', start);
+            if (end != std::string::npos) {
+                std::string layer_str = key.substr(start, end - start);
+                try {
+                    int layer = std::stoi(layer_str);
+                    all_layers.insert(layer);
+                } catch (const std::exception& e) {
+                    std::cerr << "警告: 无法解析层索引: " << layer_str << std::endl;
+                }
+            }
+
             // 处理量化权重
             if (key.find(".qweight") != std::string::npos) {
                 // 提取层索引和权重名称
@@ -236,7 +247,10 @@ inline void process_quantized_weights_awq(const py::dict& weights,
                 }
 
                 std::string dst_key = dst_prefix + std::to_string(layer);
-                weight_processor_utils::print_processing_info(key, dst_key + ".qweight");
+                weight_processor_utils::print_processing_info(key, dst_key);
+
+                // 记录已找到的qweight键
+                found_qweight_keys.insert(dst_key);
 
                 // 处理量化权重
                 py::object tensor = py::reinterpret_borrow<py::object>(item.second);
@@ -292,7 +306,10 @@ inline void process_quantized_weights_awq(const py::dict& weights,
                 }
 
                 std::string dst_key = dst_prefix + std::to_string(layer);
-                weight_processor_utils::print_processing_info(key, dst_key + ".scales");
+                weight_processor_utils::print_processing_info(key, dst_key);
+
+                // 记录已找到的scales键
+                found_scales_keys.insert(dst_key);
 
                 // 处理缩放因子
                 py::object tensor = py::reinterpret_borrow<py::object>(item.second);
@@ -336,7 +353,10 @@ inline void process_quantized_weights_awq(const py::dict& weights,
                 }
 
                 std::string dst_key = dst_prefix + std::to_string(layer);
-                weight_processor_utils::print_processing_info(key, dst_key + ".qzeros");
+                weight_processor_utils::print_processing_info(key, dst_key);
+
+                // 记录已找到的qzeros键
+                found_qzeros_keys.insert(dst_key);
 
                 // 处理量化零点
                 py::object tensor = py::reinterpret_borrow<py::object>(item.second);
@@ -388,15 +408,55 @@ inline void process_quantized_weights_awq(const py::dict& weights,
         }
     }
 
-    // 处理需要转置的量化权重（从KN转为NK格式）
-    for (const auto& key : weights_to_transpose) {
-        if (original_shapes.find(key) != original_shapes.end()) {
-            // 调用辅助函数转置量化权重
-            transpose_awq_weight(key, original_shapes[key], cpp_qweight_params, cpp_scales_params, cpp_qzeros_params);
-        } else {
-            std::cerr << "警告: 无法找到权重的原始形状: " << key << std::endl;
+    // 检查并处理缺失的权重
+    std::cout << "\n=== 检查AWQ权重完整性 ===" << std::endl;
+
+    // 检查所有层是否存在所有必要的权重
+    bool missing_weights = false;
+    for (const int& layer : all_layers) {
+        for (const std::string& weight_type : all_weight_types) {
+            std::string key = weight_type + std::to_string(layer);
+
+            if (found_qweight_keys.find(key) == found_qweight_keys.end()) {
+                std::cerr << "错误: 缺少关键权重 " << key << ".qweight" << std::endl;
+                missing_weights = true;
+            }
+
+            if (found_scales_keys.find(key) == found_scales_keys.end()) {
+                std::cerr << "错误: 缺少关键权重 " << key << ".scales" << std::endl;
+                missing_weights = true;
+            }
+
+            if (found_qzeros_keys.find(key) == found_qzeros_keys.end()) {
+                std::cerr << "错误: 缺少关键权重 " << key << ".qzeros" << std::endl;
+                missing_weights = true;
+            }
         }
     }
+
+    if (missing_weights) {
+        std::cerr << "AWQ权重检查失败: 缺少必要权重，无法继续" << std::endl;
+        throw std::runtime_error("AWQ模型权重不完整，缺少必要权重");
+    }
+
+    // 添加处理权重结果的调试信息
+    std::cout << "\n=== AWQ权重处理后信息 ===" << std::endl;
+    std::cout << "cpp_qweight_params 键名数量: " << cpp_qweight_params.size() << std::endl;
+    for (const auto& [key, _] : cpp_qweight_params) {
+        std::cout << "  qweight键: " << key << std::endl;
+    }
+
+    std::cout << "cpp_scales_params 键名数量: " << cpp_scales_params.size() << std::endl;
+    for (const auto& [key, _] : cpp_scales_params) {
+        std::cout << "  scales键: " << key << std::endl;
+    }
+
+    std::cout << "cpp_qzeros_params 键名数量: " << cpp_qzeros_params.size() << std::endl;
+    for (const auto& [key, _] : cpp_qzeros_params) {
+        std::cout << "  qzeros键: " << key << std::endl;
+    }
+
+    std::cout << "=== AWQ权重完整性检查完成 ===" << std::endl;
 }
 
 // 处理 Qwen3 模型权重（BF16）
@@ -449,13 +509,35 @@ process_weights_awq(const py::dict& weights) {
     // 处理量化权重
     process_quantized_weights_awq(weights, cpp_weights, cpp_qweight_params, cpp_scales_params, cpp_qzeros_params);
 
+    // 检查是否所有层都有wq、wk、wv、wo等权重
+    int num_layers = 0;
+    // 寻找最大层号
+    for (const auto& [key, _] : cpp_qweight_params) {
+        if (key.substr(0, 2) == "wq") {
+            int layer = std::stoi(key.substr(2));
+            num_layers = std::max(num_layers, layer + 1);
+        }
+    }
+
+    std::cout << "\n检测到Qwen3模型层数: " << num_layers << std::endl;
+
     // 完成进度条
     weight_processor_utils::finish_progress();
 
-    // 注意：移除从embed_tokens.weight转置生成lm_head的逻辑
-    // 如果 lm_head 缺失，报告错误
+    // 如果 lm_head 缺失，则尝试从 token_embeddings.weight 转置生成
     if (cpp_weights.find("lm_head") == cpp_weights.end()) {
-        std::cout << "\nWarning: lm_head 未在AWQ权重中找到！" << std::endl;
+        std::cout << "\nWarning: lm_head 未在AWQ权重中找到，尝试从token_embeddings.weight创建" << std::endl;
+        if (cpp_weights.find("token_embeddings.weight") != cpp_weights.end()) {
+            try {
+                Tensor<__nv_bfloat16> lm_head = cpp_weights.at("token_embeddings.weight").transpose(-1, -2);
+                cpp_weights.emplace("lm_head", std::move(lm_head));
+                std::cout << "成功从token_embeddings.weight创建lm_head" << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "创建lm_head时出错: " << e.what() << std::endl;
+            }
+        } else {
+            std::cerr << "Error: token_embeddings.weight在AWQ权重中也未找到，无法创建lm_head" << std::endl;
+        }
     }
 
     return {cpp_weights, cpp_qweight_params, cpp_scales_params, cpp_qzeros_params};

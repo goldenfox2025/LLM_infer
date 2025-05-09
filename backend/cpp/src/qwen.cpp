@@ -421,29 +421,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         }
 
         if (quant_type_ == 1) {
-            // AWQ量化版本
-            // 检查是否存在量化权重
-            std::string q_weight_key = layer_prefix + "self_attn.q_proj";
-            std::string k_weight_key = layer_prefix + "self_attn.k_proj";
-            std::string v_weight_key = layer_prefix + "self_attn.v_proj";
-
-            std::string q_qweight_key = q_weight_key + ".qweight";
-            std::string q_scales_key = q_weight_key + ".scales";
-            std::string q_qzeros_key = q_weight_key + ".qzeros";
-
-            std::string k_qweight_key = k_weight_key + ".qweight";
-            std::string k_scales_key = k_weight_key + ".scales";
-            std::string k_qzeros_key = k_weight_key + ".qzeros";
-
-            std::string v_qweight_key = v_weight_key + ".qweight";
-            std::string v_scales_key = v_weight_key + ".scales";
-            std::string v_qzeros_key = v_weight_key + ".qzeros";
-
-            auto q_qweight_it = qweight_params_.find(q_qweight_key);
-            auto k_qweight_it = qweight_params_.find(k_qweight_key);
-            auto v_qweight_it = qweight_params_.find(v_qweight_key);
-
-            // 获取q_proj权重（自动处理量化与非量化情况）
+             // 获取q_proj权重（自动处理量化与非量化情况）
             auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
 
             // 执行矩阵乘法（内部自动选择合适的实现）

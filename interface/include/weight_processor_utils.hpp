@@ -97,15 +97,87 @@ inline Tensor<__nv_bfloat16> convert_bf16_tensor(const py::object& tensor) {
             // 这里使用pytorch的接口获取字节长度
             size_t element_size = cpu_tensor.attr("element_size")().cast<size_t>();
 
-            // 确认是否为bfloat16类型 其实也可能是fp16 但先不管
+            // 检查数据类型 - pytorch中的数据类型
+            std::string dtype_str = py::str(cpu_tensor.attr("dtype")).cast<std::string>();
+
+            // 确认是否为bfloat16类型或者是其他2字节类型(如fp16)
             if (element_size == 2) {
-                // 获取数据指针，这会返回一个整数，表示内存地址
-                uintptr_t data_ptr = cpu_tensor.attr("data_ptr")().cast<uintptr_t>();
-                const __nv_bfloat16* ptr = reinterpret_cast<const __nv_bfloat16*>(data_ptr);
-                // 每个元素直接拷贝二进制数据
-                for (size_t i = 0; i < numel; ++i) {
-                    __nv_bfloat16 bits = ptr[i];
-                    data.push_back(bits);
+                // 根据数据类型进行不同处理
+                if (dtype_str.find("bfloat16") != std::string::npos) {
+                    // 是bfloat16类型，可以直接复制
+                    uintptr_t data_ptr = cpu_tensor.attr("data_ptr")().cast<uintptr_t>();
+                    const __nv_bfloat16* ptr = reinterpret_cast<const __nv_bfloat16*>(data_ptr);
+                    // 每个元素直接拷贝二进制数据
+                    for (size_t i = 0; i < numel; ++i) {
+                        __nv_bfloat16 bits = ptr[i];
+                        data.push_back(bits);
+                    }
+                } else if (dtype_str.find("float16") != std::string::npos ||
+                           dtype_str.find("half") != std::string::npos) {
+                    // 是fp16类型，需要先转换
+
+                    // 首先将fp16先转为float32，分析是否存在很小的非零值
+                    py::object float_tensor = cpu_tensor.attr("to")(torch_module.attr("float"));
+
+                    // 提取统计信息以便处理
+                    py::object max_val = torch_module.attr("max")(float_tensor);
+                    py::object min_val = torch_module.attr("min")(float_tensor);
+                    float max_value = max_val.cast<float>();
+                    float min_value = min_val.cast<float>();
+
+                    // 如果值特别小，强制替换为更合理的值，防止转换为0
+                    // 检查最大值 - 如果一个tensor中最大值小于一个阈值，认为这是scales值
+                    if (max_value > 0 && max_value < 0.3) {
+                        // 这很可能是量化scales，小的值很容易丢失
+
+                        // 获取numpy数组用于处理
+                        py::array_t<float> np_array = float_tensor.attr("numpy")().cast<py::array_t<float>>();
+                        py::buffer_info buffer = np_array.request();
+                        float* float_ptr = static_cast<float*>(buffer.ptr);
+
+                        // 处理每个元素 - 防止非常小的值在bf16中变为0
+                        std::vector<float> fixed_data(numel);
+                        size_t zeroes_fixed = 0;
+
+                        for (size_t i = 0; i < numel; ++i) {
+                            float val = float_ptr[i];
+                            // 如果值非常小（可能会被bf16表示为0），但不是精确的0
+                            if (val != 0.0f && std::abs(val) < 0.001f) {
+                                // 对于真实很小的正值，至少保证它们在bf16中有表示
+                                // 小值中的0往往是强制量化为0，不需要处理
+                                fixed_data[i] = val < 0 ? -0.001f : 0.001f;
+                                zeroes_fixed++;
+                            } else {
+                                fixed_data[i] = val;
+                            }
+                        }
+
+                        // 转换为bf16
+                        for (size_t i = 0; i < numel; ++i) {
+                            data.push_back(__nv_bfloat16(fixed_data[i]));
+                        }
+                    } else {
+                        // 普通情况，使用标准转换流程
+                        py::array_t<float> np_array = float_tensor.attr("numpy")().cast<py::array_t<float>>();
+                        py::buffer_info buffer = np_array.request();
+                        float* float_ptr = static_cast<float*>(buffer.ptr);
+
+                        for (size_t i = 0; i < numel; ++i) {
+                            data.push_back(__nv_bfloat16(float_ptr[i]));
+                        }
+                    }
+                } else {
+                    // 未知的2字节类型，也转换为float再处理
+                    py::object float_tensor = cpu_tensor.attr("to")(torch_module.attr("float"));
+
+                    // 转为numpy再获取数据
+                    py::array_t<float> np_array = float_tensor.attr("numpy")().cast<py::array_t<float>>();
+                    py::buffer_info buffer = np_array.request();
+                    float* float_ptr = static_cast<float*>(buffer.ptr);
+
+                    for (size_t i = 0; i < numel; ++i) {
+                        data.push_back(__nv_bfloat16(float_ptr[i]));
+                    }
                 }
             } else {
                 // 如果不是2字节元素，先转换为float再处理

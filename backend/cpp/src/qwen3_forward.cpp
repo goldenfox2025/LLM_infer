@@ -31,6 +31,7 @@ uint32_t *Qwen3Model<T>::forward(const Tensor<uint32_t> *input, ThreadPool &thre
 template <typename T>
 Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *kv_cache) {
     // 确保输入在 CUDA 上
+
     if (input->device() != Device::CUDA) {
         throw std::runtime_error("Input tensor must be on CUDA device");
     }
@@ -101,50 +102,40 @@ Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> 
             std::string k_weight_key = "wk" + std::to_string(i);
             std::string v_weight_key = "wv" + std::to_string(i);
 
-            std::string q_qweight_key = q_weight_key + ".qweight";
-            std::string q_scales_key = q_weight_key + ".scales";
-            std::string q_qzeros_key = q_weight_key + ".qzeros";
-
-            std::string k_qweight_key = k_weight_key + ".qweight";
-            std::string k_scales_key = k_weight_key + ".scales";
-            std::string k_qzeros_key = k_weight_key + ".qzeros";
-
-            std::string v_qweight_key = v_weight_key + ".qweight";
-            std::string v_scales_key = v_weight_key + ".scales";
-            std::string v_qzeros_key = v_weight_key + ".qzeros";
-
-            // 检查是否存在量化权重
-            auto q_qweight_it = qweight_params_.find(q_qweight_key);
-            auto k_qweight_it = qweight_params_.find(k_qweight_key);
-            auto v_qweight_it = qweight_params_.find(v_qweight_key);
-
-            if (q_qweight_it != qweight_params_.end() && scales_params_.find(q_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(q_qzeros_key) != qzeros_params_.end()) {
+            // 检查是否存在量化权重 - 直接查找，不添加后缀
+            if (qweight_params_.find(q_weight_key) != qweight_params_.end() &&
+                scales_params_.find(q_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(q_weight_key) != qzeros_params_.end()) {
                 // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(q_qweight_key),
-                                               scales_params_.at(q_scales_key), qzeros_params_.at(q_qzeros_key),
+                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(q_weight_key),
+                                               scales_params_.at(q_weight_key), qzeros_params_.at(q_weight_key),
                                                group_size_, &q_buf, nullptr, q_bias);
             } else {
+                std::cerr << "无法找到Q投影的量化权重，键名: " << q_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for Q projection");
             }
 
-            if (k_qweight_it != qweight_params_.end() && scales_params_.find(k_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(k_qzeros_key) != qzeros_params_.end()) {
+            if (qweight_params_.find(k_weight_key) != qweight_params_.end() &&
+                scales_params_.find(k_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(k_weight_key) != qzeros_params_.end()) {
                 // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(k_qweight_key),
-                                               scales_params_.at(k_scales_key), qzeros_params_.at(k_qzeros_key),
+                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(k_weight_key),
+                                               scales_params_.at(k_weight_key), qzeros_params_.at(k_weight_key),
                                                group_size_, &k_buf, nullptr, k_bias);
             } else {
+                std::cerr << "无法找到K投影的量化权重，键名: " << k_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for K projection");
             }
 
-            if (v_qweight_it != qweight_params_.end() && scales_params_.find(v_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(v_qzeros_key) != qzeros_params_.end()) {
+            if (qweight_params_.find(v_weight_key) != qweight_params_.end() &&
+                scales_params_.find(v_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(v_weight_key) != qzeros_params_.end()) {
                 // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(v_qweight_key),
-                                               scales_params_.at(v_scales_key), qzeros_params_.at(v_qzeros_key),
+                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(v_weight_key),
+                                               scales_params_.at(v_weight_key), qzeros_params_.at(v_weight_key),
                                                group_size_, &v_buf, nullptr, v_bias);
             } else {
+                std::cerr << "无法找到V投影的量化权重，键名: " << v_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for V projection");
             }
         } else {
@@ -210,27 +201,25 @@ Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> 
         // 使用动态Flash-Attention包装函数计算自注意力
         Tensor<T> att_out_view = attn_output.view({n_heads_, head_dim_});
         cuda_OP::dynamic_flash_attention_wrapper(q_buf_view, k_cache_view, v_cache_view, att_out_view, n_kv_heads_);
-
+        attn_output = attn_output.view({seq_len, n_heads_ * head_dim_});
         // 注意力输出投影
         Tensor<T> attn_proj({seq_len, hidden_size_}, Device::CUDA);
         if (quant_type_ == 1) {
             // 量化版本
             std::string o_weight_key = "wo" + std::to_string(i);
-            std::string o_qweight_key = o_weight_key + ".qweight";
-            std::string o_scales_key = o_weight_key + ".scales";
-            std::string o_qzeros_key = o_weight_key + ".qzeros";
 
-            // 创建量化权重
-            if (qweight_params_.find(o_qweight_key) != qweight_params_.end() &&
-                scales_params_.find(o_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(o_qzeros_key) != qzeros_params_.end()) {
+            // 直接查找o_weight_key，不添加后缀
+            if (qweight_params_.find(o_weight_key) != qweight_params_.end() &&
+                scales_params_.find(o_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(o_weight_key) != qzeros_params_.end()) {
                 // 构建WeightTensor - 使用指针传递
-                const Tensor<int32_t> *qweight = &qweight_params_.at(o_qweight_key);
-                const Tensor<T> *scales = &scales_params_.at(o_scales_key);
-                const Tensor<int32_t> *qzeros = &qzeros_params_.at(o_qzeros_key);
+                const Tensor<int32_t> *qweight = &qweight_params_.at(o_weight_key);
+                const Tensor<T> *scales = &scales_params_.at(o_weight_key);
+                const Tensor<int32_t> *qzeros = &qzeros_params_.at(o_weight_key);
                 op::WeightTensor<T> o_weight(qweight, scales, qzeros, group_size_);
                 operators_->matmul(&attn_proj, &attn_output, o_weight, o_bias);
             } else {
+                std::cerr << "无法找到O投影的量化权重，键名: " << o_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for O projection");
             }
         } else {
@@ -278,38 +267,32 @@ Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> 
             std::string gate_weight_key = "w_gate" + std::to_string(i);
             std::string up_weight_key = "w_up" + std::to_string(i);
 
-            std::string gate_qweight_key = gate_weight_key + ".qweight";
-            std::string gate_scales_key = gate_weight_key + ".scales";
-            std::string gate_qzeros_key = gate_weight_key + ".qzeros";
-
-            std::string up_qweight_key = up_weight_key + ".qweight";
-            std::string up_scales_key = up_weight_key + ".scales";
-            std::string up_qzeros_key = up_weight_key + ".qzeros";
-
-            // 检查量化权重是否存在
-            if (qweight_params_.find(gate_qweight_key) != qweight_params_.end() &&
-                scales_params_.find(gate_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(gate_qzeros_key) != qzeros_params_.end()) {
+            // 检查量化权重是否存在 - 直接查找，不添加后缀
+            if (qweight_params_.find(gate_weight_key) != qweight_params_.end() &&
+                scales_params_.find(gate_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(gate_weight_key) != qzeros_params_.end()) {
                 // 构建量化权重张量 - 使用指针传递
-                const Tensor<int32_t> *gate_qweight = &qweight_params_.at(gate_qweight_key);
-                const Tensor<T> *gate_scales = &scales_params_.at(gate_scales_key);
-                const Tensor<int32_t> *gate_qzeros = &qzeros_params_.at(gate_qzeros_key);
+                const Tensor<int32_t> *gate_qweight = &qweight_params_.at(gate_weight_key);
+                const Tensor<T> *gate_scales = &scales_params_.at(gate_weight_key);
+                const Tensor<int32_t> *gate_qzeros = &qzeros_params_.at(gate_weight_key);
                 op::WeightTensor<T> gate_weight(gate_qweight, gate_scales, gate_qzeros, group_size_);
                 operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
             } else {
+                std::cerr << "无法找到Gate投影的量化权重，键名: " << gate_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for Gate projection");
             }
 
-            if (qweight_params_.find(up_qweight_key) != qweight_params_.end() &&
-                scales_params_.find(up_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(up_qzeros_key) != qzeros_params_.end()) {
+            if (qweight_params_.find(up_weight_key) != qweight_params_.end() &&
+                scales_params_.find(up_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(up_weight_key) != qzeros_params_.end()) {
                 // 构建量化权重张量 - 使用指针传递
-                const Tensor<int32_t> *up_qweight = &qweight_params_.at(up_qweight_key);
-                const Tensor<T> *up_scales = &scales_params_.at(up_scales_key);
-                const Tensor<int32_t> *up_qzeros = &qzeros_params_.at(up_qzeros_key);
+                const Tensor<int32_t> *up_qweight = &qweight_params_.at(up_weight_key);
+                const Tensor<T> *up_scales = &scales_params_.at(up_weight_key);
+                const Tensor<int32_t> *up_qzeros = &qzeros_params_.at(up_weight_key);
                 op::WeightTensor<T> up_weight(up_qweight, up_scales, up_qzeros, group_size_);
                 operators_->matmul(&up_buf, &hidden_states, up_weight, up_bias);
             } else {
+                std::cerr << "无法找到Up投影的量化权重，键名: " << up_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for Up projection");
             }
         } else {
@@ -336,20 +319,19 @@ Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> 
         if (quant_type_ == 1) {
             // 量化版本
             std::string down_weight_key = "w_down" + std::to_string(i);
-            std::string down_qweight_key = down_weight_key + ".qweight";
-            std::string down_scales_key = down_weight_key + ".scales";
-            std::string down_qzeros_key = down_weight_key + ".qzeros";
 
-            if (qweight_params_.find(down_qweight_key) != qweight_params_.end() &&
-                scales_params_.find(down_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(down_qzeros_key) != qzeros_params_.end()) {
+            // 直接查找down_weight_key，不添加后缀
+            if (qweight_params_.find(down_weight_key) != qweight_params_.end() &&
+                scales_params_.find(down_weight_key) != scales_params_.end() &&
+                qzeros_params_.find(down_weight_key) != qzeros_params_.end()) {
                 // 构建量化权重张量 - 使用指针传递
-                const Tensor<int32_t> *down_qweight = &qweight_params_.at(down_qweight_key);
-                const Tensor<T> *down_scales = &scales_params_.at(down_scales_key);
-                const Tensor<int32_t> *down_qzeros = &qzeros_params_.at(down_qzeros_key);
+                const Tensor<int32_t> *down_qweight = &qweight_params_.at(down_weight_key);
+                const Tensor<T> *down_scales = &scales_params_.at(down_weight_key);
+                const Tensor<int32_t> *down_qzeros = &qzeros_params_.at(down_weight_key);
                 op::WeightTensor<T> down_weight(down_qweight, down_scales, down_qzeros, group_size_);
                 operators_->matmul(&ffn_out, &gate_buf, down_weight, down_bias);
             } else {
+                std::cerr << "无法找到Down投影的量化权重，键名: " << down_weight_key << std::endl;
                 throw std::runtime_error("Missing quantized weights for Down projection");
             }
         } else {

@@ -74,6 +74,7 @@ class ModelFactory {
         switch (type) {
             case ModelType::QWEN_BF16: {
                 auto model = std::make_shared<QwenModel<__nv_bfloat16>>(weights, config);
+
                 model->print_model_info();
                 if (!model->verify_params()) {
                     throw std::runtime_error("Model parameter verification failed");

@@ -73,10 +73,9 @@ Qwen3Model<T>::Qwen3Model(const std::unordered_map<std::string, Tensor<T>> &para
     rms_norm_eps_ = static_cast<float>(config.at("rms_norm_eps"));
     rope_theta_ = static_cast<float>(config.at("rope_theta"));
     head_dim_ = hidden_size_ / n_heads_;
-    device_ = Device::CPU;  // 默认在CPU上初始化
-
+    device_ = Device::CUDA;  // 默认在CUDA上初始化
+    quant_type_ = 1;
     // 设置量化类型和分组大小
-    quant_type_ = config.at("quant_type");
     if (config.find("group_size") != config.end()) {
         group_size_ = config.at("group_size");
     }
@@ -126,6 +125,26 @@ bool Qwen3Model<T>::verify_params() const {
         }
     }
 
+    // 调试信息: 打印量化参数中的键名
+    if (quant_type_ == 1) {
+        std::cout << "\n=== 量化参数键名调试信息 ===" << std::endl;
+        std::cout << "qweight_params_ 键名 (" << qweight_params_.size() << " 项):" << std::endl;
+        for (const auto &[key, _] : qweight_params_) {
+            std::cout << "  " << key << std::endl;
+        }
+
+        std::cout << "scales_params_ 键名 (" << scales_params_.size() << " 项):" << std::endl;
+        for (const auto &[key, _] : scales_params_) {
+            std::cout << "  " << key << std::endl;
+        }
+
+        std::cout << "qzeros_params_ 键名 (" << qzeros_params_.size() << " 项):" << std::endl;
+        for (const auto &[key, _] : qzeros_params_) {
+            std::cout << "  " << key << std::endl;
+        }
+        std::cout << "================================\n" << std::endl;
+    }
+
     // 检查每层权重是否存在
     for (size_t i = 0; i < n_layers_; i++) {
         std::string layer_id = std::to_string(i);
@@ -135,25 +154,93 @@ bool Qwen3Model<T>::verify_params() const {
                                                   "w_up" + layer_id,      "w_down" + layer_id};
 
         for (const auto &weight_name : layer_weights) {
+            // 非量化权重或者非线性层权重直接在params_中查找
+            if (weight_name.find("rms_") == 0 || weight_name.find("q_norm") == 0 || weight_name.find("k_norm") == 0) {
+                if (params_.find(weight_name) == params_.end()) {
+                    std::cerr << "缺少层权重: " << weight_name << std::endl;
+                    return false;
+                }
+                continue;  // 对于非量化的层级权重，直接检查完成，进入下一个循环
+            }
+
+            // 对于可能量化的线性层权重，检查是否存在于params_或量化参数中
             if (params_.find(weight_name) == params_.end()) {
                 // 对于量化模型，检查是否存在量化版本的权重
                 if (quant_type_ == 1) {
-                    bool found_quantized = false;
-                    // 检查是否存在wq、wk、wv、wo、w_gate、w_up、w_down的量化版本
+                    // 针对线性层权重检查量化版本
                     if (weight_name.find("wq") == 0 || weight_name.find("wk") == 0 || weight_name.find("wv") == 0 ||
                         weight_name.find("wo") == 0 || weight_name.find("w_gate") == 0 ||
                         weight_name.find("w_up") == 0 || weight_name.find("w_down") == 0) {
-                        std::string qweight_key = weight_name + ".qweight";
-                        std::string scales_key = weight_name + ".scales";
-                        std::string qzeros_key = weight_name + ".qzeros";
+                        // 尝试多种可能的键名格式
+                        std::vector<std::string> possible_qweight_keys = {
+                            weight_name,
+                            weight_name + ".qweight",
+                        };
 
-                        found_quantized = qweight_params_.find(qweight_key) != qweight_params_.end() &&
-                                          scales_params_.find(scales_key) != scales_params_.end() &&
-                                          qzeros_params_.find(qzeros_key) != qzeros_params_.end();
-                    }
+                        std::vector<std::string> possible_scales_keys = {
+                            weight_name,
+                            weight_name + ".scales",
+                        };
 
-                    if (!found_quantized) {
+                        std::vector<std::string> possible_qzeros_keys = {
+                            weight_name,
+                            weight_name + ".qzeros",
+                        };
+
+                        bool found_qweight = false;
+                        bool found_scales = false;
+                        bool found_qzeros = false;
+
+                        // 检查是否存在任何一种可能的键名
+                        for (const auto &key : possible_qweight_keys) {
+                            if (qweight_params_.find(key) != qweight_params_.end()) {
+                                found_qweight = true;
+                                break;
+                            }
+                        }
+
+                        for (const auto &key : possible_scales_keys) {
+                            if (scales_params_.find(key) != scales_params_.end()) {
+                                found_scales = true;
+                                break;
+                            }
+                        }
+
+                        for (const auto &key : possible_qzeros_keys) {
+                            if (qzeros_params_.find(key) != qzeros_params_.end()) {
+                                found_qzeros = true;
+                                break;
+                            }
+                        }
+
+                        // 如果找到了所有三种权重，那么认为权重存在
+                        if (found_qweight && found_scales && found_qzeros) {
+                            continue;  // 权重存在，继续检查下一个权重
+                        }
+
+                        // 打印调试信息
                         std::cerr << "缺少层权重: " << weight_name << std::endl;
+                        if (!found_qweight) {
+                            std::cerr << "  缺少qweight: ";
+                            for (const auto &key : possible_qweight_keys) {
+                                std::cerr << key << " ";
+                            }
+                            std::cerr << std::endl;
+                        }
+                        if (!found_scales) {
+                            std::cerr << "  缺少scales: ";
+                            for (const auto &key : possible_scales_keys) {
+                                std::cerr << key << " ";
+                            }
+                            std::cerr << std::endl;
+                        }
+                        if (!found_qzeros) {
+                            std::cerr << "  缺少qzeros: ";
+                            for (const auto &key : possible_qzeros_keys) {
+                                std::cerr << key << " ";
+                            }
+                            std::cerr << std::endl;
+                        }
                         return false;
                     }
                 } else {
