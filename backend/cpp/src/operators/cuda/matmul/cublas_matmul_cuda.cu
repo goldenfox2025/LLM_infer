@@ -126,7 +126,7 @@ void CublasMatmulCUDAOperator<T>::operator()(Tensor<T> *output, Tensor<T> *input
     // A: [M, K], B: [N, K]（保证 A 的第二维与 B 的第二维一致）
     size_t M = A_shape[0];
     size_t K = A_shape[1];
-    size_t N = B_shape[0];
+    size_t N = B_shape[1];
 
     // 设置布局和步长
     int lda = K;  // A 每行有 K 个元素
