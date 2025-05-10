@@ -12,15 +12,18 @@ namespace op {
 template <typename T>
 void MatmulCUDAOperator<T>::operator()(Tensor<T>* output, Tensor<T>* input, const WeightTensor<T>& weight,
                                        const Tensor<T>* bias, cudaStream_t stream) {
-    // 调用包装函数，处理量化和非量化权重
-    if (weight.is_quantized()) {
-        // 使用AWQ量化矩阵乘法
-        cuda_OP::matmul_quantized_gemv(*input, *weight.qweight(), *weight.scales(), *weight.qzeros(),
-                                       weight.group_size(), output, stream, bias);
-    } else {
-        // 使用普通矩阵乘法
-        cuda_OP::matmul(*input, *weight.tensor(), output, stream, bias);
+    // 使用MatmulSelector选择合适的实现
+    auto& selector = MatmulSelector<T>::instance();
+
+    // 根据权重特性选择合适的实现
+    auto impl = selector.selectImpl(weight, OperatorPlatform::CUDA);
+
+    if (!impl) {
+        throw std::runtime_error("No suitable MatMul implementation found");
     }
+
+    // 调用选择的实现
+    (*impl)(output, input, weight, bias, stream);
 }
 
 // 显式模板实例化
