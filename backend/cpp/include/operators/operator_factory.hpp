@@ -3,18 +3,20 @@
 #include <memory>
 
 #include "operators/cpu/add_cpu.hpp"
+#include "operators/cpu/matmul_cpu.hpp"
 #include "operators/cpu/multiply_cpu.hpp"
 #include "operators/cpu/rms_norm_cpu.hpp"
 #include "operators/cpu/rope_cpu.hpp"
 #include "operators/cpu/silu_cpu.hpp"
 #include "operators/cuda/add_cuda.cuh"
+#include "operators/cuda/matmul/matmul_cuda.cuh"
+#include "operators/cuda/matmul/matmul_selector.hpp"
 #include "operators/cuda/multiply_cuda.cuh"
 #include "operators/cuda/rms_norm_cuda.cuh"
 #include "operators/cuda/rope_cuda.cuh"
 #include "operators/cuda/silu_cuda.cuh"
-#include "operators/matmul/matmul_cpu.hpp"
-#include "operators/matmul/matmul_cuda.cuh"
 #include "operators/operator_base.hpp"
+#include "weight_tensor.hpp"
 
 namespace op {
 

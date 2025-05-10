@@ -3,7 +3,8 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
-#include "operators/matmul/matmul.hpp"
+#include "operators/operator_base.hpp"
+#include "weight_tensor.hpp"
 
 namespace op {
 

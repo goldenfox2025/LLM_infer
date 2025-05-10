@@ -3,8 +3,8 @@
 #include <stdexcept>
 
 #include "cudaOP.cuh"
-#include "operators/matmul/matmul_cuda.cuh"
-#include "operators/matmul/matmul_selector.hpp"
+#include "operators/cuda/matmul/matmul_cuda.cuh"
+#include "operators/cuda/matmul/matmul_selector.hpp"
 
 namespace op {
 

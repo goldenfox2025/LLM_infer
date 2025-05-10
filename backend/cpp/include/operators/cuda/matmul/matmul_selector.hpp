@@ -4,9 +4,14 @@
 #include <string>
 #include <unordered_map>
 
-#include "operators/matmul/matmul.hpp"
+#include "operators/operator_base.hpp"
+#include "weight_tensor.hpp"
 
 namespace op {
+
+// 前向声明
+template <typename T>
+class MatmulOperatorImpl;
 
 // MatMul算子选择器 - 单例模式
 template <typename T>

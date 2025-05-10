@@ -1,29 +1,27 @@
 #pragma once
 
-#include <cuda_runtime.h>
-
-#include "operators/matmul/matmul.hpp"
-
+#include "operators/operator_base.hpp"
+#include "weight_tensor.hpp"
 namespace op {
 
 template <typename T>
-class AwqMatmulCUDAOperator : public MatmulOperatorImpl<T> {
+class MatmulCPUOperator : public MatmulOperatorImpl<T> {
    public:
-    AwqMatmulCUDAOperator() = default;
-    ~AwqMatmulCUDAOperator() override = default;
+    MatmulCPUOperator() = default;
+    ~MatmulCPUOperator() override = default;
 
-    // 实现AWQ量化版本的MatMul - 使用一重指针
+    // 实现CPU版本的MatMul
     void operator()(Tensor<T>* output, Tensor<T>* input, const WeightTensor<T>& weight, const Tensor<T>* bias = nullptr,
                     cudaStream_t stream = nullptr) override;
 
     // 获取算子平台
     OperatorPlatform platform() const override {
-        return OperatorPlatform::CUDA;
+        return OperatorPlatform::CPU;
     }
 
     // 获取MatMul算子实现类型
     MatmulType impl_type() const override {
-        return MatmulType::AWQ;
+        return MatmulType::DEFAULT;
     }
 };
 

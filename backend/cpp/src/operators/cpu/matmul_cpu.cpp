@@ -1,4 +1,4 @@
-#include "operators/matmul/matmul_cpu.hpp"
+#include "operators/cpu/matmul_cpu.hpp"
 
 #include <cuda_bf16.h>
 

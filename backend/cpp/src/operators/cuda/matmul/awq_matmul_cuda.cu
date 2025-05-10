@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 #include "cudaOP.cuh"
-#include "operators/matmul/awq_matmul_cuda.cuh"
+#include "operators/cuda/matmul/awq_matmul_cuda.cuh"
 
 namespace op {
 

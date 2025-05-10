@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 #include "cudaOP.cuh"
-#include "operators/matmul/cublas_matmul_cuda.cuh"
+#include "operators/cuda/matmul/cublas_matmul_cuda.cuh"
 
 // 检查cuBLAS状态的辅助函数
 inline void checkCublasStatus(cublasStatus_t status, const char *file, int line) {

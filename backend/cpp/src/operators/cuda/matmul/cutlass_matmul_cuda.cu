@@ -4,7 +4,7 @@
 #include <stdexcept>
 
 #include "cudaOP.cuh"
-#include "operators/matmul/cutlass_matmul_cuda.cuh"
+#include "operators/cuda/matmul/cutlass_matmul_cuda.cuh"
 
 // CUTLASS相关头文件
 #include "cutlass/cutlass.h"

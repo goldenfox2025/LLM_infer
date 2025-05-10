@@ -54,13 +54,13 @@ inline void process_global_weights_bf16(const py::dict& weights,
                 }
 
                 if (shape.size() >= 2) {
-                    std::cout << "  lm_head 原始形状: [" << shape[0] << ", " << shape[1] << "]" << std::endl;
-                    std::cout << "  对lm_head执行逻辑转置" << std::endl;
+                    // std::cout << "  lm_head 原始形状: [" << shape[0] << ", " << shape[1] << "]" << std::endl;
+                    // std::cout << "  对lm_head执行逻辑转置" << std::endl;
                     // 对lm_head进行逻辑转置，保持KN格式但在访问时被视为NK格式
                     cpp_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
                 } else {
                     // 如果形状不是2D，也进行转置处理
-                    std::cout << "  lm_head 不是2D张量，执行默认转置" << std::endl;
+                    // std::cout << "  lm_head 不是2D张量，执行默认转置" << std::endl;
                     cpp_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
                 }
             } else {
@@ -151,13 +151,13 @@ inline void process_global_weights_awq(const py::dict& weights,
 
                 // 检查并显示形状信息
                 if (shape.size() >= 2) {
-                    std::cout << "  AWQ lm_head 原始形状: [" << shape[0] << ", " << shape[1] << "]" << std::endl;
-                    std::cout << "  对AWQ lm_head执行逻辑转置" << std::endl;
+                    // std::cout << "  AWQ lm_head 原始形状: [" << shape[0] << ", " << shape[1] << "]" << std::endl;
+                    // std::cout << "  对AWQ lm_head执行逻辑转置" << std::endl;
                     // 对lm_head进行逻辑转置
                     cpp_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
                 } else {
                     // 如果形状不是2D，也进行转置处理
-                    std::cout << "  AWQ lm_head 不是2D张量，执行默认转置" << std::endl;
+                    // std::cout << "  AWQ lm_head 不是2D张量，执行默认转置" << std::endl;
                     cpp_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
                 }
             } else {

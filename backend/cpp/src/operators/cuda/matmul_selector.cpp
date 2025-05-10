@@ -1,10 +1,10 @@
-#include "operators/matmul/matmul_selector.hpp"
+#include "operators/cuda/matmul/matmul_selector.hpp"
 
-#include "operators/matmul/awq_matmul_cuda.cuh"
-#include "operators/matmul/cublas_matmul_cuda.cuh"
-#include "operators/matmul/cutlass_matmul_cuda.cuh"
-#include "operators/matmul/matmul_cpu.hpp"
-#include "operators/matmul/matmul_cuda.cuh"
+#include "operators/cpu/matmul_cpu.hpp"
+#include "operators/cuda/matmul/awq_matmul_cuda.cuh"
+#include "operators/cuda/matmul/cublas_matmul_cuda.cuh"
+#include "operators/cuda/matmul/cutlass_matmul_cuda.cuh"
+#include "operators/cuda/matmul/matmul_cuda.cuh"
 
 namespace op {
 
