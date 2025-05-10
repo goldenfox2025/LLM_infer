@@ -945,7 +945,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
     // } catch (const std::out_of_range&) {
     // }
 
-    Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA, false, "logits");
+    Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
     operators_->matmul(&logits, &final_h, lm_head_weight, lm_head_bias);
 
     return logits;
