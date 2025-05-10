@@ -93,6 +93,32 @@ class Qwen3Model : public BaseModel {
         return qzeros_params_;
     }
 
+    // 获取权重（普通或量化）
+    op::WeightTensor<T> get_weight(const std::string& key) {
+        if (quant_type_ == 1) {
+            // 尝试获取量化权重
+            // 对于Qwen3模型，不需要添加.qweight后缀
+            auto qweight_it = qweight_params_.find(key);
+            auto scales_it = scales_params_.find(key);
+            auto qzeros_it = qzeros_params_.find(key);
+
+            if (qweight_it != qweight_params_.end() && scales_it != scales_params_.end() &&
+                qzeros_it != qzeros_params_.end()) {
+                // 返回量化权重
+                return op::WeightTensor<T>(&qweight_it->second, &scales_it->second, &qzeros_it->second, group_size_);
+            }
+        }
+
+        auto weight_it = params_.find(key);
+        if (weight_it != params_.end()) {
+            return op::WeightTensor<T>(&weight_it->second);
+        }
+
+        // 如果找不到权重，抛出更明确的错误
+        throw std::runtime_error("Weight not found: " + key +
+                                 (quant_type_ == 1 ? " (tried both quantized and regular)" : " (tried regular)"));
+    }
+
     // CUDA versions of forward and prefill
     Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
     Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);

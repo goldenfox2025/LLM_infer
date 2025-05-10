@@ -109,7 +109,7 @@ inline void process_layer_weights_bf16(const py::dict& weights,
 
                     // 检查是否需要转置（从KN转为NK格式）- 这里只进行逻辑转置，没有物理数据移动
                     if (transpose_layers.find(dst_prefix) != transpose_layers.end()) {
-                        std::cout << "  对权重进行逻辑转置: " << dst_key << std::endl;
+                        // std::cout << "  对权重进行逻辑转置: " << dst_key << std::endl;
                         cpp_weights.emplace(dst_key, bf16_tensor.transpose(-1, -2));
                     } else {
                         cpp_weights.emplace(dst_key, std::move(bf16_tensor));

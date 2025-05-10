@@ -40,19 +40,23 @@ pybind11_add_module(model_bridge SHARED
     backend/cpp/src/qwen3.cpp
     backend/cpp/src/qwen3_forward.cpp
     backend/cpp/src/qwen3_prefill.cpp
-    backend/cpp/src/CudaMemoryPool.cpp
-)
+    backend/cpp/src/CudaMemoryPool.cpp)
 
 # --- 设置链接库 ---
-target_link_libraries(model_bridge PRIVATE operators unified_operators)
-target_link_libraries(model_bridge PRIVATE CUDA::cublas CUDA::cudart)
-# target_link_libraries(model_bridge PRIVATE ${TORCH_LIBRARIES})
+target_link_libraries(model_bridge PRIVATE 
+    # 使用PRIVATE关键字，防止链接标志被传递
+    # 调整链接顺序：确保flash_attention所需的所有符号都能正确解析
+    unified_operators  # 先链接统一的操作符接口
+    operators         # 再链接具体的实现
+    CUDA::cublas 
+    CUDA::cudart
+)
+
 
 # --- 设置头文件包含路径 ---
 target_include_directories(model_bridge PUBLIC
     backend/cpp/include
     interface
-
 )
 # target_include_directories(model_bridge PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 

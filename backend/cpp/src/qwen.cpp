@@ -420,50 +420,13 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         } catch (const std::out_of_range &) {
         }
 
-        if (quant_type_ == 1) {
-             // 获取q_proj权重（自动处理量化与非量化情况）
-            auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
+        auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
+        auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
+        auto v_weight = get_weight(layer_prefix + "self_attn.v_proj");
 
-            // 执行矩阵乘法（内部自动选择合适的实现）
-            operators_->matmul(&q_buf, &hidden_states, q_weight, q_bias);
-
-            // 获取k_proj权重（自动处理量化与非量化情况）
-            auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
-
-            // 执行矩阵乘法（内部自动选择合适的实现）
-            operators_->matmul(&k_slice, &hidden_states, k_weight, k_bias);
-
-            // 获取v_proj权重（自动处理量化与非量化情况）
-            auto v_weight = get_weight(layer_prefix + "self_attn.v_proj");
-
-            // 执行矩阵乘法（内部自动选择合适的实现）
-            operators_->matmul(&v_slice, &hidden_states, v_weight, v_bias);
-        } else {
-            // 获取q_proj权重（自动处理量化与非量化情况）
-            auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
-
-            //   // 执行矩阵乘法（内部自动选择合适的实现）
-            //   operators_->matmul(&q_buf, &hidden_states, q_weight, q_bias);
-
-            cuda_OP::matmul(hidden_states, *q_weight.tensor(), &q_buf, nullptr, q_bias);
-            // 获取k_proj权重（自动处理量化与非量化情况）
-            auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
-
-            // 执行矩阵乘法（内部自动选择合适的实现）
-            operators_->matmul(&k_slice, &hidden_states, k_weight, k_bias);
-
-            // 获取v_proj权重（自动处理量化与非量化情况）
-            auto v_weight = get_weight(layer_prefix + "self_attn.v_proj");
-
-            // 执行矩阵乘法（内部自动选择合适的实现）
-            operators_->matmul(&v_slice, &hidden_states, v_weight, v_bias);
-        }
-
-        // // 同步CUDA流并销毁
-        // for (int j = 0; j < 3; j++) {
-        //   cudaStreamSynchronize(streams[j]);
-        //   cudaStreamDestroy(streams[j]);
-        // }
+        operators_->matmul(&q_buf, &hidden_states, q_weight, q_bias);
+        operators_->matmul(&k_slice, &hidden_states, k_weight, k_bias);
+        operators_->matmul(&v_slice, &hidden_states, v_weight, v_bias);
 
         // 重塑张量，准备应用RoPE
         Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
@@ -620,31 +583,10 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         std::string att_proj_tag = "att_proj_" + std::to_string(i);
         Tensor<T> att_proj({seq_len, hidden_size_}, Device::CUDA, false, att_proj_tag);
 
-        if (quant_type_ == 1) {
-            // AWQ量化版本
-            std::string o_weight_key = layer_prefix + "self_attn.o_proj";
-            std::string o_qweight_key = o_weight_key + ".qweight";
-            std::string o_scales_key = o_weight_key + ".scales";
-            std::string o_qzeros_key = o_weight_key + ".qzeros";
+        auto o_weight = get_weight(layer_prefix + "self_attn.o_proj");
 
-            auto o_qweight_it = qweight_params_.find(o_qweight_key);
-
-            if (o_qweight_it != qweight_params_.end() && scales_params_.find(o_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(o_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(att_heads_reshaped, qweight_params_.at(o_qweight_key),
-                                               scales_params_.at(o_scales_key), qzeros_params_.at(o_qzeros_key),
-                                               group_size_, &att_proj, nullptr, o_bias);
-            } else {
-                // 回退到非量化版本
-                auto &wo = params_.at(o_weight_key);
-                cuda_OP::matmul(att_heads_reshaped, wo, &att_proj, nullptr, o_bias);
-            }
-        } else {
-            // 非量化版本
-            auto &wo = params_.at(layer_prefix + "self_attn.o_proj.weight");
-            cuda_OP::matmul(att_heads_reshaped, wo, &att_proj, nullptr, o_bias);
-        }
+        // 执行矩阵乘法（统一接口）
+        operators_->matmul(&att_proj, &att_heads_reshaped, o_weight, o_bias);
 
         // 残差连接
         // cudaDeviceSynchronize();
@@ -676,52 +618,13 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         Tensor<T> gate_buf({seq_len, intermediate_size}, Device::CUDA, false, gate_buf_tag);
         Tensor<T> up_buf({seq_len, intermediate_size}, Device::CUDA, false, up_buf_tag);
 
-        if (quant_type_ == 1) {
-            // AWQ量化版本
-            std::string gate_weight_key = layer_prefix + "mlp.gate_proj";
-            std::string up_weight_key = layer_prefix + "mlp.up_proj";
+        auto gate_weight = get_weight(layer_prefix + "mlp.gate_proj");
+        auto up_weight = get_weight(layer_prefix + "mlp.up_proj");
 
-            std::string gate_qweight_key = gate_weight_key + ".qweight";
-            std::string gate_scales_key = gate_weight_key + ".scales";
-            std::string gate_qzeros_key = gate_weight_key + ".qzeros";
+        // 执行矩阵乘法
+        operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
+        operators_->matmul(&up_buf, &hidden_states, up_weight, up_bias);
 
-            std::string up_qweight_key = up_weight_key + ".qweight";
-            std::string up_scales_key = up_weight_key + ".scales";
-            std::string up_qzeros_key = up_weight_key + ".qzeros";
-
-            auto gate_qweight_it = qweight_params_.find(gate_qweight_key);
-            auto up_qweight_it = qweight_params_.find(up_qweight_key);
-
-            if (gate_qweight_it != qweight_params_.end() &&
-                scales_params_.find(gate_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(gate_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(gate_qweight_key),
-                                               scales_params_.at(gate_scales_key), qzeros_params_.at(gate_qzeros_key),
-                                               group_size_, &gate_buf, nullptr, gate_bias);
-            } else {
-                // 回退到非量化版本
-                std::cout << "Some errors." << std::endl;
-                auto &gate_weight = params_.at(gate_weight_key);
-                cuda_OP::matmul(hidden_states, gate_weight, &gate_buf, nullptr, gate_bias);
-            }
-            if (up_qweight_it != qweight_params_.end() && scales_params_.find(up_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(up_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(up_qweight_key),
-                                               scales_params_.at(up_scales_key), qzeros_params_.at(up_qzeros_key),
-                                               group_size_, &up_buf, nullptr, up_bias);
-            } else {
-                throw std::runtime_error("Some errors.");
-            }
-        } else {
-            // 非量化版本
-            auto &gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
-            auto &up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
-
-            cuda_OP::matmul(hidden_states, gate_weight, &gate_buf, nullptr, gate_bias);
-            cuda_OP::matmul(hidden_states, up_weight, &up_buf, nullptr, up_bias);
-        }
         // cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
         // cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
 
@@ -733,30 +636,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         std::string ffn_out_tag = "ffn_out_" + std::to_string(i);
         Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA, false, ffn_out_tag);
 
-        if (quant_type_ == 1) {
-            // AWQ量化版本
-            std::string down_weight_key = layer_prefix + "mlp.down_proj";
-            std::string down_qweight_key = down_weight_key + ".qweight";
-            std::string down_scales_key = down_weight_key + ".scales";
-            std::string down_qzeros_key = down_weight_key + ".qzeros";
+        // 改为:
+        // 获取权重（自动处理量化与非量化情况）
+        auto down_weight = get_weight(layer_prefix + "mlp.down_proj");
 
-            auto down_qweight_it = qweight_params_.find(down_qweight_key);
-
-            if (down_qweight_it != qweight_params_.end() &&
-                scales_params_.find(down_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(down_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-                cuda_OP::matmul_quantized_gemv(gate_buf, qweight_params_.at(down_qweight_key),
-                                               scales_params_.at(down_scales_key), qzeros_params_.at(down_qzeros_key),
-                                               group_size_, &ffn_out, nullptr, down_bias);
-            } else {
-                throw std::runtime_error("Some errors.");
-            }
-        } else {
-            // 非量化版本
-            auto &down_weight = params_.at(layer_prefix + "mlp.down_proj.weight");
-            cuda_OP::matmul(gate_buf, down_weight, &ffn_out, nullptr, down_bias);
-        }
+        // 执行矩阵乘法（统一接口）
+        operators_->matmul(&ffn_out, &gate_buf, down_weight, down_bias);
 
         // 残差连接
         // cuda_OP::add(&residual, &residual, &ffn_out);
@@ -781,7 +666,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
     // cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
 
     // LM head投影到词汇表大小
-    auto &lm_head_weight = params_.at("lm_head");
+    auto lm_head_weight = get_weight("lm_head");
+
     const Tensor<T> *lm_head_bias = nullptr;
     // try {
     //   lm_head_bias = &params_.at("lm_head_bias");
@@ -790,7 +676,7 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
     // }
 
     Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA, false, "logits");
-    cuda_OP::matmul(final_h, lm_head_weight, &logits, nullptr, lm_head_bias);
+    operators_->matmul(&logits, &final_h, lm_head_weight, lm_head_bias);
 
     // 返回最后一个token的logits
 
@@ -863,109 +749,13 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         Tensor<T> k_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
         Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
 
-        if (quant_type_ == 1) {
-            // AWQ量化版本
-            std::string q_weight_key = layer_prefix + "self_attn.q_proj";
-            std::string k_weight_key = layer_prefix + "self_attn.k_proj";
-            std::string v_weight_key = layer_prefix + "self_attn.v_proj";
+        auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
+        auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
+        auto v_weight = get_weight(layer_prefix + "self_attn.v_proj");
 
-            std::string q_qweight_key = q_weight_key + ".qweight";
-            std::string q_scales_key = q_weight_key + ".scales";
-            std::string q_qzeros_key = q_weight_key + ".qzeros";
-
-            std::string k_qweight_key = k_weight_key + ".qweight";
-            std::string k_scales_key = k_weight_key + ".scales";
-            std::string k_qzeros_key = k_weight_key + ".qzeros";
-
-            std::string v_qweight_key = v_weight_key + ".qweight";
-            std::string v_scales_key = v_weight_key + ".scales";
-            std::string v_qzeros_key = v_weight_key + ".qzeros";
-
-            // auto print_shape =
-            //     [](const std::string &name,
-            //        const auto &sizes) { /* ... (printing code) ... */
-            //                             std::cout << name << " shape: [";
-            //                             if (sizes.empty()) {
-            //                               std::cout << "<empty>";
-            //                             } else {
-            //                               for (size_t i = 0; i < sizes.size(); ++i)
-            //                               {
-            //                                 std::cout
-            //                                     << sizes[i]
-            //                                     << (i == sizes.size() - 1 ? ""
-            //                                                               : ", ");
-            //                               }
-            //                             }
-            //                             std::cout << "]";
-            //     };
-            auto q_qweight_it = qweight_params_.find(q_qweight_key);
-            auto k_qweight_it = qweight_params_.find(k_qweight_key);
-            auto v_qweight_it = qweight_params_.find(v_qweight_key);
-            // print_shape(k_qweight_it->first,
-            // qweight_params_.at(k_qweight_key).sizes());
-
-            if (q_qweight_it != qweight_params_.end() && scales_params_.find(q_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(q_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-
-                // 使用量化矩阵乘法，确保传递正确的流
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(q_qweight_key),
-                                               scales_params_.at(q_scales_key), qzeros_params_.at(q_qzeros_key),
-                                               group_size_, &q_buf, compute_streams_[0], q_bias);
-
-                // 检查CUDA错误
-                cudaError_t err = cudaGetLastError();
-                if (err != cudaSuccess) {
-                    std::cerr << "CUDA error in q_proj matmul_quantized_gemv: " << cudaGetErrorString(err) << std::endl;
-                }
-            } else {
-                // 回退到非量化版本
-                throw std::runtime_error("Some errors.");
-            }
-
-            if (k_qweight_it != qweight_params_.end() && scales_params_.find(k_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(k_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-                // 使用量化矩阵乘法，确保传递正确的流
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(k_qweight_key),
-                                               scales_params_.at(k_scales_key), qzeros_params_.at(k_qzeros_key),
-                                               group_size_, &k_buf, compute_streams_[1], k_bias);
-
-                // 检查CUDA错误
-                cudaError_t err = cudaGetLastError();
-                if (err != cudaSuccess) {
-                    std::cerr << "CUDA error in k_proj matmul_quantized_gemv: " << cudaGetErrorString(err) << std::endl;
-                }
-            } else {
-                throw std::runtime_error("Some errors.");
-            }
-
-            if (v_qweight_it != qweight_params_.end() && scales_params_.find(v_scales_key) != scales_params_.end() &&
-                qzeros_params_.find(v_qzeros_key) != qzeros_params_.end()) {
-                // 使用量化矩阵乘法
-                // 使用量化矩阵乘法，确保传递正确的流
-                cuda_OP::matmul_quantized_gemv(hidden_states, qweight_params_.at(v_qweight_key),
-                                               scales_params_.at(v_scales_key), qzeros_params_.at(v_qzeros_key),
-                                               group_size_, &v_buf, compute_streams_[2], v_bias);
-
-                // 检查CUDA错误
-                cudaError_t err = cudaGetLastError();
-                if (err != cudaSuccess) {
-                    std::cerr << "CUDA error in v_proj matmul_quantized_gemv: " << cudaGetErrorString(err) << std::endl;
-                }
-            } else {
-                throw std::runtime_error("Some errors.");
-            }
-        } else {
-            // 非量化版本
-            auto &wq = params_.at(layer_prefix + "self_attn.q_proj.weight");
-            auto &wk = params_.at(layer_prefix + "self_attn.k_proj.weight");
-            auto &wv = params_.at(layer_prefix + "self_attn.v_proj.weight");
-
-            cuda_OP::matmul(hidden_states, wq, &q_buf, compute_streams_[0], q_bias);
-            cuda_OP::matmul(hidden_states, wk, &k_buf, compute_streams_[1], k_bias);
-            cuda_OP::matmul(hidden_states, wv, &v_buf, compute_streams_[2], v_bias);
-        }
+        operators_->matmul(&q_buf, &hidden_states, q_weight, q_bias, compute_streams_[0]);
+        operators_->matmul(&k_buf, &hidden_states, k_weight, k_bias, compute_streams_[1]);
+        operators_->matmul(&v_buf, &hidden_states, v_weight, v_bias, compute_streams_[2]);
 
         // 同步并销毁流
         // for (int j = 0; j < 3; j++) {
@@ -1090,10 +880,10 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         // 将注意力输出投影回原始维度
         Tensor<T> att_proj({seq_len, hidden_size_}, Device::CUDA);
 
-        // 获取o_proj权重（自动处理量化与非量化情况）
+        // 获取权重（自动处理量化与非量化情况）
         auto o_weight = get_weight(layer_prefix + "self_attn.o_proj");
 
-        // 执行矩阵乘法（内部自动选择合适的实现）
+        // 执行矩阵乘法（统一接口）
         operators_->matmul(&att_proj, &att_heads.view({seq_len, n_heads_ * head_dim_}), o_weight, o_bias);
 
         // 残差连接
@@ -1111,25 +901,16 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
 
         // 预先分配输出张量
         size_t ffn_hidden_size = intermediate_size_;
-        if (quant_type_ == 0) {
-            // 非量化版本，从权重获取维度
-            auto &gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
-            ffn_hidden_size = gate_weight.sizes()[1];
-        }
 
         Tensor<T> gate_buf({seq_len, ffn_hidden_size}, Device::CUDA);
         Tensor<T> up_buf({seq_len, ffn_hidden_size}, Device::CUDA);
 
-        // 获取gate_proj权重（自动处理量化与非量化情况）
+        // 获取权重（自动处理量化与非量化情况）
         auto gate_weight = get_weight(layer_prefix + "mlp.gate_proj");
-
-        // 执行矩阵乘法（内部自动选择合适的实现）
-        operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
-
-        // 获取up_proj权重（自动处理量化与非量化情况）
         auto up_weight = get_weight(layer_prefix + "mlp.up_proj");
 
         // 执行矩阵乘法（内部自动选择合适的实现）
+        operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
         operators_->matmul(&up_buf, &hidden_states, up_weight, up_bias);
 
         cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
@@ -1163,8 +944,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
     //   std::cout << "Found lm_head_bias" << std::endl;
     // } catch (const std::out_of_range&) {
     // }
-    std::cout << lm_head_weight.tensor()->sizes()[0] << " " << lm_head_weight.tensor()->sizes()[1] << std::endl;
-    Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA);
+
+    Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA, false, "logits");
     operators_->matmul(&logits, &final_h, lm_head_weight, lm_head_bias);
 
     return logits;
