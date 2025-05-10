@@ -4,6 +4,10 @@
 #include <string>
 #include <unordered_map>
 
+#include "operators/cpu/matmul_cpu.hpp"
+#include "operators/cuda/matmul/cublas_matmul_cuda.cuh"
+#include "operators/cuda/matmul/cutlass_matmul_cuda.cuh"
+#include "operators/cuda/matmul/matmul_cuda.cuh"
 #include "operators/operator_base.hpp"
 #include "weight_tensor.hpp"
 
@@ -23,10 +27,19 @@ class MatmulSelector {
     }
 
     // 注册CUDA实现 - 延迟注册，在需要时调用
-    void registerCudaImplementations();
+    void registerCudaImplementations() {
+        // 默认实现
+        registerImpl(MatmulType::DEFAULT, OperatorPlatform::CUDA, std::make_shared<MatmulCUDAOperator<T>>());
+
+        // cuBLAS实现
+        registerImpl(MatmulType::CUBLAS, OperatorPlatform::CUDA, std::make_shared<CublasMatmulCUDAOperator<T>>());
+    }
 
     // 注册CPU实现 - 延迟注册，在需要时调用
-    void registerCpuImplementations();
+    void registerCpuImplementations() {
+        // 默认CPU实现
+        registerImpl(MatmulType::DEFAULT, OperatorPlatform::CPU, std::make_shared<MatmulCPUOperator<T>>());
+    }
 
     // 注册实现
     void registerImpl(MatmulType type, OperatorPlatform platform, std::shared_ptr<MatmulOperatorImpl<T>> impl) {
@@ -105,4 +118,7 @@ class MatmulSelector {
     bool cuda_initialized_ = false;
 };
 
+// 显式模板实例化
+template class MatmulSelector<float>;
+template class MatmulSelector<__nv_bfloat16>;
 }  // namespace op

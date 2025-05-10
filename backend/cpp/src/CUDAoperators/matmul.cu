@@ -461,6 +461,9 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
             M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(), stream);
 
     } else if (use_ == 1) {
+        // 注意：这是直接CUDA算子库的实现，与统一算子库不同，它使用自己的static cublas句柄
+        // 这是一个独立的实现，可以直接通过Tensor的matmul函数调用
+
         static cublasHandle_t handle = nullptr;
         // 使用静态标志和互斥锁确保线程安全的单次初始化
         static std::once_flag init_flag;

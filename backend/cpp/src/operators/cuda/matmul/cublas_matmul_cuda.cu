@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "cudaOP.cuh"
+#include "operators/cuda/cuda_resource_manager.cuh"
 #include "operators/cuda/matmul/cublas_matmul_cuda.cuh"
 
 // 检查cuBLAS状态的辅助函数
@@ -24,34 +25,25 @@ namespace op {
 // CublasMatmulCUDAOperator构造函数
 template <typename T>
 CublasMatmulCUDAOperator<T>::CublasMatmulCUDAOperator() : initialized_(false) {
-    initialize();
+    // 不再在这里初始化句柄，将使用CUDAResourceManager
 }
 
 // CublasMatmulCUDAOperator析构函数
 template <typename T>
 CublasMatmulCUDAOperator<T>::~CublasMatmulCUDAOperator() {
-    destroy();
+    // 不再在这里释放句柄，由CUDAResourceManager负责释放
 }
 
-// 初始化cuBLAS句柄
+// 初始化cuBLAS句柄 - 这个方法将不再使用，保留以满足头文件要求
 template <typename T>
 void CublasMatmulCUDAOperator<T>::initialize() {
-    if (!initialized_) {
-        cublasStatus_t status = cublasCreate(&handle_);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to create cuBLAS handle");
-        }
-        initialized_ = true;
-    }
+    initialized_ = true;  // 直接标记为已初始化，实际句柄由ResourceManager管理
 }
 
-// 销毁cuBLAS句柄
+// 销毁cuBLAS句柄 - 这个方法将不再使用，保留以满足头文件要求
 template <typename T>
 void CublasMatmulCUDAOperator<T>::destroy() {
-    if (initialized_) {
-        cublasDestroy(handle_);
-        initialized_ = false;
-    }
+    initialized_ = false;  // 直接标记为未初始化，实际句柄由ResourceManager管理
 }
 
 // cuBLAS矩阵乘法包装函数
@@ -110,13 +102,14 @@ void CublasMatmulCUDAOperator<T>::operator()(Tensor<T> *output, Tensor<T> *input
         throw std::runtime_error("cuBLAS MatMul does not support quantized weights");
     }
 
-    if (!initialized_) {
-        initialize();
-    }
+    initialized_ = true;  // 标记为已初始化
+
+    // 从资源管理器获取cuBLAS句柄
+    cublasHandle_t handle = CUDAResourceManager::instance().getCublasHandle();
 
     // 设置流
     if (stream) {
-        cublasSetStream(handle_, stream);
+        CUDAResourceManager::instance().setCublasStream(stream);
     }
 
     // 获取输入尺寸
@@ -139,7 +132,7 @@ void CublasMatmulCUDAOperator<T>::operator()(Tensor<T> *output, Tensor<T> *input
 
     // 调用cuBLAS的GEMM操作
     // 计算: C = A * B^T (或表示为 C^T = B * A^T)
-    cublas_matmul_wrapper<T>(handle_,
+    cublas_matmul_wrapper<T>(handle,
                              CUBLAS_OP_T,                  // 转置B
                              CUBLAS_OP_N,                  // 不转置A
                              int(N),                       // m = N

@@ -29,9 +29,9 @@ class CublasMatmulCUDAOperator : public MatmulOperatorImpl<T> {
     }
 
    private:
-    cublasHandle_t handle_;
-    bool initialized_;
+    bool initialized_;  // 状态标志，表示是否已初始化
 
+    // 保留这些方法以保持API兼容，但实际已不再使用这些方法直接管理句柄
     // 初始化cuBLAS句柄
     void initialize();
     // 销毁cuBLAS句柄

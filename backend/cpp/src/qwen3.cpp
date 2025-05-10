@@ -35,7 +35,7 @@ Qwen3Model<T>::Qwen3Model(const std::unordered_map<std::string, Tensor<T>> &para
     rms_norm_eps_ = static_cast<float>(config.at("rms_norm_eps"));
     rope_theta_ = static_cast<float>(config.at("rope_theta"));
     head_dim_ = hidden_size_ / n_heads_;
-    device_ = Device::CPU;  // 默认在CPU上初始化
+    device_ = Device::CUDA;
 
     // 初始化算子接口
     operators_ = std::make_unique<op::UnifiedOperators<T>>(device_);
