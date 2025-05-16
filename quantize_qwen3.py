@@ -23,8 +23,8 @@ except ImportError:
 
 def main():
     # 模型路径
-    model_path = "./models/Qwen3-1.7B"
-    quant_path = "./models/Qwen3-1.7B-AWQ"
+    model_path = "./models/Qwen3-0.6B"
+    quant_path = "./models/Qwen3-0.6B-AWQ"
 
     # --- 删除旧目录 ---
     if os.path.exists(quant_path):
