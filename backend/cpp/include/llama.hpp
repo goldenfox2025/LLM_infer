@@ -17,11 +17,11 @@ class LlamaModel : public BaseModel {
 
   // 前向计算
   uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                   KVCacheBase* kv_cache, size_t top_k, float temperature,
-                   float top_p, curandState* d_states = nullptr) override;
+                    KVCacheBase* kv_cache, size_t top_k, float temperature,
+                    float top_p, curandState* d_states = nullptr) override;
   uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                   KVCacheBase* kv_cache, size_t top_k, float temperature,
-                   float top_p, curandState* d_states = nullptr) override;
+                    KVCacheBase* kv_cache, size_t top_k, float temperature,
+                    float top_p, curandState* d_states = nullptr) override;
   Tensor<float> prefill_cpu(const Tensor<uint32_t>* input,
                             KVCache<float>* kv_cache, ThreadPool& thread_pool);
   Tensor<float> prefill_cuda(const Tensor<uint32_t>* input,
@@ -37,6 +37,7 @@ class LlamaModel : public BaseModel {
   size_t get_head_dim() const override { return dqkv_; }
   size_t get_n_kv_heads() const override { return n_kv_h_; }
   uint32_t get_eos_token_id() const override { return eos_token_id_; }
+  size_t get_hidden_size() const override { return d_; }
 
   // CUDA support methods
   LlamaModel& cuda() override;

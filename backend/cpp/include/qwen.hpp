@@ -61,10 +61,10 @@ class QwenModel : public BaseModel {
   size_t get_head_dim() const override { return head_dim_; }
   size_t get_n_kv_heads() const override { return n_kv_heads_; }
   uint32_t get_eos_token_id() const override { return eos_token_id_; }
+  size_t get_hidden_size() const override { return hidden_size_; }
 
   // Additional getter methods for qwen_decode.cpp
   size_t get_n_heads() const { return n_heads_; }
-  size_t get_hidden_size() const { return hidden_size_; }
   size_t get_intermediate_size() const { return intermediate_size_; }
   float get_rms_norm_eps() const { return rms_norm_eps_; }
   float get_rope_theta() const { return rope_theta_; }

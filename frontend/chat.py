@@ -318,7 +318,7 @@ def create_callback(q: queue.Queue):
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen/Qwen3 模型聊天')
-    parser.add_argument('--model_path', type=str, default="./models/Qwen3-0.6B-AWQ", help='模型路径')
+    parser.add_argument('--model_path', type=str, default="./models/Qwen3-1.7B-AWQ", help='模型路径')
     parser.add_argument('--model_type', type=str, default="qwen3_awq", 
                        choices=['llama', 'qwen', 'qwen_bf16', 'qwen_awq', 'qwen3_bf16', 'qwen3_awq'], 
                        help='模型类型')
