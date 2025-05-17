@@ -13,15 +13,7 @@
 #include "llama.hpp"
 #include "operators.hpp"
 #include "qwen.hpp"
-#define checkCudaErrors(call)                                           \
-  do {                                                                  \
-    cudaError_t err = call;                                             \
-    if (err != cudaSuccess) {                                           \
-      fprintf(stderr, "CUDA Error at %s:%d - %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(err));                                 \
-      throw std::runtime_error(cudaGetErrorString(err));                \
-    }                                                                   \
-  } while (0)
+// 使用 common.hpp 中定义的 checkCudaErrors 宏
 // 定义用于结果队列的类型
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
 using GenerationResult =
@@ -224,6 +216,10 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
                                                   uint32_t* input_ids,
                                                   float temperature,
                                                   float top_p, size_t top_k) {
+  // 创建GPU计时器
+  GpuTimer token_gen_timer;
+  token_gen_timer.start();
+
   // 构造输入张量，取 input_ids 中最后一个 token, 放置在正确的设备上
   Tensor<uint32_t> input(input_ids, {1}, device_);
   // 更新 KV 缓存长度（为新 token 分配缓存空间）
@@ -243,6 +239,14 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool,
     next_token = model_->forward(&input, thread_pool, &kv_cache_, top_k,
                                  temperature, top_p);
   }
+
+  // 停止计时
+  token_gen_timer.stop();
+
+  // 输出生成时间（可选，取消注释以启用）
+  // std::cout << "Token生成耗时: " << std::fixed << std::setprecision(2)
+  //           << token_gen_timer.milliseconds() << " 毫秒" << std::endl
+  //           << std::flush;
 
   return next_token;
 }
@@ -324,6 +328,10 @@ void InferenceEngine<T>::generate_with_callback(
 
     // 执行预热操作
     try {
+      // 创建GPU计时器
+      GpuTimer warmup_timer;
+      warmup_timer.start();
+
       // 设置prefill阶段标志
       GlobalCudaMemoryPool::set_prefill_phase(true);
 
@@ -340,8 +348,8 @@ void InferenceEngine<T>::generate_with_callback(
           model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k,
                           temperature, top_p, d_states);
 
-      // 确保所有CUDA操作完成
-      checkCudaErrors(cudaDeviceSynchronize());
+      // 停止计时
+      warmup_timer.stop();
 
       // 关闭prefill阶段标志
       GlobalCudaMemoryPool::set_prefill_phase(false);
@@ -355,7 +363,9 @@ void InferenceEngine<T>::generate_with_callback(
       // 标记已完成预热
       has_warmed_up_ = true;
 
-      std::cout << "CUDA预热完成" << std::endl << std::flush;
+      std::cout << "CUDA预热完成，耗时: " << std::fixed << std::setprecision(2)
+                << warmup_timer.milliseconds() << " 毫秒" << std::endl
+                << std::flush;
     } catch (const std::exception& e) {
       std::cerr << "预热过程中发生错误: " << e.what() << std::endl;
       // 即使预热失败，也继续执行正常的推理
@@ -370,8 +380,9 @@ void InferenceEngine<T>::generate_with_callback(
       uint32_t next_token_host = -1;  // CPU 上的 next_token 副本
       size_t input_size = input_ids_copy.size();
 
-      // 声明计时变量，确保在整个函数范围内可见
-      auto total_prefill_start = std::chrono::high_resolution_clock::now();
+      // 声明计时器，确保在整个函数范围内可见
+      GpuTimer total_prefill_timer;
+      total_prefill_timer.start();
 
       {
         // 设置prefill阶段标志，启用prefill模式
@@ -379,7 +390,8 @@ void InferenceEngine<T>::generate_with_callback(
         std::cerr << "进入prefill阶段，序列长度: " << input_size << std::endl;
 
         // 开始计时 - 仅计算部分
-        auto prefill_start = std::chrono::high_resolution_clock::now();
+        GpuTimer prefill_timer;
+        prefill_timer.start();
 
         kv_cache_.resize(kv_cache_.size() +
                          input_size);  // 调整大小移到 prefill 前
@@ -391,20 +403,15 @@ void InferenceEngine<T>::generate_with_callback(
             temperature, top_p, this->d_states);
 
         // 确保所有CUDA操作完成后再停止计时
-        checkCudaErrors(cudaDeviceSynchronize());
-
-        // 结束计时
-        auto prefill_end = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double, std::milli> prefill_duration =
-            prefill_end - prefill_start;
+        prefill_timer.stop();
 
         // 关闭prefill阶段标志
         GlobalCudaMemoryPool::set_prefill_phase(false);
 
         // 输出计时结果，确保立即刷新输出缓冲区
         std::cout << "Prefill阶段完成，耗时: " << std::fixed
-                  << std::setprecision(2) << prefill_duration.count() << " 毫秒"
-                  << std::endl
+                  << std::setprecision(2) << prefill_timer.milliseconds()
+                  << " 毫秒" << std::endl
                   << std::flush;
 
         std::cerr << "退出prefill阶段" << std::endl;
@@ -412,7 +419,8 @@ void InferenceEngine<T>::generate_with_callback(
 
       // --- 处理 Prefill 的第一个 Token ---
       // 开始计时 - 第一个token处理
-      auto token_start = std::chrono::high_resolution_clock::now();
+      GpuTimer token_timer;
+      token_timer.start();
 
       // 从 GPU 获取 prefill 产生的第一个 token
       checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr,
@@ -421,21 +429,17 @@ void InferenceEngine<T>::generate_with_callback(
       checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
 
       // 结束计时 - 第一个token处理
-      auto token_end = std::chrono::high_resolution_clock::now();
-      std::chrono::duration<double, std::milli> token_duration =
-          token_end - token_start;
+      token_timer.stop();
 
       // 输出第一个token处理时间
       std::cout << "第一个Token处理耗时: " << std::fixed << std::setprecision(2)
-                << token_duration.count() << " 毫秒" << std::endl
+                << token_timer.milliseconds() << " 毫秒" << std::endl
                 << std::flush;
 
       // 计算并输出总prefill时间（包括计算和第一个token处理）
-      auto total_prefill_end = std::chrono::high_resolution_clock::now();
-      std::chrono::duration<double, std::milli> total_prefill_duration =
-          total_prefill_end - total_prefill_start;
+      total_prefill_timer.stop();
       std::cout << "总Prefill过程耗时: " << std::fixed << std::setprecision(2)
-                << total_prefill_duration.count() << " 毫秒" << std::endl
+                << total_prefill_timer.milliseconds() << " 毫秒" << std::endl
                 << std::flush;
 
       if (next_token_host == this->model_->get_eos_token_id()) {
@@ -450,16 +454,31 @@ void InferenceEngine<T>::generate_with_callback(
           next_token_gpu_ptr;  // 下一轮的输入是 GPU 指针
 
       while (current_total_length < max_length) {
+        // 创建GPU计时器用于整个token生成和处理过程
+        GpuTimer full_token_timer;
+        full_token_timer.start();
+
         // --- 生成下一个 token (主要是 GPU 计算) ---
         next_token_gpu_ptr = this->generate_next_token(
             this->thread_pool_, last_token_gpu_ptr, temperature, top_p, top_k);
-        checkCudaErrors(cudaDeviceSynchronize());  // 或者同步特定流
 
         // --- 异步拷贝结果回 CPU ---
+        GpuTimer copy_timer;
+        copy_timer.start();
         checkCudaErrors(cudaMemcpyAsync(
             &next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
             cudaMemcpyDeviceToHost, cudaStreamDefault));  // 假设用默认流
         checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
+        copy_timer.stop();
+
+        // 停止整体计时
+        full_token_timer.stop();
+
+        // 可选：输出计时信息
+        // std::cout << "Token #" << current_total_length << " 总耗时: "
+        //           << std::fixed << std::setprecision(2)
+        //           << full_token_timer.milliseconds() << " 毫秒 (拷贝: "
+        //           << copy_timer.milliseconds() << " 毫秒)" << std::endl;
 
         // --- CPU 逻辑和 Push ---
         last_token_gpu_ptr = next_token_gpu_ptr;  // 更新下一轮的输入指针
