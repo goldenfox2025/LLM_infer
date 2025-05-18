@@ -312,7 +312,7 @@ def main():
             generate_text_stream_speculative(
                 input_ids,
                 callback,
-                max_length=100,  # 减少生成长度，避免生成太多token
+                max_length=50,  # 减少生成长度，避免生成太多token
                 temperature=0.7,
                 top_p=0.9,
                 top_k=50
