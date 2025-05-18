@@ -24,8 +24,8 @@ uint32_t *Qwen3Model<T>::forward(const Tensor<uint32_t> *input,
                                  curandState *d_states) {
   KVCache<T> *typed_cache = dynamic_cast<KVCache<T> *>(kv_cache);
 
-  return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
-                         top_k, d_states);
+  return operators_->sample(forward_cuda(input, typed_cache), temperature,
+                            top_p, top_k, d_states);
 }
 
 // -------------------------------
@@ -58,7 +58,7 @@ Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input,
   Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
 
   // Token嵌入 (从embedding_table中获取token嵌入)
-  cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
+  operators_->gather(&residual, input, &params_.at("token_embeddings.weight"));
 
   // 主循环：遍历所有Transformer层
   for (size_t i = 0; i < n_layers_; i++) {
@@ -164,8 +164,8 @@ Tensor<T> Qwen3Model<T>::forward_cuda(const Tensor<uint32_t> *input,
     // 使用动态Flash-Attention包装函数计算自注意力
     // 确保att_out_view是3D张量 [seq_len, n_heads_, head_dim_]
     Tensor<T> att_out_view = attn_output.view({n_heads_, head_dim_});
-    cuda_OP::dynamic_flash_attention_wrapper(
-        q_buf_view, k_cache_view, v_cache_view, att_out_view, n_kv_heads_);
+    operators_->dynamic_flash_attention(q_buf_view, k_cache_view, v_cache_view,
+                                        att_out_view, n_kv_heads_);
 
     // 确保attn_output是2D张量 [seq_len, n_heads_ *
     // head_dim_]，用于后续的matmul操作

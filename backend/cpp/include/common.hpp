@@ -1,7 +1,7 @@
 
 #pragma once
 
-// System includes
+// 系统包含
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -9,7 +9,7 @@
 #include <sched.h>
 #include <unistd.h>
 
-// Standard library includes
+// 标准库包含
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -19,18 +19,18 @@
 #include <string>
 #include <vector>
 
-// Project includes
+// 项目包含
 #include "tensor.hpp"
 
 //------------------------------------------------------------------------------
-// CUDA Error Checking Macros
+// CUDA 错误检查宏
 //------------------------------------------------------------------------------
 
 /**
- * @brief Check CUDA errors and throw an exception if an error occurred
+ * @brief 检查CUDA错误并在发生错误时抛出异常
  *
- * This macro checks the result of a CUDA API call and throws a runtime_error
- * if the call failed, including file and line information.
+ * 此宏检查CUDA API调用的结果，如果调用失败，
+ * 则抛出包含文件和行信息的runtime_error异常。
  */
 #define CUDA_CHECK(call)                                                \
   do {                                                                  \
@@ -43,12 +43,12 @@
   } while (0)
 
 /**
- * @brief Alias for CUDA_CHECK for backward compatibility
+ * @brief CUDA_CHECK的别名，用于向后兼容
  */
 #define checkCudaErrors(call) CUDA_CHECK(call)
 
 /**
- * @brief Check cuBLAS status and throw an exception if an error occurred
+ * @brief 检查cuBLAS状态并在发生错误时抛出异常
  */
 #define CUBLAS_CHECK(call)                                                    \
   do {                                                                        \
@@ -91,10 +91,10 @@
   } while (0)
 
 /**
- * @brief Helper function to check cuBLAS status
+ * @brief 检查cuBLAS状态的辅助函数
  *
- * This function can be used when you need to check cuBLAS status in a function
- * rather than using the macro directly.
+ * 当需要在函数中检查cuBLAS状态而不是直接使用宏时，
+ * 可以使用此函数。
  */
 inline void checkCublasStatus(cublasStatus_t status, const char* file,
                               int line) {
@@ -138,9 +138,9 @@ inline void checkCublasStatus(cublasStatus_t status, const char* file,
 }
 
 /**
- * @brief Check CUTLASS status and throw an exception if an error occurred
+ * @brief 检查CUTLASS状态并在发生错误时抛出异常
  *
- * Note: This is commented out to avoid redefinition with cudaOP.cuh
+ * 注意：这部分被注释掉以避免与cudaOP.cuh中的定义重复
  */
 /*
 #define CUTLASS_CHECK(status)                                             \
@@ -155,15 +155,15 @@ inline void checkCublasStatus(cublasStatus_t status, const char* file,
 */
 
 //------------------------------------------------------------------------------
-// Debug Utilities
+// 调试工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Print tensor information for debugging
+ * @brief 打印张量信息用于调试
  *
- * @param tensor The tensor to print
- * @param tensor_name Name of the tensor for display
- * @param num_to_print Maximum number of elements to print
+ * @param tensor 要打印的张量
+ * @param tensor_name 用于显示的张量名称
+ * @param num_to_print 要打印的最大元素数量
  */
 template <typename T>
 void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
@@ -225,7 +225,7 @@ void debugPrintTensor(const Tensor<T>& tensor, const std::string& tensor_name,
 }
 
 /**
- * @brief Specialized version of debugPrintTensor for __nv_bfloat16 type
+ * @brief debugPrintTensor针对__nv_bfloat16类型的特化版本
  */
 template <>
 inline void debugPrintTensor<__nv_bfloat16>(const Tensor<__nv_bfloat16>& tensor,
@@ -289,7 +289,7 @@ inline void debugPrintTensor<__nv_bfloat16>(const Tensor<__nv_bfloat16>& tensor,
 }
 
 /**
- * @brief Specialized version of debugPrintTensor for __half type
+ * @brief debugPrintTensor针对__half类型的特化版本
  */
 template <>
 inline void debugPrintTensor<__half>(const Tensor<__half>& tensor,
@@ -353,13 +353,13 @@ inline void debugPrintTensor<__half>(const Tensor<__half>& tensor,
 }
 
 //------------------------------------------------------------------------------
-// Timing Utilities
+// 计时工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief GPU timer for measuring kernel execution time
+ * @brief GPU计时器，用于测量内核执行时间
  *
- * Uses CUDA events to measure elapsed time on the GPU
+ * 使用CUDA事件来测量GPU上的经过时间
  */
 class GpuTimer {
  private:
@@ -406,9 +406,9 @@ class GpuTimer {
 };
 
 /**
- * @brief CPU timer for measuring execution time
+ * @brief CPU计时器，用于测量执行时间
  *
- * Uses std::chrono to measure elapsed time on the CPU
+ * 使用std::chrono来测量CPU上的经过时间
  */
 class CpuTimer {
  private:
@@ -430,13 +430,13 @@ class CpuTimer {
 };
 
 //------------------------------------------------------------------------------
-// Thread Management Utilities
+// 线程管理工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Bind the current thread to a specific CPU core
+ * @brief 将当前线程绑定到特定的CPU核心
  *
- * @param core_id The ID of the core to bind to
+ * @param core_id 要绑定的核心ID
  */
 void bind_this_thread_to_core(int core_id) {
   cpu_set_t cpuset;
@@ -452,20 +452,20 @@ void bind_this_thread_to_core(int core_id) {
 }
 
 /**
- * @brief Get the number of available CPU cores
+ * @brief 获取可用的CPU核心数量
  *
- * @return The number of CPU cores
+ * @return CPU核心数量
  */
 int get_num_cores() { return sysconf(_SC_NPROCESSORS_ONLN); }
 
 //------------------------------------------------------------------------------
-// Memory Management Utilities
+// 内存管理工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Print current CUDA memory usage
+ * @brief 打印当前CUDA内存使用情况
  *
- * @param location A string to identify where this function is called from
+ * @param location 用于标识此函数从何处调用的字符串
  */
 void print_cuda_memory_usage(const char* location = "Current") {
   size_t free_memory = 0, total_memory = 0;
@@ -480,10 +480,10 @@ void print_cuda_memory_usage(const char* location = "Current") {
 }
 
 /**
- * @brief Allocate device memory
+ * @brief 分配设备内存
  *
- * @param size Size in bytes to allocate
- * @return Pointer to allocated memory
+ * @param size 要分配的字节大小
+ * @return 指向已分配内存的指针
  */
 inline void* cuda_malloc(size_t size) {
   void* ptr = nullptr;
@@ -492,9 +492,9 @@ inline void* cuda_malloc(size_t size) {
 }
 
 /**
- * @brief Free device memory
+ * @brief 释放设备内存
  *
- * @param ptr Pointer to memory to free
+ * @param ptr 要释放的内存指针
  */
 inline void cuda_free(void* ptr) {
   if (ptr) {
@@ -503,12 +503,12 @@ inline void cuda_free(void* ptr) {
 }
 
 /**
- * @brief Copy memory from host to device
+ * @brief 将内存从主机复制到设备
  *
- * @param dst Destination pointer (device)
- * @param src Source pointer (host)
- * @param size Size in bytes to copy
- * @param stream CUDA stream to use (optional)
+ * @param dst 目标指针（设备）
+ * @param src 源指针（主机）
+ * @param size 要复制的字节大小
+ * @param stream 要使用的CUDA流（可选）
  */
 inline void cuda_h2d(void* dst, const void* src, size_t size,
                      cudaStream_t stream = nullptr) {
@@ -520,12 +520,12 @@ inline void cuda_h2d(void* dst, const void* src, size_t size,
 }
 
 /**
- * @brief Copy memory from device to host
+ * @brief 将内存从设备复制到主机
  *
- * @param dst Destination pointer (host)
- * @param src Source pointer (device)
- * @param size Size in bytes to copy
- * @param stream CUDA stream to use (optional)
+ * @param dst 目标指针（主机）
+ * @param src 源指针（设备）
+ * @param size 要复制的字节大小
+ * @param stream 要使用的CUDA流（可选）
  */
 inline void cuda_d2h(void* dst, const void* src, size_t size,
                      cudaStream_t stream = nullptr) {
@@ -537,12 +537,12 @@ inline void cuda_d2h(void* dst, const void* src, size_t size,
 }
 
 /**
- * @brief Copy memory from device to device
+ * @brief 将内存从设备复制到设备
  *
- * @param dst Destination pointer (device)
- * @param src Source pointer (device)
- * @param size Size in bytes to copy
- * @param stream CUDA stream to use (optional)
+ * @param dst 目标指针（设备）
+ * @param src 源指针（设备）
+ * @param size 要复制的字节大小
+ * @param stream 要使用的CUDA流（可选）
  */
 inline void cuda_d2d(void* dst, const void* src, size_t size,
                      cudaStream_t stream = nullptr) {
@@ -555,12 +555,12 @@ inline void cuda_d2d(void* dst, const void* src, size_t size,
 }
 
 /**
- * @brief Set device memory to a value
+ * @brief 将设备内存设置为指定值
  *
- * @param ptr Pointer to memory to set
- * @param value Value to set
- * @param size Size in bytes to set
- * @param stream CUDA stream to use (optional)
+ * @param ptr 要设置的内存指针
+ * @param value 要设置的值
+ * @param size 要设置的字节大小
+ * @param stream 要使用的CUDA流（可选）
  */
 inline void cuda_memset(void* ptr, int value, size_t size,
                         cudaStream_t stream = nullptr) {
@@ -572,9 +572,9 @@ inline void cuda_memset(void* ptr, int value, size_t size,
 }
 
 /**
- * @brief Simple memory unit for managing host and device memory
+ * @brief 用于管理主机和设备内存的简单内存单元
  *
- * Provides utilities for allocating, copying, and freeing memory
+ * 提供用于分配、复制和释放内存的工具
  */
 template <typename T>
 struct MemoryUnit {
@@ -672,14 +672,14 @@ struct MemoryUnit {
 };
 
 //------------------------------------------------------------------------------
-// Miscellaneous Utilities
+// 杂项工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Check if a number is a power of 2
+ * @brief 检查一个数字是否为2的幂
  *
- * @param x The number to check
- * @return true if x is a power of 2, false otherwise
+ * @param x 要检查的数字
+ * @return 如果x是2的幂则返回true，否则返回false
  */
 template <typename T>
 bool is_power_of_2(T x) {
@@ -687,11 +687,11 @@ bool is_power_of_2(T x) {
 }
 
 /**
- * @brief Calculate the greatest common divisor of two numbers
+ * @brief 计算两个数的最大公约数
  *
- * @param a First number
- * @param b Second number
- * @return The greatest common divisor
+ * @param a 第一个数
+ * @param b 第二个数
+ * @return 最大公约数
  */
 template <typename T>
 T gcd(T a, T b) {
@@ -704,11 +704,11 @@ T gcd(T a, T b) {
 }
 
 /**
- * @brief Calculate the least common multiple of two numbers
+ * @brief 计算两个数的最小公倍数
  *
- * @param a First number
- * @param b Second number
- * @return The least common multiple
+ * @param a 第一个数
+ * @param b 第二个数
+ * @return 最小公倍数
  */
 template <typename T>
 T lcm(T a, T b) {
@@ -716,11 +716,11 @@ T lcm(T a, T b) {
 }
 
 /**
- * @brief Round up to the next multiple of a given number
+ * @brief 向上取整到给定数字的下一个倍数
  *
- * @param value The value to round up
- * @param multiple The multiple to round up to
- * @return The rounded up value
+ * @param value 要向上取整的值
+ * @param multiple 要取整到的倍数
+ * @return 向上取整后的值
  */
 template <typename T>
 T round_up(T value, T multiple) {
@@ -731,14 +731,14 @@ T round_up(T value, T multiple) {
 }
 
 //------------------------------------------------------------------------------
-// CUDA-specific Utilities
+// CUDA特定工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Get CUDA device properties
+ * @brief 获取CUDA设备属性
  *
- * @param device_id The device ID
- * @return The device properties
+ * @param device_id 设备ID
+ * @return 设备属性
  */
 cudaDeviceProp get_device_properties(int device_id = 0) {
   cudaDeviceProp prop;
@@ -747,9 +747,9 @@ cudaDeviceProp get_device_properties(int device_id = 0) {
 }
 
 /**
- * @brief Print CUDA device information
+ * @brief 打印CUDA设备信息
  *
- * @param device_id The device ID
+ * @param device_id 设备ID
  */
 void print_device_info(int device_id = 0) {
   cudaDeviceProp prop = get_device_properties(device_id);
@@ -771,15 +771,15 @@ void print_device_info(int device_id = 0) {
 }
 
 /**
- * @brief Initialize CUDA device
+ * @brief 初始化CUDA设备
  *
- * @param device_id The device ID to initialize
- * @param print_info Whether to print device information
+ * @param device_id 要初始化的设备ID
+ * @param print_info 是否打印设备信息
  */
 void init_cuda_device(int device_id = 0, bool print_info = false) {
   CUDA_CHECK(cudaSetDevice(device_id));
 
-  // Optional: Set cache configuration
+  // 可选：设置缓存配置
   CUDA_CHECK(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
 
   if (print_info) {
@@ -788,9 +788,9 @@ void init_cuda_device(int device_id = 0, bool print_info = false) {
 }
 
 /**
- * @brief Get the number of CUDA devices
+ * @brief 获取CUDA设备数量
  *
- * @return The number of CUDA devices
+ * @return CUDA设备数量
  */
 int get_cuda_device_count() {
   int count;
@@ -799,9 +799,9 @@ int get_cuda_device_count() {
 }
 
 /**
- * @brief Get the current CUDA device
+ * @brief 获取当前CUDA设备
  *
- * @return The current device ID
+ * @return 当前设备ID
  */
 int get_current_cuda_device() {
   int device;
@@ -810,26 +810,26 @@ int get_current_cuda_device() {
 }
 
 /**
- * @brief Synchronize the current CUDA device
+ * @brief 同步当前CUDA设备
  */
 void sync_cuda_device() { CUDA_CHECK(cudaDeviceSynchronize()); }
 
 /**
- * @brief Reset the current CUDA device
+ * @brief 重置当前CUDA设备
  */
 void reset_cuda_device() { CUDA_CHECK(cudaDeviceReset()); }
 
 //------------------------------------------------------------------------------
-// Debug and Logging Utilities
+// 调试和日志工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Enum for log levels
+ * @brief 日志级别枚举
  */
 enum class LogLevel { DEBUG, INFO, WARNING, ERROR, FATAL };
 
 /**
- * @brief Simple logger class
+ * @brief 简单的日志记录器类
  */
 class Logger {
  private:
@@ -911,18 +911,18 @@ class Logger {
 };
 
 // Initialize static members
-LogLevel Logger::current_level_ = LogLevel::INFO;
-std::mutex Logger::log_mutex_;
+inline LogLevel Logger::current_level_ = LogLevel::INFO;
+inline std::mutex Logger::log_mutex_;
 
 //------------------------------------------------------------------------------
-// Printing and Formatting Utilities
+// 打印和格式化工具
 //------------------------------------------------------------------------------
 
 /**
- * @brief Print a vector
+ * @brief 打印向量
  *
- * @param vec The vector to print
- * @param name The name of the vector
+ * @param vec 要打印的向量
+ * @param name 向量的名称
  */
 template <typename T>
 void print_vector(const std::vector<T>& vec, const std::string& name = "") {
@@ -941,10 +941,10 @@ void print_vector(const std::vector<T>& vec, const std::string& name = "") {
 }
 
 /**
- * @brief Print a shape (vector of dimensions)
+ * @brief 打印形状（维度向量）
  *
- * @param shape The shape to print
- * @param name The name of the shape
+ * @param shape 要打印的形状
+ * @param name 形状的名称
  */
 template <typename T>
 void print_shape(const std::vector<T>& shape, const std::string& name = "") {
@@ -967,10 +967,10 @@ void print_shape(const std::vector<T>& shape, const std::string& name = "") {
 }
 
 /**
- * @brief Format a number with commas as thousands separators
+ * @brief 格式化数字，使用逗号作为千位分隔符
  *
- * @param value The number to format
- * @return The formatted string
+ * @param value 要格式化的数字
+ * @return 格式化后的字符串
  */
 template <typename T>
 std::string format_with_commas(T value) {
@@ -991,10 +991,10 @@ std::string format_with_commas(T value) {
 }
 
 /**
- * @brief Format a size in bytes to a human-readable string
+ * @brief 将字节大小格式化为人类可读的字符串
  *
- * @param bytes The size in bytes
- * @return The formatted string
+ * @param bytes 字节大小
+ * @return 格式化后的字符串
  */
 std::string format_bytes(size_t bytes) {
   static const char* suffixes[] = {"B", "KB", "MB", "GB", "TB", "PB"};

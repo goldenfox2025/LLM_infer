@@ -24,8 +24,8 @@ uint32_t *Qwen3Model<T>::prefill(const Tensor<uint32_t> *input,
                                  curandState *d_states) {
   KVCache<T> *typed_cache = dynamic_cast<KVCache<T> *>(kv_cache);
 
-  return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p,
-                         top_k, d_states);
+  return operators_->sample(prefill_cuda(input, typed_cache), temperature,
+                            top_p, top_k, d_states);
 }
 
 // -------------------------------
@@ -57,7 +57,7 @@ Tensor<T> Qwen3Model<T>::prefill_cuda(const Tensor<uint32_t> *input,
   Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA);
 
   // Token嵌入 (从embedding_table中获取token嵌入)
-  cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
+  operators_->gather(&residual, input, &params_.at("token_embeddings.weight"));
 
   // 初始化计算流同步
   cudaStreamSynchronize(compute_streams_[3]);
@@ -174,17 +174,17 @@ Tensor<T> Qwen3Model<T>::prefill_cuda(const Tensor<uint32_t> *input,
     // 使用专门的prefill版本计算注意力
     // 计算注意力分数
     Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
-    cuda_OP::compute_attention_scores_prefill(q_buf_view, k_cache_view,
-                                              att_scores, head_dim_);
+    operators_->compute_attention_scores_prefill(q_buf_view, k_cache_view,
+                                                 att_scores, head_dim_);
 
     // Softmax处理注意力分数（prefill版本需要设置mask=true）
-    cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
+    operators_->softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
 
     // 计算注意力输出（prefill版本）
     Tensor<T> att_out_view = attn_output.view({seq_len, n_heads_, head_dim_});
-    cuda_OP::compute_att_output_prefill(att_scores, v_cache_view, att_out_view,
-                                        n_heads_, head_dim_, total_seq_len,
-                                        n_kv_heads_);
+    operators_->compute_attention_output_prefill(
+        att_scores, v_cache_view, att_out_view, n_heads_, head_dim_,
+        total_seq_len, n_kv_heads_);
 
     // 确保attn_output是2D张量 [seq_len, n_heads_ *
     // head_dim_]，用于后续的matmul操作
