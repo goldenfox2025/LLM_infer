@@ -217,23 +217,23 @@ def main():
         print("投机解码器初始化失败")
         return
 
-    # 设置系统提示和用户输入
+    # 设置系统提示和用户输入 - 使用简短的提示便于观察
     system_prompt = "你是一个有用的AI助手。"
-    user_input = "你好，请介绍一下自己。"
-    
+    user_input = "1+1等于几？"  # 使用简单的问题，便于观察和分析
+
     # 使用chat.py中的方式构建对话模板
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_input}
     ]
-    
+
     # 应用聊天模板
     prompt = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True
     )
-    
+
     print(f"系统提示: {system_prompt}")
     print(f"用户输入: {user_input}")
     print(f"构建的对话模板: {prompt[:100]}...")
@@ -254,7 +254,7 @@ def main():
             generate_text_stream(
                 input_ids,
                 callback,
-                max_length=150,  # 减少生成长度，避免生成太多token
+                max_length=50,  # 减少生成长度，便于观察和分析
                 temperature=0.7,
                 top_p=0.9,
                 top_k=50
@@ -312,7 +312,7 @@ def main():
             generate_text_stream_speculative(
                 input_ids,
                 callback,
-                max_length=150,  # 减少生成长度，避免生成太多token
+                max_length=50,  # 减少生成长度，便于观察和分析
                 temperature=0.7,
                 top_p=0.9,
                 top_k=50
