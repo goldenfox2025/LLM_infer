@@ -42,6 +42,38 @@ class Tensor {
     template <typename FromType, typename ToType>
     friend Tensor<ToType> tensor_convert(const Tensor<FromType>& src);
 
+    // 静态方法：将多个GPU指针组合成一个tensor
+    // 参数：
+    // - gpu_ptrs: GPU指针数组
+    // - device: 设备类型（默认为CUDA）
+    // 返回：包含所有指针数据的tensor，形状为[gpu_ptrs.size()]
+    template <typename PtrType>
+    static Tensor<T> combine_gpu_ptrs(const std::vector<PtrType*>& gpu_ptrs, Device device = Device::CUDA) {
+        if (gpu_ptrs.empty()) {
+            throw std::runtime_error("Cannot combine empty GPU pointers array");
+        }
+
+        // 创建结果tensor，形状为[gpu_ptrs.size()]
+        size_t seq_len = gpu_ptrs.size();
+        Tensor<T> result({seq_len}, device);
+
+        if (device != Device::CUDA) {
+            throw std::runtime_error("combine_gpu_ptrs only supports CUDA device");
+        }
+
+        // 为每个指针分配临时内存并复制数据
+        for (size_t i = 0; i < seq_len; ++i) {
+            // 从GPU指针复制到结果tensor的对应位置
+            checkCudaError(cudaMemcpy(result.data_ptr() + i,    // 目标位置
+                                      gpu_ptrs[i],              // 源GPU指针
+                                      sizeof(T),                // 每个元素的大小
+                                      cudaMemcpyDeviceToDevice  // 设备到设备的复制
+                                      ));
+        }
+
+        return result;
+    }
+
     // 默认构造函数（CPU 模式，空 tensor）
     Tensor()
         : data_(std::make_shared<std::vector<T>>()),

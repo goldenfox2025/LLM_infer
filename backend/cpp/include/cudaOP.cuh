@@ -62,7 +62,6 @@ void init_curand(curandState *d_states, unsigned long long seed, int offset,
                  cudaStream_t stream = nullptr);
 // 工具函数声明
 void checkCudaError(cudaError_t err);
-void print_cuda_memory_usage(const char *location);
 
 template <typename T>
 void add_rms(Tensor<T> *output, Tensor<T> *input, const Tensor<T> *add_,
@@ -122,12 +121,25 @@ uint32_t *sample(Tensor<T> &&input, float temperature, float top_p,
                  size_t top_k, curandState *d_states,
                  cudaStream_t stream = nullptr);
 
+// 采样函数的变体，将结果写入指定的GPU内存位置
+template <typename T>
+void sample_to_fixed(Tensor<T> &&input, uint32_t *output_ptr, float temperature,
+                     float top_p, size_t top_k, curandState *d_states,
+                     cudaStream_t stream = nullptr);
+
 // 批量采样函数：对输入的每个序列位置进行采样，返回指向设备端采样结果的指针数组
 template <typename T>
 std::vector<uint32_t *> sample_batch(Tensor<T> &&logits, float temperature,
                                      float top_p, size_t top_k,
                                      curandState *d_states,
                                      cudaStream_t stream = nullptr);
+
+// 批量采样函数的变体，将结果写入指定的GPU内存位置数组
+template <typename T>
+void sample_batch_to_fixed(Tensor<T> &&logits, uint32_t *output_ptr,
+                           float temperature, float top_p, size_t top_k,
+                           curandState *d_states,
+                           cudaStream_t stream = nullptr);
 
 // 计算注意力分数（多头注意力机制相关算子）
 template <typename T>

@@ -74,10 +74,10 @@ __global__ void scale_logits_and_init_indices_kernel(
 // BLOCK_DIM_X: CUDA 块的大小 (用于 CUB 和并行计算)
 template <typename T, int BLOCK_DIM_X>
 __global__ void sample_from_sorted_topk_kernel(
-    const T* __restrict__ d_sorted_topk_logits,  // 输入: 排序后的 Top-K logits
-                                                 // (设备指针)
-    const int* __restrict__ d_sorted_topk_indices,  // 输入: 排序后的 Top-K 索引
-                                                    // (设备指针)
+    const T* __restrict__ d_sorted_topk_logits,     // 输入: 排序后的 Top-K
+                                                    // logits (设备指针)
+    const int* __restrict__ d_sorted_topk_indices,  // 输入: 排序后的 Top-K
+                                                    // 索引 (设备指针)
     size_t k,  // 输入: Top-K 中的 'k' 值 (必须 <= MAX_TOPK)
     const float* __restrict__ d_max_val_ptr,  // 输入: 所有缩放后 logits
                                               // 的最大值 (设备指针)
@@ -384,7 +384,7 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
   // 返回指向设备端采样结果的指针
   return d_sampled_index;
 }
-
+#include "common.hpp"
 // 批量采样函数
 // 功能: 对输入的每个序列位置进行采样，返回指向设备端采样结果的指针数组
 // 输入:
@@ -442,17 +442,66 @@ std::vector<uint32_t*> sample_batch(Tensor<T>&& logits, float temperature,
     // 使用slice方法，需要为每个维度提供start和end向量
     std::vector<size_t> start = {i, 0};
     std::vector<size_t> end = {i + 1, vocab_size};
-    Tensor<T> logit_view = logits.slice(start, end).view({1, vocab_size});
-
-    // 调用单个token的sample函数
+    Tensor<T> logit_view = logits.slice(start, end);
     uint32_t* token_ptr = sample(std::move(logit_view), temperature, top_p,
                                  top_k, d_states, stream);
-
-    // 将结果指针添加到结果向量
     result_tokens.push_back(token_ptr);
   }
 
   return result_tokens;
+}
+
+// 采样函数的变体，将结果写入指定的GPU内存位置
+template <typename T>
+void sample_to_fixed(Tensor<T>&& input, uint32_t* output_ptr, float temperature,
+                     float top_p, size_t top_k, curandState* d_states,
+                     cudaStream_t stream) {
+  // 使用原始sample函数获取采样结果
+  uint32_t* sampled_ptr =
+      sample(std::move(input), temperature, top_p, top_k, d_states, stream);
+
+  // 将结果复制到指定的输出位置
+  cudaMemcpyAsync(output_ptr, sampled_ptr, sizeof(uint32_t),
+                  cudaMemcpyDeviceToDevice, stream);
+
+  // 释放原始sample函数分配的内存
+  cudaFree(sampled_ptr);
+}
+
+// 批量采样函数的变体，将结果写入指定的GPU内存位置数组
+template <typename T>
+void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr,
+                           float temperature, float top_p, size_t top_k,
+                           curandState* d_states, cudaStream_t stream) {
+  // --- 输入验证 ---
+  if (logits.device() != Device::CUDA) {
+    throw std::runtime_error("输入张量必须在 CUDA 设备上");
+  }
+  // Top-K 采样至少需要 k=1
+  if (top_k == 0) {
+    throw std::runtime_error("top_k 必须至少为 1");
+  }
+
+  const auto& shape = logits.sizes();
+  if (shape.size() != 2 || shape[0] == 0 || shape[1] == 0) {
+    throw std::runtime_error(
+        "输入张量必须是二维且维度非零 [seq_len, vocab_size]");
+  }
+
+  const size_t seq_len = shape[0];
+  const size_t vocab_size = shape[1];
+
+  // 为每个序列位置创建一个视图并调用sample_to_fixed函数
+  for (size_t i = 0; i < seq_len; i++) {
+    // 创建当前位置logits的视图
+    std::vector<size_t> start = {i, 0};
+    std::vector<size_t> end = {i + 1, vocab_size};
+    Tensor<T> logit_view = logits.slice(start, end);
+
+    // 调用单个token的sample_to_fixed函数，将结果写入output_ptr[i]
+    sample_to_fixed(std::move(logit_view), output_ptr + i, temperature, top_p,
+                    top_k, d_states, stream);
+  }
 }
 
 // --- 模板显式实例化 ---
@@ -462,12 +511,28 @@ template uint32_t* sample<float>(Tensor<float>&&, float, float, size_t,
 template uint32_t* sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float,
                                          size_t, curandState*, cudaStream_t);
 
+// 为 float 和 __nv_bfloat16 类型实例化 sample_to_fixed 函数
+template void sample_to_fixed<float>(Tensor<float>&&, uint32_t*, float, float,
+                                     size_t, curandState*, cudaStream_t);
+template void sample_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, uint32_t*,
+                                             float, float, size_t, curandState*,
+                                             cudaStream_t);
+
 // 为 float 和 __nv_bfloat16 类型实例化 sample_batch 函数
 template std::vector<uint32_t*> sample_batch<float>(Tensor<float>&&, float,
                                                     float, size_t, curandState*,
                                                     cudaStream_t);
 template std::vector<uint32_t*> sample_batch<__nv_bfloat16>(
     Tensor<__nv_bfloat16>&&, float, float, size_t, curandState*, cudaStream_t);
+
+// 为 float 和 __nv_bfloat16 类型实例化 sample_batch_to_fixed 函数
+template void sample_batch_to_fixed<float>(Tensor<float>&&, uint32_t*, float,
+                                           float, size_t, curandState*,
+                                           cudaStream_t);
+template void sample_batch_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&,
+                                                   uint32_t*, float, float,
+                                                   size_t, curandState*,
+                                                   cudaStream_t);
 
 }  // namespace cuda_OP
 
