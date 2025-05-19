@@ -135,9 +135,16 @@ std::vector<uint32_t*> SpeculativeDecoder<T>::generate_draft_tokens_gpu(uint32_t
                                                                         float temperature, float top_p, size_t top_k) {
     // 预分配GPU指针数组，避免频繁扩容
     std::vector<uint32_t*> gpu_tokens;
+    gpu_tokens.push_back(input_token);
     int initial_kv_size = draft_kv_cache_.size();
     try {
         uint32_t* d_current_token = input_token;
+
+        // 复制打印第一个token
+        uint32_t first_token_value;
+        cudaMemcpyAsync(&first_token_value, d_current_token, sizeof(uint32_t), cudaMemcpyDeviceToHost, draft_stream_);
+        cudaStreamSynchronize(draft_stream_);
+        std::cout << "【草稿模型】生成token[0]: " << first_token_value << std::endl;
         // 生成剩余token，使用forward进行自回归生成
         for (size_t i = 0; i < num_tokens; i++) {
             // 构造输入张量，直接使用GPU上的指针
@@ -152,6 +159,7 @@ std::vector<uint32_t*> SpeculativeDecoder<T>::generate_draft_tokens_gpu(uint32_t
             if (next_token == nullptr) {
                 // 如果生成失败，需要将KV缓存大小调整回实际使用的大小
                 draft_kv_cache_.resize(initial_kv_size + i);
+                std::cout << "【草稿模型】生成失败，提前结束生成" << std::endl;
                 break;
             }
 
@@ -179,13 +187,6 @@ std::vector<uint32_t*> SpeculativeDecoder<T>::generate_draft_tokens_gpu(uint32_t
                 // 对于中间的token，我们可以继续生成下一个token而不等待
                 // 这里可以使用事件来检查前一个操作是否完成，但为了简化，我们暂时不做这个优化
             }
-        }
-
-        size_t expected_size = initial_kv_size + gpu_tokens.size();
-        if (draft_kv_cache_.size() != expected_size) {
-            // 调整KV缓存大小为正确的值
-            std::cout << "【草稿模型】调整KV缓存大小为: " << expected_size << std::endl;
-            draft_kv_cache_.resize(expected_size);
         }
 
         std::cout << "【草稿模型】本次共生成 " << gpu_tokens.size() << " 个token" << std::endl;
@@ -225,7 +226,10 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
             Tensor<uint32_t> input_tensor({current_ids.begin(), current_ids.end()}, {current_ids.size()}, device_);
             uint32_t* first_token = target_model_->prefill(&input_tensor, thread_pool_, &target_kv_cache_, top_k,
                                                            temperature, top_p, d_states);
-
+            // // 再进行一次forward
+            // target_kv_cache_.resize(target_kv_cache_.size() + 1);
+            // uint32_t* first_token_forward = target_model_->forward(&input_tensor, thread_pool_, &target_kv_cache_,
+            //                                                        top_k, temperature, top_p, d_states);
             if (first_token == nullptr) {
                 std::cout << "警告: 目标模型初始预填充返回空指针" << std::endl;
                 return;
@@ -246,7 +250,7 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
             }
         }
         uint32_t first_draft_token_value = -1;
-        current_ids.push_back(first_target_token_value);
+        // current_ids.push_back(first_target_token_value);
         // 2. 草稿模型初始化 - 同样预分配内存并使用批量处理
         {
             // 为草稿模型分配空间
@@ -264,7 +268,8 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
                             main_stream_);
             cudaStreamSynchronize(main_stream_);  // 确保拷贝完成
         }
-
+        current_ids.push_back(first_target_token_value);
+        // current_ids.pop_back();
         std::cout << "草稿模型初始化完成，第一个token值为: " << first_draft_token_value << std::endl;
         // 3. 不需要额外分配GPU内存，直接使用预分配的重用内存
         // 将最大迭代次数限制为剩余的生成长度
@@ -405,19 +410,21 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
         size_t original_cache_size = target_kv_cache_.size();
         std::cout << "【验证】目标模型当前KV缓存大小: " << original_cache_size << std::endl;
         // 预先扩展KV缓存到最大可能的大小，避免频繁调整
-        target_kv_cache_.resize(input_sequence.size());
-        std::cout << "【验证】目标模型预扩展KV缓存大小: " << target_kv_cache_.size() << std::endl;
+        target_kv_cache_.resize(original_cache_size + 1);
+        std::cout << "【验证】为下轮推理扩展KV缓存: " << target_kv_cache_.size() << std::endl;
 
         // 记录最后一个目标模型生成的token
         uint32_t last_target_token_value = 0;
         int found_mismatch = -1;
 
-        std::cout << "【验证开始】准备验证草稿模型生成的 " << draft_tokens_gpu.size() << " 个token" << std::endl;
+        std::cout << "【验证开始】准备验证草稿模型生成的 " << draft_tokens_gpu.size() - 1 << " 个token" << std::endl;
 
         // 使用prefill处理整个前缀序列
-        Tensor<uint32_t> input_tensor({prefix_tokens.begin(), prefix_tokens.end()}, {prefix_tokens.size()}, device_);
+        // Tensor<uint32_t> input_tensor({prefix_tokens.begin(), prefix_tokens.end()}, {prefix_tokens.size()}, device_);
+
+        Tensor<uint32_t> input_tensor(draft_tokens_gpu[0], {1}, device_);
         uint32_t* target_token =
-            target_model_->prefill(&input_tensor, thread_pool_, &target_kv_cache_, top_k, temperature, top_p, d_states);
+            target_model_->forward(&input_tensor, thread_pool_, &target_kv_cache_, top_k, temperature, top_p, d_states);
 
         // 检查prefill是否成功
         if (target_token == nullptr) {
@@ -437,11 +444,11 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
         size_t current_cache_size = prefix_tokens.size();
         uint32_t* last_target_token;
         // 从第0个token开始验证所有token
-        for (size_t i = 0; i < draft_tokens_gpu.size(); i++) {
-            std::cout << "【验证】验证草稿模型token地址: " << draft_tokens_gpu[i] << std::endl;
+        for (size_t i = 0; i < draft_tokens_gpu.size() - 1; i++) {
+            std::cout << "【验证】验证草稿模型token地址: " << draft_tokens_gpu[i + 1] << std::endl;
             // 直接从GPU获取token值，避免不必要的CPU复制
             uint32_t draft_token_value;
-            cudaMemcpyAsync(&draft_token_value, draft_tokens_gpu[i], sizeof(uint32_t), cudaMemcpyDeviceToHost,
+            cudaMemcpyAsync(&draft_token_value, draft_tokens_gpu[i + 1], sizeof(uint32_t), cudaMemcpyDeviceToHost,
                             verify_stream);
 
             // 这里必须同步，因为我们需要比较token值
@@ -469,13 +476,13 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
             verified_tokens.push_back(last_target_token_value);  // 直接添加到验证通过的token
 
             // 如果已经是最后一个token，不需要再生成下一个
-            if (i == draft_tokens_gpu.size() - 1) {
+            if (i == draft_tokens_gpu.size() - 2) {
                 break;
             }
 
             // 准备验证下一个token
             // 直接使用GPU上的草稿token作为输入创建张量，避免额外的CPU-GPU拷贝
-            Tensor<uint32_t> next_input(draft_tokens_gpu[i], {1}, device_);
+            Tensor<uint32_t> next_input(draft_tokens_gpu[i + 1], {1}, device_);
 
             // KV缓存已经提前扩展，只需要更新当前大小记录
             current_cache_size++;
@@ -501,9 +508,8 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
         std::cout << "是否匹配: " << found_mismatch << std::endl;
         // 如果有不匹配的token，将目标模型生成的替代token添加到列表中
         if (found_mismatch != -1 && last_target_token_value >= 0) {
-            draft_kv_cache_.resize(draft_kv_cache_.size() - (draft_tokens_gpu.size() - found_mismatch) + 1);
-            // Tensor<uint32_t> next_input(last_target_token, {1}, device_);
-            // draft_model_->forward(&next_input, thread_pool_, &draft_kv_cache_, top_k, temperature, top_p, d_states);
+            draft_kv_cache_.resize(draft_kv_cache_.size() - draft_tokens_gpu.size() + found_mismatch + 2);
+            std::cout << "【验证】草稿模型回退KV缓存大小: " << draft_kv_cache_.size() << std::endl;
             verified_tokens.push_back(last_target_token_value);
         }
 
