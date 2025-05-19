@@ -143,6 +143,7 @@ std::vector<uint32_t*> SpeculativeDecoder<T>::generate_draft_tokens_gpu(uint32_t
             // 构造输入张量，直接使用GPU上的指针
             Tensor<uint32_t> input(d_current_token, {1}, device_);
             draft_kv_cache_.resize(draft_kv_cache_.size() + 1);
+            std::cout << "【草稿模型】KV缓存大小: " << draft_kv_cache_.size() << std::endl;
             uint32_t* next_token =
                 draft_model_->forward(&input, thread_pool_, &draft_kv_cache_, top_k, temperature, top_p, d_states);
             // 检查生成是否成功
@@ -180,11 +181,10 @@ std::vector<uint32_t*> SpeculativeDecoder<T>::generate_draft_tokens_gpu(uint32_t
             }
         }
 
-        // 验证最终KV缓存大小是否与生成的token数量一致
-        // 这里应该是initial_kv_size + gpu_tokens.size() - 1，因为第一个是输入token
         size_t expected_size = initial_kv_size + gpu_tokens.size();
         if (draft_kv_cache_.size() != expected_size) {
             // 调整KV缓存大小为正确的值
+            std::cout << "【草稿模型】调整KV缓存大小为: " << expected_size << std::endl;
             draft_kv_cache_.resize(expected_size);
         }
 
@@ -388,6 +388,7 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
 
     // 检查输入有效性
     if (draft_tokens_gpu.empty() || draft_tokens_gpu.size() == 1) {
+        std::cout << "【验证】草稿模型生成的token数量为0或1，直接返回" << std::endl;
         return 0;  // 如果没有token或只有一个token（输入token），直接返回
     }
     auto qwen3 = std::dynamic_pointer_cast<Qwen3Model<T>>(target_model_);
@@ -434,7 +435,7 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
 
         // 现在使用forward逐个验证草稿token
         size_t current_cache_size = prefix_tokens.size();
-
+        uint32_t* last_target_token;
         // 从第0个token开始验证所有token
         for (size_t i = 0; i < draft_tokens_gpu.size(); i++) {
             std::cout << "【验证】验证草稿模型token地址: " << draft_tokens_gpu[i] << std::endl;
@@ -452,6 +453,7 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
             // 检查token是否匹配
             if (last_target_token_value != draft_token_value) {
                 found_mismatch = i;
+
                 std::cout << "【验证】不匹配! 位置: " << i << ", 目标模型: " << last_target_token_value
                           << ", 草稿模型: " << draft_token_value << std::endl;
                 break;
@@ -482,7 +484,7 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
             target_kv_cache_.resize(target_kv_cache_.size() + 1);
             uint32_t* next_token = target_model_->forward(&next_input, thread_pool_, &target_kv_cache_, top_k,
                                                           temperature, top_p, d_states);
-
+            last_target_token = next_token;
             // 检查是否生成成功
             if (next_token == nullptr) {
                 break;
@@ -495,12 +497,13 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
         }
 
         // 调整KV缓存大小为实际使用的大小
-        target_kv_cache_.resize(current_cache_size + (found_mismatch ? 1 : 0));
+        // target_kv_cache_.resize(current_cache_size);
         std::cout << "是否匹配: " << found_mismatch << std::endl;
         // 如果有不匹配的token，将目标模型生成的替代token添加到列表中
         if (found_mismatch != -1 && last_target_token_value >= 0) {
-            draft_kv_cache_.resize(draft_kv_cache_.size() - (draft_tokens_gpu.size() - found_mismatch));
-
+            draft_kv_cache_.resize(draft_kv_cache_.size() - (draft_tokens_gpu.size() - found_mismatch) + 1);
+            // Tensor<uint32_t> next_input(last_target_token, {1}, device_);
+            // draft_model_->forward(&next_input, thread_pool_, &draft_kv_cache_, top_k, temperature, top_p, d_states);
             verified_tokens.push_back(last_target_token_value);
         }
 
