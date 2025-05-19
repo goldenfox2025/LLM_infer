@@ -42,8 +42,8 @@ class SpeculativeDecoder {
    public:
     // 构造函数，接收目标模型和草稿模型
     SpeculativeDecoder(std::shared_ptr<BaseModel> target_model, std::shared_ptr<BaseModel> draft_model,
-                       size_t spec_length = 12,   // 增加默认投机长度为5
-                       size_t thread_count = 8);  // 增加线程池大小参数，默认8线程
+                       size_t spec_length = 12,   // 投机长度默认为12
+                       size_t thread_count = 8);  // 线程池大小参数，默认8线程
 
     // 析构函数，释放CUDA资源
     ~SpeculativeDecoder();
@@ -51,6 +51,16 @@ class SpeculativeDecoder {
     // 生成文本，通过回调函数返回每个token
     void generate_with_callback(const std::vector<uint32_t>& input_ids, size_t max_length, float temperature,
                                 float top_p, size_t top_k, std::function<void(uint32_t)> callback);
+
+    // 设置是否使用基于概率比值的投机采样
+    void set_use_probability_ratio(bool use_ratio) {
+        use_probability_ratio_ = use_ratio;
+    }
+
+    // 获取当前是否使用基于概率比值的投机采样
+    bool get_use_probability_ratio() const {
+        return use_probability_ratio_;
+    }
 
    private:
     // 目标模型（大模型）
@@ -69,10 +79,16 @@ class SpeculativeDecoder {
     uint32_t* d_reuse_token;
     // 用于存储草稿模型生成的tokens的固定GPU内存
     uint32_t* d_draft_tokens;
+    // 用于存储草稿模型生成的token概率的固定GPU内存
+    float* d_draft_probs;
+    // 用于存储随机数的GPU内存
+    float* d_random_values;
     // 设备类型
     Device device_;
     // 投机长度（一次生成多少个token）
     size_t spec_length_;
+    // 是否使用基于概率比值的投机采样
+    bool use_probability_ratio_ = true;
 
     // CUDA流，用于异步操作
     cudaStream_t main_stream_;    // 主流，用于主要操作
@@ -82,20 +98,44 @@ class SpeculativeDecoder {
     // 内存标签，用于固定内存分配
     static constexpr const char* kReuseTokenTag = "spec_reuse_token";
     static constexpr const char* kDraftTokensTag = "spec_draft_tokens";
+    static constexpr const char* kDraftProbsTag = "spec_draft_probs";
+    static constexpr const char* kRandomValuesTag = "spec_random_values";
 
     // 初始化CUDA资源
     void init_cuda_resources();
     // 释放CUDA资源
     void free_cuda_resources();
 
-    // 批量验证草稿模型生成的token - GPU指针版本（直接处理GPU上的指针）
+    // 批量验证草稿模型生成的token - 贪心方法（比较token ID是否相同）
+    size_t verify_draft_tokens_greedy(const std::vector<uint32_t>& prefix_tokens,
+                                      std::vector<uint32_t*>& draft_tokens_gpu, float temperature, float top_p,
+                                      size_t top_k, std::vector<uint32_t>& verified_tokens, cudaStream_t stream);
+
+    // 批量验证草稿模型生成的token - 基于概率比值的方法
+    size_t verify_draft_tokens_prob_ratio(const std::vector<uint32_t>& prefix_tokens,
+                                          std::vector<uint32_t*>& draft_tokens_gpu, float temperature, float top_p,
+                                          size_t top_k, std::vector<uint32_t>& verified_tokens, cudaStream_t stream);
+
+    // 批量验证草稿模型生成的token - 根据设置选择验证方法
     size_t verify_draft_tokens_gpu(const std::vector<uint32_t>& prefix_tokens, std::vector<uint32_t*>& draft_tokens_gpu,
                                    float temperature, float top_p, size_t top_k, std::vector<uint32_t>& verified_tokens,
-                                   cudaStream_t stream);
+                                   cudaStream_t stream) {
+        if (use_probability_ratio_) {
+            return verify_draft_tokens_prob_ratio(prefix_tokens, draft_tokens_gpu, temperature, top_p, top_k,
+                                                  verified_tokens, stream);
+        } else {
+            return verify_draft_tokens_greedy(prefix_tokens, draft_tokens_gpu, temperature, top_p, top_k,
+                                              verified_tokens, stream);
+        }
+    }
 
     // 使用草稿模型生成多个token，直接返回GPU指针数组
     std::vector<uint32_t*> generate_draft_tokens_gpu(uint32_t* input_token, size_t num_tokens, float temperature,
                                                      float top_p, size_t top_k);
+
+    // 使用草稿模型生成多个token及其概率，直接返回GPU指针数组
+    std::pair<std::vector<uint32_t*>, std::vector<float*>> generate_draft_tokens_with_probs_gpu(
+        uint32_t* input_token, size_t num_tokens, float temperature, float top_p, size_t top_k);
 
     // 将草稿token GPU指针组合成一个tensor
     Tensor<uint32_t> combine_draft_tokens(std::vector<uint32_t*>& draft_tokens_gpu);

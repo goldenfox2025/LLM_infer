@@ -99,6 +99,33 @@ void SpeculativeDecoder<T>::init_cuda_resources() {
     if (d_draft_tokens == nullptr) {
         (cudaMalloc(&d_draft_tokens, sizeof(uint32_t) * (spec_length_ + 1)));
     }
+
+    // 分配草稿模型token概率的固定内存
+    if (GlobalCudaMemoryPool::has_tag(kDraftProbsTag)) {
+        d_draft_probs = static_cast<float*>(GlobalCudaMemoryPool::get_tagged_memory(kDraftProbsTag));
+    } else {
+        d_draft_probs = static_cast<float*>(
+            GlobalCudaMemoryPool::allocate_tagged(kDraftProbsTag,
+                                                  sizeof(float) * (spec_length_ + 1)));  // +1 为输入token
+    }
+
+    // 如果内存池分配失败，则使用普通的CUDA内存分配
+    if (d_draft_probs == nullptr) {
+        (cudaMalloc(&d_draft_probs, sizeof(float) * (spec_length_ + 1)));
+    }
+
+    // 分配随机数的固定内存
+    if (GlobalCudaMemoryPool::has_tag(kRandomValuesTag)) {
+        d_random_values = static_cast<float*>(GlobalCudaMemoryPool::get_tagged_memory(kRandomValuesTag));
+    } else {
+        d_random_values =
+            static_cast<float*>(GlobalCudaMemoryPool::allocate_tagged(kRandomValuesTag, sizeof(float) * spec_length_));
+    }
+
+    // 如果内存池分配失败，则使用普通的CUDA内存分配
+    if (d_random_values == nullptr) {
+        (cudaMalloc(&d_random_values, sizeof(float) * spec_length_));
+    }
 }
 
 // 释放CUDA资源
@@ -139,6 +166,18 @@ void SpeculativeDecoder<T>::free_cuda_resources() {
     if (d_draft_tokens != nullptr && !GlobalCudaMemoryPool::has_tag(kDraftTokensTag)) {
         cudaFree(d_draft_tokens);
         d_draft_tokens = nullptr;
+    }
+
+    // 释放草稿模型token概率的固定内存
+    if (d_draft_probs != nullptr && !GlobalCudaMemoryPool::has_tag(kDraftProbsTag)) {
+        cudaFree(d_draft_probs);
+        d_draft_probs = nullptr;
+    }
+
+    // 释放随机数的固定内存
+    if (d_random_values != nullptr && !GlobalCudaMemoryPool::has_tag(kRandomValuesTag)) {
+        cudaFree(d_random_values);
+        d_random_values = nullptr;
     }
 }
 
@@ -256,6 +295,130 @@ std::vector<uint32_t*> SpeculativeDecoder<T>::generate_draft_tokens_gpu(uint32_t
     return gpu_tokens;
 }
 
+// 使用草稿模型生成多个token及其概率，直接返回GPU指针数组
+template <typename T>
+std::pair<std::vector<uint32_t*>, std::vector<float*>> SpeculativeDecoder<T>::generate_draft_tokens_with_probs_gpu(
+    uint32_t* input_token, size_t num_tokens, float temperature, float top_p, size_t top_k) {
+    // 预分配GPU指针数组，避免频繁扩容
+    std::vector<uint32_t*> gpu_tokens;
+    std::vector<float*> gpu_probs;
+    int initial_kv_size = draft_kv_cache_.size();
+
+    // 计时开始 - 整个草稿生成过程
+    GpuTimer draft_total_timer;
+    draft_total_timer.start();
+
+    try {
+        // 将输入token复制到固定内存的第一个位置
+        cudaMemcpyAsync(d_draft_tokens, input_token, sizeof(uint32_t), cudaMemcpyDeviceToDevice, draft_stream_);
+
+        // 添加输入token指针到结果数组
+        gpu_tokens.push_back(d_draft_tokens);
+        gpu_probs.push_back(d_draft_probs);  // 输入token没有概率值，但为了保持索引一致，仍添加
+
+        // 获取Qwen3模型实例（所有模型都应该是Qwen3类型）
+        auto qwen3 = std::dynamic_pointer_cast<Qwen3Model<T>>(draft_model_);
+        if (!qwen3) {
+            throw std::runtime_error("草稿模型必须是Qwen3Model类型");
+        }
+
+        std::cout << "【草稿】开始生成 " << num_tokens << " 个草稿token（带概率）" << std::endl;
+        float total_forward_time = 0.0f;
+        float total_sample_time = 0.0f;
+
+        // 生成剩余token，使用forward_cuda进行自回归生成
+        for (size_t i = 0; i < num_tokens; i++) {
+            // 构造输入张量，使用当前token位置
+            uint32_t* d_current_token = d_draft_tokens + i;
+            Tensor<uint32_t> input(d_current_token, {1}, device_);
+
+            // 扩展KV缓存
+            draft_kv_cache_.resize(draft_kv_cache_.size() + 1);
+
+            // 使用sample_to_fixed_with_prob直接将结果写入固定内存的下一个位置
+            uint32_t* next_token_ptr = d_draft_tokens + i + 1;
+            float* next_prob_ptr = d_draft_probs + i + 1;
+
+            // 计时开始 - forward
+            GpuTimer forward_timer;
+            forward_timer.start();
+
+            // 使用forward_cuda获取logits
+            Tensor<T> logits = qwen3->forward_cuda(&input, &draft_kv_cache_);
+
+            forward_timer.stop();
+            float forward_time = forward_timer.milliseconds();
+            total_forward_time += forward_time;
+
+            // 计时开始 - 采样
+            GpuTimer sample_timer;
+            sample_timer.start();
+
+            // 使用sample_to_fixed_with_prob将token和概率写入固定内存位置
+            cuda_OP::sample_to_fixed_with_prob(std::move(logits), next_token_ptr, next_prob_ptr, temperature, top_p,
+                                               top_k, d_states, draft_stream_);
+
+            sample_timer.stop();
+            float sample_time = sample_timer.milliseconds();
+            total_sample_time += sample_time;
+
+            // 保存GPU指针，避免不必要的GPU-CPU数据传输
+            gpu_tokens.push_back(next_token_ptr);
+            gpu_probs.push_back(next_prob_ptr);
+
+            // 只在最后一次迭代检查EOS token，避免频繁的同步
+            if (i == num_tokens - 1) {
+                // 检查是否需要提前停止生成（例如EOS token）
+                uint32_t token_value;
+                cudaMemcpyAsync(&token_value, next_token_ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost, draft_stream_);
+                cudaStreamSynchronize(draft_stream_);
+
+                // 如果是EOS token，提前结束生成
+                if (token_value == draft_model_->get_eos_token_id()) {
+                    break;
+                }
+            }
+        }
+
+        draft_total_timer.stop();
+        float draft_total_time = draft_total_timer.milliseconds();
+
+        // 打印草稿生成的耗时统计
+        std::cout << "【草稿】生成了 " << gpu_tokens.size() - 1 << " 个草稿token（带概率）" << std::endl;
+
+        // 打印生成的草稿token和概率
+        std::vector<uint32_t> host_draft_tokens(gpu_tokens.size() - 1);
+        std::vector<float> host_draft_probs(gpu_probs.size() - 1);
+        for (size_t i = 1; i < gpu_tokens.size(); i++) {
+            uint32_t token_value;
+            float prob_value;
+            cudaMemcpyAsync(&token_value, gpu_tokens[i], sizeof(uint32_t), cudaMemcpyDeviceToHost, draft_stream_);
+            cudaMemcpyAsync(&prob_value, gpu_probs[i], sizeof(float), cudaMemcpyDeviceToHost, draft_stream_);
+            host_draft_tokens[i - 1] = token_value;
+            host_draft_probs[i - 1] = prob_value;
+        }
+        cudaStreamSynchronize(draft_stream_);
+
+        std::cout << "【草稿Token及概率】" << std::endl;
+        for (size_t i = 0; i < host_draft_tokens.size(); i++) {
+            std::cout << host_draft_tokens[i] << "(" << host_draft_probs[i] << ") ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "【耗时】草稿模型forward: " << total_forward_time
+                  << "ms (平均: " << (total_forward_time / (gpu_tokens.size() - 1)) << "ms/token), "
+                  << "采样: " << total_sample_time << "ms (平均: " << (total_sample_time / (gpu_tokens.size() - 1))
+                  << "ms/token), "
+                  << "总耗时: " << draft_total_time << "ms" << std::endl;
+
+    } catch (const std::exception& e) {
+        // 记录错误并返回已生成的token
+        std::cout << "【草稿】生成token时出错: " << e.what() << std::endl;
+    }
+
+    return {gpu_tokens, gpu_probs};
+}
+
 // 批处理批量从GPU读取token值
 template <typename T>
 void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& input_ids, size_t max_length,
@@ -273,6 +436,8 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
         }
 
         std::cout << "【初始化】输入序列长度: " << current_ids.size() << std::endl;
+        std::cout << "【初始化】使用" << (use_probability_ratio_ ? "基于概率比值的" : "贪心") << "投机采样"
+                  << std::endl;
 
         uint32_t first_target_token_value = -1;
         // 1. 目标模型初始化 - 一次性预分配足够的GPU内存
@@ -342,9 +507,6 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
         }
 
         current_ids.push_back(first_target_token_value);
-        // current_ids.pop_back();
-        // std::cout << "草稿模型初始化完成，第一个token值为: "
-        // << first_draft_token_value << std::endl;
         // 3. 不需要额外分配GPU内存，直接使用预分配的重用内存
         // 将最大迭代次数限制为剩余的生成长度
         size_t max_iterations = max_length - current_ids.size();
@@ -384,22 +546,29 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
                 std::cout << "【当前Token】" << last_token << std::endl;
                 cudaMemcpyAsync(d_reuse_token, &last_token, sizeof(uint32_t), cudaMemcpyHostToDevice, main_stream_);
                 cudaStreamSynchronize(main_stream_);  // 确保拷贝完成
+
                 std::vector<uint32_t*> gpu_tokens;
+                std::vector<float*> gpu_probs;
 
                 // 计时开始 - 草稿生成
                 GpuTimer draft_gen_timer;
                 draft_gen_timer.start();
 
-                gpu_tokens = generate_draft_tokens_gpu(d_reuse_token, spec_length_, temperature, top_p, top_k);
+                if (use_probability_ratio_) {
+                    // 使用带概率的草稿生成
+                    auto [tokens, probs] =
+                        generate_draft_tokens_with_probs_gpu(d_reuse_token, spec_length_, temperature, top_p, top_k);
+                    gpu_tokens = tokens;
+                    gpu_probs = probs;
+                } else {
+                    // 使用普通的草稿生成
+                    gpu_tokens = generate_draft_tokens_gpu(d_reuse_token, spec_length_, temperature, top_p, top_k);
+                }
 
                 draft_gen_timer.stop();
                 float draft_gen_time = draft_gen_timer.milliseconds();
 
-                // 可选：将草稿token组合成一个tensor用于调试或其他处理
-                // Tensor<uint32_t> combined_tokens = combine_draft_tokens(gpu_tokens);
-
                 // 验证草稿模型生成的token
-                // 直接使用GPU指针进行验证，避免不必要的GPU-CPU数据传输
                 std::vector<uint32_t> verified_tokens;
                 verified_tokens.reserve(gpu_tokens.size());
 
@@ -407,7 +576,7 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
                 GpuTimer verify_timer;
                 verify_timer.start();
 
-                // 使用新的GPU版本的验证函数
+                // 使用验证函数
                 size_t match_length = verify_draft_tokens_gpu(current_ids, gpu_tokens, temperature, top_p, top_k,
                                                               verified_tokens, main_stream_);
 
@@ -491,12 +660,12 @@ void SpeculativeDecoder<T>::generate_with_callback(const std::vector<uint32_t>& 
     }
 }
 
-// 批量验证草稿模型生成的token - GPU指针版本
+// 批量验证草稿模型生成的token - 贪心方法（比较token ID是否相同）
 template <typename T>
-size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t>& prefix_tokens,
-                                                      std::vector<uint32_t*>& draft_tokens_gpu, float temperature,
-                                                      float top_p, size_t top_k, std::vector<uint32_t>& verified_tokens,
-                                                      cudaStream_t stream) {
+size_t SpeculativeDecoder<T>::verify_draft_tokens_greedy(const std::vector<uint32_t>& prefix_tokens,
+                                                         std::vector<uint32_t*>& draft_tokens_gpu, float temperature,
+                                                         float top_p, size_t top_k,
+                                                         std::vector<uint32_t>& verified_tokens, cudaStream_t stream) {
     // 记录最长匹配长度
     int max_match_length = 0;
     verified_tokens.clear();
@@ -680,6 +849,195 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_gpu(const std::vector<uint32_t
         return 0;
     }
 }
+
+// 批量验证草稿模型生成的token - 基于概率比值的方法
+template <typename T>
+size_t SpeculativeDecoder<T>::verify_draft_tokens_prob_ratio(const std::vector<uint32_t>& prefix_tokens,
+                                                             std::vector<uint32_t*>& draft_tokens_gpu,
+                                                             float temperature, float top_p, size_t top_k,
+                                                             std::vector<uint32_t>& verified_tokens,
+                                                             cudaStream_t stream) {
+    // 记录最长匹配长度
+    int accepted_length = 0;
+    verified_tokens.clear();
+
+    // 检查输入有效性
+    if (draft_tokens_gpu.empty() || draft_tokens_gpu.size() == 1) {
+        return 0;  // 如果没有token或只有一个token（输入token），直接返回
+    }
+
+    auto qwen3 = std::dynamic_pointer_cast<Qwen3Model<T>>(target_model_);
+    if (!qwen3) {
+        throw std::runtime_error("目标模型必须是Qwen3Model类型");
+    }
+
+    auto draft_qwen3 = std::dynamic_pointer_cast<Qwen3Model<T>>(draft_model_);
+    if (!draft_qwen3) {
+        throw std::runtime_error("草稿模型必须是Qwen3Model类型");
+    }
+
+    try {
+        // 使用验证专用流
+        cudaStream_t verify_stream = verify_stream_;
+
+        // 保存目标模型当前的KV缓存大小
+        size_t original_cache_size = target_kv_cache_.size();
+
+        // 移除最后一个token（这是下一个要生成的token，不是草稿token）
+        draft_tokens_gpu.pop_back();
+
+        // 获取草稿token数量
+        size_t num_draft_tokens = draft_tokens_gpu.size() - 1;  // 减去输入token
+
+        // 打印需要验证的总长度
+        std::cout << "【验证】需要验证的总长度: " << num_draft_tokens << std::endl;
+
+        // 计时开始 - 组合tokens
+        GpuTimer combine_timer;
+        combine_timer.start();
+
+        // 一次性验证所有草稿token
+        // 将草稿token组合成一个tensor，形状为[seqlen]
+        Tensor<uint32_t> combined_tokens = combine_draft_tokens(draft_tokens_gpu);
+
+        combine_timer.stop();
+        float combine_time = combine_timer.milliseconds();
+
+        // 扩展KV缓存以容纳新的token
+        target_kv_cache_.resize(original_cache_size + combined_tokens.numel());
+
+        // 计时开始 - 目标模型prefill
+        GpuTimer prefill_timer;
+        prefill_timer.start();
+
+        // 使用prefill_cuda获取logits - 移除第三个参数false
+        Tensor<T> target_logits = qwen3->prefill_cuda(&combined_tokens, &target_kv_cache_);
+
+        prefill_timer.stop();
+        float prefill_time = prefill_timer.milliseconds();
+
+        // 计时开始 - 生成随机数
+        GpuTimer random_timer;
+        random_timer.start();
+
+        // 生成随机数用于接受/拒绝决策
+        cuda_OP::generate_random_values(d_random_values, num_draft_tokens, d_states, verify_stream);
+
+        random_timer.stop();
+        float random_time = random_timer.milliseconds();
+
+        // 计时开始 - 比较概率
+        GpuTimer compare_timer;
+        compare_timer.start();
+
+        // 分配主机内存用于批量复制token和随机数
+        std::vector<uint32_t> host_draft_tokens(num_draft_tokens);
+        std::vector<float> host_random_values(num_draft_tokens);
+
+        // 批量复制草稿token和随机数到主机内存
+        cudaMemcpyAsync(host_draft_tokens.data(), d_draft_tokens + 1, sizeof(uint32_t) * num_draft_tokens,
+                        cudaMemcpyDeviceToHost, verify_stream);
+        cudaMemcpyAsync(host_random_values.data(), d_random_values, sizeof(float) * num_draft_tokens,
+                        cudaMemcpyDeviceToHost, verify_stream);
+
+        // 等待所有复制完成
+        cudaStreamSynchronize(verify_stream);
+
+        // 逐个验证草稿token
+        bool rejected = false;
+        uint32_t rejected_token = 0;
+
+        for (size_t i = 0; i < num_draft_tokens && !rejected; i++) {
+            // 获取草稿token
+            uint32_t draft_token = host_draft_tokens[i];
+
+            // 获取目标模型对该token的概率
+            float target_prob = cuda_OP::get_token_probability(target_logits, i, draft_token, verify_stream);
+
+            // 从d_draft_probs获取草稿模型对该token的概率
+            float draft_prob;
+            cudaMemcpyAsync(&draft_prob, d_draft_probs + i + 1, sizeof(float), cudaMemcpyDeviceToHost, verify_stream);
+            cudaStreamSynchronize(verify_stream);
+
+            // 计算概率比值
+            float prob_ratio = target_prob / (draft_prob + 1e-10);  // 避免除零
+
+            // 随机接受/拒绝
+            float random_value = host_random_values[i];
+
+            std::cout << "  Token " << i << ": " << draft_token << " (目标概率: " << target_prob
+                      << ", 草稿概率: " << draft_prob << ", 比值: " << prob_ratio << ", 随机值: " << random_value
+                      << ") ";
+
+            if (random_value < std::min(1.0f, prob_ratio)) {
+                // 接受草稿token
+                verified_tokens.push_back(draft_token);
+                accepted_length++;
+                std::cout << "✓ 接受" << std::endl;
+            } else {
+                // 拒绝，使用目标模型采样新token
+                rejected = true;
+
+                // 获取目标模型在当前位置的logits
+                Tensor<T> current_logits = target_logits.slice({i, 0}, {i + 1, target_logits.sizes()[1]});
+
+                // 采样新token
+                uint32_t* target_token_ptr;
+                cudaMalloc(&target_token_ptr, sizeof(uint32_t));
+
+                cuda_OP::sample_to_fixed(std::move(current_logits), target_token_ptr, temperature, top_p, top_k,
+                                         d_states, verify_stream);
+
+                // 复制到主机内存
+                cudaMemcpyAsync(&rejected_token, target_token_ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost,
+                                verify_stream);
+                cudaStreamSynchronize(verify_stream);
+
+                // 添加到验证通过的token列表
+                verified_tokens.push_back(rejected_token);
+
+                // 释放临时内存
+                cudaFree(target_token_ptr);
+
+                std::cout << "✗ 拒绝，替换为: " << rejected_token << std::endl;
+                break;
+            }
+        }
+
+        compare_timer.stop();
+        float compare_time = compare_timer.milliseconds();
+
+        // 调整KV缓存大小
+        if (rejected) {
+            draft_kv_cache_.resize(draft_kv_cache_.size() - num_draft_tokens + accepted_length);
+            target_kv_cache_.resize(original_cache_size + accepted_length + 1);
+        }
+
+        // 打印验证成功的长度和各部分耗时
+        std::cout << "【验证】接受的长度: " << accepted_length << "/" << num_draft_tokens << " ("
+                  << (accepted_length * 100.0 / num_draft_tokens) << "%)" << std::endl;
+
+        // 打印KV缓存调整情况
+        if (rejected) {
+            std::cout << "【KV缓存调整】目标模型: " << target_kv_cache_.size()
+                      << ", 草稿模型: " << draft_kv_cache_.size() << std::endl;
+        } else {
+            std::cout << "【KV缓存调整】全部接受，无需调整" << std::endl;
+        }
+
+        std::cout << "【耗时】组合tokens: " << combine_time << "ms, "
+                  << "目标模型prefill: " << prefill_time << "ms, "
+                  << "生成随机数: " << random_time << "ms, "
+                  << "比较概率: " << compare_time << "ms, "
+                  << "总耗时: " << (combine_time + prefill_time + random_time + compare_time) << "ms" << std::endl;
+
+        return accepted_length;
+    } catch (const std::exception& e) {
+        std::cout << "【验证】验证过程中出错: " << e.what() << std::endl;
+        return 0;
+    }
+}
+
 // 将草稿token GPU指针组合成一个tensor
 template <typename T>
 Tensor<uint32_t> SpeculativeDecoder<T>::combine_draft_tokens(std::vector<uint32_t*>& draft_tokens_gpu) {

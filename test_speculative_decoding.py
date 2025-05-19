@@ -255,7 +255,7 @@ def main():
                 input_ids,
                 callback,
                 max_length=50,  # 减少生成长度，便于观察和分析
-                temperature=0.7,
+                temperature=1,  
                 top_p=0.9,
                 top_k=50
             )
@@ -313,7 +313,7 @@ def main():
                 input_ids,
                 callback,
                 max_length=50,  # 减少生成长度，便于观察和分析
-                temperature=0.7,
+                temperature=1,
                 top_p=0.9,
                 top_k=50
             )
