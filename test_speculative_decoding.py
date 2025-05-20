@@ -177,6 +177,12 @@ def create_callback(q):
     return callback
 
 def main():
+    # 创建logits数据存储目录
+    logits_dirs = ["./logits_data", "./logits_data/target", "./logits_data/draft", "./logits_data/visualizations"]
+    for dir_path in logits_dirs:
+        os.makedirs(dir_path, exist_ok=True)
+    print("已创建logits数据存储目录")
+
     # 设置模型路径（写死）
     target_model_path = "./models/Qwen3-1.7B-AWQ"
     draft_model_path = "./models/Qwen3-0.6B-AWQ"
@@ -210,9 +216,9 @@ def main():
     # 加载草稿模型
     print(f"加载草稿模型: {draft_model_path}")
     draft_config, draft_weights = load_qwen3_model(draft_model_path)
-
+    model_type = "qwen3_awq"  
     # 初始化投机解码器
-    spec_length = 4
+    spec_length = 8
     if not init_speculative_decoder(draft_config, draft_weights, model_type, spec_length):
         print("投机解码器初始化失败")
         return
@@ -257,7 +263,7 @@ def main():
                 max_length=50,  # 减少生成长度，便于观察和分析
                 temperature=1,  
                 top_p=0.9,
-                top_k=50
+                top_k=1
             )
         except Exception as e:
             print(f"标准解码出错: {e}")
@@ -315,7 +321,7 @@ def main():
                 max_length=50,  # 减少生成长度，便于观察和分析
                 temperature=1,
                 top_p=0.9,
-                top_k=50
+                top_k=1
             )
         except Exception as e:
             print(f"投机解码出错: {e}")
@@ -365,6 +371,10 @@ def main():
         print(f"加速比: {speedup:.2f}x")
     else:
         print("无法计算加速比：标准解码或投机解码未生成足够的token")
+    
+    # 提示用户可以运行可视化脚本
+    print("\n数据收集完成！您可以运行以下命令查看logits分布可视化：")
+    print("python visualize_logits.py")
 
 if __name__ == "__main__":
     main()

@@ -28,7 +28,7 @@ SpeculativeDecoder<T>::SpeculativeDecoder(std::shared_ptr<BaseModel> target_mode
                       draft_model->get_head_dim() * draft_model->get_n_kv_heads(), Device::CUDA),
       thread_pool_(thread_count),  // 使用传入的线程数
       device_(Device::CUDA),
-      spec_length_(6),
+      spec_length_(spec_length),
       d_states(nullptr),
       d_reuse_token(nullptr),
       main_stream_(nullptr),
@@ -345,6 +345,13 @@ std::pair<std::vector<uint32_t*>, std::vector<float*>> SpeculativeDecoder<T>::ge
 
             // 使用forward_cuda获取logits
             Tensor<T> logits = qwen3->forward_cuda(&input, &draft_kv_cache_);
+
+            // 保存草稿模型的logits到文件
+            // 使用KV缓存的大小作为绝对位置，减去输入批次的长度得到在生成序列中的位置
+            size_t absolute_position = draft_kv_cache_.size() - 1;  // 当前的绝对位置
+            std::string logits_file = "./logits_data/draft/logits_" + std::to_string(absolute_position) + ".bin";
+            saveTensorToFile(logits, logits_file);
+            std::cout << "已保存草稿模型logits到: " << logits_file << std::endl;
 
             forward_timer.stop();
             float forward_time = forward_timer.milliseconds();
@@ -732,6 +739,19 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_greedy(const std::vector<uint3
         // 使用prefill_cuda获取logits并直接采样到固定内存
         Tensor<T> logits_tensor = qwen3->prefill_cuda(&combined_tokens, &target_kv_cache_);
 
+        // 保存目标模型的logits到文件
+        // 注意：combined_tokens中可能有多个token，每个token对应一个logits输出
+        // 我们需要分别保存每个token位置的logits
+        size_t base_position = original_cache_size;  // 验证开始时的KV缓存位置
+        for (size_t i = 0; i < combined_tokens.numel(); i++) {
+            Tensor<T> single_logits = logits_tensor.slice({i, 0}, {i + 1, logits_tensor.sizes()[1]});
+            // 计算token在整个序列中的绝对位置
+            size_t absolute_position = base_position + i;
+            std::string logits_file = "./logits_data/target/logits_" + std::to_string(absolute_position) + ".bin";
+            saveTensorToFile(single_logits, logits_file);
+            std::cout << "已保存目标模型logits到: " << logits_file << std::endl;
+        }
+
         prefill_timer.stop();
         float prefill_time = prefill_timer.milliseconds();
 
@@ -740,7 +760,7 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_greedy(const std::vector<uint3
         sample_timer.start();
 
         // 使用sample_batch_to_fixed直接将结果写入固定内存
-        cuda_OP::sample_batch_to_fixed(std::move(logits_tensor), target_tokens, temperature, top_p, 1, d_states,
+        cuda_OP::sample_batch_to_fixed(std::move(logits_tensor), target_tokens, temperature, top_p, top_k, d_states,
                                        verify_stream);
 
         sample_timer.stop();
@@ -912,6 +932,19 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_prob_ratio(const std::vector<u
 
         // 使用prefill_cuda获取logits - 移除第三个参数false
         Tensor<T> target_logits = qwen3->prefill_cuda(&combined_tokens, &target_kv_cache_);
+
+        // 保存目标模型的logits到文件
+        // 注意：combined_tokens中可能有多个token，每个token对应一个logits输出
+        // 我们需要分别保存每个token位置的logits
+        size_t base_position = original_cache_size;  // 验证开始时的KV缓存位置
+        for (size_t i = 0; i < combined_tokens.numel(); i++) {
+            Tensor<T> single_logits = target_logits.slice({i, 0}, {i + 1, target_logits.sizes()[1]});
+            // 计算token在整个序列中的绝对位置
+            size_t absolute_position = base_position + i;
+            std::string logits_file = "./logits_data/target/logits_" + std::to_string(absolute_position) + ".bin";
+            saveTensorToFile(single_logits, logits_file);
+            std::cout << "已保存目标模型logits到: " << logits_file << std::endl;
+        }
 
         prefill_timer.stop();
         float prefill_time = prefill_timer.milliseconds();

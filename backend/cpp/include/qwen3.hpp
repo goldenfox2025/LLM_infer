@@ -6,6 +6,8 @@
 #include <unordered_map>
 
 #include "base_model.hpp"
+#include "common.hpp"
+#include "cudaOP.cuh"
 #include "inference.hpp"
 #include "operators/unified_operators.hpp"
 #include "tensor.hpp"

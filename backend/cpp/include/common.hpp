@@ -1,4 +1,3 @@
-
 #pragma once
 
 // 系统包含
@@ -1013,4 +1012,197 @@ inline std::string format_bytes(size_t bytes) {
     }
 
     return std::string(buffer);
+}
+
+//------------------------------------------------------------------------------
+// Tensor保存工具
+//------------------------------------------------------------------------------
+
+/**
+ * @brief 将张量保存到文件
+ *
+ * @param tensor 要保存的张量
+ * @param filename 目标文件名
+ * @param mode 文件打开模式 ("w" 为写入, "a" 为追加)
+ * @return 是否成功保存
+ */
+template <typename T>
+inline bool saveTensorToFile(const Tensor<T>& tensor, const std::string& filename, const std::string& mode = "w") {
+    // 创建输出目录（如果不存在）
+    std::string dir_path = filename.substr(0, filename.find_last_of('/'));
+    if (!dir_path.empty()) {
+        std::string cmd = "mkdir -p " + dir_path;
+        system(cmd.c_str());
+    }
+
+    // 打开文件
+    FILE* file = fopen(filename.c_str(), mode.c_str());
+    if (!file) {
+        std::cerr << "无法打开文件进行写入: " << filename << std::endl;
+        return false;
+    }
+
+    // 保存张量形状
+    std::vector<size_t> shape = tensor.sizes();
+    size_t ndim = shape.size();
+    fwrite(&ndim, sizeof(size_t), 1, file);
+    fwrite(shape.data(), sizeof(size_t), ndim, file);
+
+    // 计算数据总量
+    size_t total_elements = tensor.numel();
+
+    // 从GPU复制数据到CPU（如果需要）
+    if (tensor.device() == Device::CUDA) {
+        // 分配主机缓冲区
+        std::vector<T> host_buffer(total_elements);
+        // 拷贝数据
+        cudaError_t err =
+            cudaMemcpy(host_buffer.data(), tensor.data_ptr(), total_elements * sizeof(T), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "从GPU复制数据失败: " << cudaGetErrorString(err) << std::endl;
+            fclose(file);
+            return false;
+        }
+
+        // 写入数据
+        fwrite(host_buffer.data(), sizeof(T), total_elements, file);
+    } else {
+        // 直接写入CPU数据
+        fwrite(tensor.data_ptr(), sizeof(T), total_elements, file);
+    }
+
+    fclose(file);
+    return true;
+}
+
+/**
+ * @brief 针对__nv_bfloat16类型的saveTensorToFile特化版本
+ */
+template <>
+inline bool saveTensorToFile<__nv_bfloat16>(const Tensor<__nv_bfloat16>& tensor, const std::string& filename,
+                                            const std::string& mode) {
+    // 创建输出目录（如果不存在）
+    std::string dir_path = filename.substr(0, filename.find_last_of('/'));
+    if (!dir_path.empty()) {
+        std::string cmd = "mkdir -p " + dir_path;
+        system(cmd.c_str());
+    }
+
+    // 打开文件
+    FILE* file = fopen(filename.c_str(), mode.c_str());
+    if (!file) {
+        std::cerr << "无法打开文件进行写入: " << filename << std::endl;
+        return false;
+    }
+
+    // 保存张量形状
+    std::vector<size_t> shape = tensor.sizes();
+    size_t ndim = shape.size();
+    fwrite(&ndim, sizeof(size_t), 1, file);
+    fwrite(shape.data(), sizeof(size_t), ndim, file);
+
+    // 计算数据总量
+    size_t total_elements = tensor.numel();
+
+    // 从GPU复制数据到CPU（如果需要），并转换为float
+    if (tensor.device() == Device::CUDA) {
+        // 分配主机缓冲区
+        std::vector<__nv_bfloat16> bf16_buffer(total_elements);
+        std::vector<float> float_buffer(total_elements);
+
+        // 拷贝数据
+        cudaError_t err = cudaMemcpy(bf16_buffer.data(), tensor.data_ptr(), total_elements * sizeof(__nv_bfloat16),
+                                     cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "从GPU复制数据失败: " << cudaGetErrorString(err) << std::endl;
+            fclose(file);
+            return false;
+        }
+
+        // 转换为float
+        for (size_t i = 0; i < total_elements; i++) {
+            float_buffer[i] = static_cast<float>(bf16_buffer[i]);
+        }
+
+        // 写入数据（作为float保存）
+        fwrite(float_buffer.data(), sizeof(float), total_elements, file);
+    } else {
+        // CPU数据转换为float
+        std::vector<float> float_buffer(total_elements);
+        for (size_t i = 0; i < total_elements; i++) {
+            float_buffer[i] = static_cast<float>(tensor.data_ptr()[i]);
+        }
+
+        // 写入数据
+        fwrite(float_buffer.data(), sizeof(float), total_elements, file);
+    }
+
+    fclose(file);
+    return true;
+}
+
+/**
+ * @brief 针对__half类型的saveTensorToFile特化版本
+ */
+template <>
+inline bool saveTensorToFile<__half>(const Tensor<__half>& tensor, const std::string& filename,
+                                     const std::string& mode) {
+    // 创建输出目录（如果不存在）
+    std::string dir_path = filename.substr(0, filename.find_last_of('/'));
+    if (!dir_path.empty()) {
+        std::string cmd = "mkdir -p " + dir_path;
+        system(cmd.c_str());
+    }
+
+    // 打开文件
+    FILE* file = fopen(filename.c_str(), mode.c_str());
+    if (!file) {
+        std::cerr << "无法打开文件进行写入: " << filename << std::endl;
+        return false;
+    }
+
+    // 保存张量形状
+    std::vector<size_t> shape = tensor.sizes();
+    size_t ndim = shape.size();
+    fwrite(&ndim, sizeof(size_t), 1, file);
+    fwrite(shape.data(), sizeof(size_t), ndim, file);
+
+    // 计算数据总量
+    size_t total_elements = tensor.numel();
+
+    // 从GPU复制数据到CPU（如果需要），并转换为float
+    if (tensor.device() == Device::CUDA) {
+        // 分配主机缓冲区
+        std::vector<__half> half_buffer(total_elements);
+        std::vector<float> float_buffer(total_elements);
+
+        // 拷贝数据
+        cudaError_t err =
+            cudaMemcpy(half_buffer.data(), tensor.data_ptr(), total_elements * sizeof(__half), cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            std::cerr << "从GPU复制数据失败: " << cudaGetErrorString(err) << std::endl;
+            fclose(file);
+            return false;
+        }
+
+        // 转换为float
+        for (size_t i = 0; i < total_elements; i++) {
+            float_buffer[i] = static_cast<float>(half_buffer[i]);
+        }
+
+        // 写入数据（作为float保存）
+        fwrite(float_buffer.data(), sizeof(float), total_elements, file);
+    } else {
+        // CPU数据转换为float
+        std::vector<float> float_buffer(total_elements);
+        for (size_t i = 0; i < total_elements; i++) {
+            float_buffer[i] = static_cast<float>(tensor.data_ptr()[i]);
+        }
+
+        // 写入数据
+        fwrite(float_buffer.data(), sizeof(float), total_elements, file);
+    }
+
+    fclose(file);
+    return true;
 }

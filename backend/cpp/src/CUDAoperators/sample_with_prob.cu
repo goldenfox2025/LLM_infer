@@ -261,7 +261,7 @@ __global__ void sample_from_sorted_topk_with_prob_kernel(const T* __restrict__ d
 
             selected_final_index = static_cast<uint32_t>(d_sorted_topk_indices[0]);
             float* s_exp_vals = shared_storage.combined.exp_vals;
-
+            selected_prob = s_exp_vals[0] / total_exp_sum;
             for (int i = 0; i < k; ++i) {
                 cumulative += s_exp_vals[i];
 
@@ -392,6 +392,9 @@ std::pair<uint32_t, float> sample_with_prob(Tensor<T>&& logits, float temperatur
     cudaMemcpyAsync(&h_sampled_prob, d_sampled_prob, sizeof(float), cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
 
+    // 计算选中token在整个词汇表中的真实概率
+    float real_prob = get_token_probability(logits, seq_len - 1, h_sampled_index, stream);
+
     // --- 释放临时内存 ---
     pool.free(d_scaled_logits);
     pool.free(d_max_val);
@@ -404,7 +407,8 @@ std::pair<uint32_t, float> sample_with_prob(Tensor<T>&& logits, float temperatur
     cudaFree(d_sampled_index);
     cudaFree(d_sampled_prob);
 
-    return {h_sampled_index, h_sampled_prob};
+    // 返回token和其在整个词汇表中的真实概率
+    return {h_sampled_index, real_prob};
 }
 
 // 采样函数的变体，将token和概率写入指定的GPU内存位置
