@@ -1032,7 +1032,11 @@ inline bool saveTensorToFile(const Tensor<T>& tensor, const std::string& filenam
     std::string dir_path = filename.substr(0, filename.find_last_of('/'));
     if (!dir_path.empty()) {
         std::string cmd = "mkdir -p " + dir_path;
-        system(cmd.c_str());
+        int res = system(cmd.c_str());
+        if (res != 0) {
+            std::cerr << "创建目录失败: " << dir_path << std::endl;
+            return false;
+        }
     }
 
     // 打开文件
@@ -1085,7 +1089,11 @@ inline bool saveTensorToFile<__nv_bfloat16>(const Tensor<__nv_bfloat16>& tensor,
     std::string dir_path = filename.substr(0, filename.find_last_of('/'));
     if (!dir_path.empty()) {
         std::string cmd = "mkdir -p " + dir_path;
-        system(cmd.c_str());
+        int res = system(cmd.c_str());
+        if (res != 0) {
+            std::cerr << "创建目录失败: " << dir_path << std::endl;
+            return false;
+        }
     }
 
     // 打开文件

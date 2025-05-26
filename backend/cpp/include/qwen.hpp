@@ -15,154 +15,206 @@
 
 template <typename T>
 class QwenModel : public BaseModel {
- public:
-  QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
-            const std::unordered_map<std::string, int>& config);
+   public:
+    QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
+              const std::unordered_map<std::string, int>& config);
 
-  // 带量化参数的构造函数
-  QwenModel(
-      const std::unordered_map<std::string, Tensor<T>>& params,
-      const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
-      const std::unordered_map<std::string, Tensor<T>>& scales_params,
-      const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
-      const std::unordered_map<std::string, int>& config);
-  ~QwenModel() override;
+    // 带量化参数的构造函数
+    QwenModel(const std::unordered_map<std::string, Tensor<T>>& params,
+              const std::unordered_map<std::string, Tensor<int32_t>>& qweight_params,
+              const std::unordered_map<std::string, Tensor<T>>& scales_params,
+              const std::unordered_map<std::string, Tensor<int32_t>>& qzeros_params,
+              const std::unordered_map<std::string, int>& config);
+    ~QwenModel() override;
 
-  bool verify_params() const override;
-  void print_model_info() const override;
+    bool verify_params() const override;
+    void print_model_info() const override;
 
-  // Implementation of BaseModel interface:
-  // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
-  uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                    KVCacheBase* kv_cache, size_t top_k, float temperature,
-                    float top_p, curandState* d_states = nullptr) override {
-    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
+    // Implementation of BaseModel interface:
+    // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
+    uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCacheBase* kv_cache, size_t top_k,
+                      float temperature, float top_p, curandState* d_states = nullptr) override {
+        // 使用 CUDA 图执行
+        KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
+        // return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p, top_k, d_states);
+        if (!graph_initialized_) {
+            throw std::runtime_error("CUDA graph not initialized. Call cuda() to initialize.");
+        }
 
-    return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p,
-                           top_k, d_states);
-  }
-  uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool,
-                    KVCacheBase* kv_cache, size_t top_k, float temperature,
-                    float top_p, curandState* d_states = nullptr) override {
-    KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
+        // 将输入数据拷贝到图的固定输入张量
+        cudaMemcpy(graph_input_tensor_.data_ptr(), input->data_ptr(), input->numel() * sizeof(uint32_t),
+                   cudaMemcpyDeviceToDevice);
 
-    return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p,
-                           top_k, d_states);
-  }
+        // 执行 CUDA 图
+        cudaError_t result = cudaGraphLaunch(graph_exec_, graph_stream_);
+        if (result != cudaSuccess) {
+            throw std::runtime_error("Failed to launch CUDA graph: " + std::string(cudaGetErrorString(result)));
+        }
 
-  // Token generation
-  std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids,
-                                 size_t max_length, float temperature = 1.0f,
-                                 float top_p = 0.9f, size_t top_k = 50);
+        // 同步流
+        cudaStreamSynchronize(graph_stream_);
 
-  // Getter methods
-  size_t get_n_layers() const override { return n_layers_; }
-  size_t get_max_seq_len() const override { return max_position_embeddings_; }
-  size_t get_head_dim() const override { return head_dim_; }
-  size_t get_n_kv_heads() const override { return n_kv_heads_; }
-  uint32_t get_eos_token_id() const override { return eos_token_id_; }
-  size_t get_hidden_size() const override { return hidden_size_; }
+        // 对输出进行采样
+        return cuda_OP::sample(std::move(graph_output_tensor_), temperature, top_p, top_k, d_states);
+    }
+    uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCacheBase* kv_cache, size_t top_k,
+                      float temperature, float top_p, curandState* d_states = nullptr) override {
+        KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
 
-  // Additional getter methods for qwen_decode.cpp
-  size_t get_n_heads() const { return n_heads_; }
-  size_t get_intermediate_size() const { return intermediate_size_; }
-  float get_rms_norm_eps() const { return rms_norm_eps_; }
-  float get_rope_theta() const { return rope_theta_; }
-  size_t get_vocab_size() const { return vocab_size_; }
-  int get_quant_type() const { return quant_type_; }
-  const std::unordered_map<std::string, Tensor<T>>& get_params() const {
-    return params_;
-  }
-  const std::unordered_map<std::string, Tensor<int32_t>>& get_qweight_params()
-      const {
-    return qweight_params_;
-  }
-  const std::unordered_map<std::string, Tensor<T>>& get_scales_params() const {
-    return scales_params_;
-  }
-  const std::unordered_map<std::string, Tensor<int32_t>>& get_qzeros_params()
-      const {
-    return qzeros_params_;
-  }
-
-  // CUDA versions of forward and prefill.
-  // Their implementations can be filled in later (currently as stubs mimicking
-  // Llama).
-  Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
-  Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
-
-  // 获取权重（普通或量化）
-  op::WeightTensor<T> get_weight(const std::string& key) {
-    if (quant_type_ == 1) {
-      // 尝试获取量化权重
-      std::string qweight_key = key + ".qweight";
-      std::string scales_key = key + ".scales";
-      std::string qzeros_key = key + ".qzeros";
-
-      auto qweight_it = qweight_params_.find(qweight_key);
-      auto scales_it = scales_params_.find(scales_key);
-      auto qzeros_it = qzeros_params_.find(qzeros_key);
-
-      if (qweight_it != qweight_params_.end() &&
-          scales_it != scales_params_.end() &&
-          qzeros_it != qzeros_params_.end()) {
-        // 返回量化权重
-        return op::WeightTensor<T>(&qweight_it->second, &scales_it->second,
-                                   &qzeros_it->second, group_size_);
-      }
+        return cuda_OP::sample(prefill_cuda(input, typed_cache), temperature, top_p, top_k, d_states);
     }
 
-    auto weight_it = params_.find(key);
-    if (weight_it != params_.end()) {
-      return op::WeightTensor<T>(&weight_it->second);
+    // Token generation
+    std::vector<uint32_t> generate(const std::vector<uint32_t>& input_ids, size_t max_length, float temperature = 1.0f,
+                                   float top_p = 0.9f, size_t top_k = 50);
+
+    // Getter methods
+    size_t get_n_layers() const override {
+        return n_layers_;
     }
-    // 尝试返回普通权重
-    std::string weight_key = key + ".weight";
-    weight_it = params_.find(weight_key);
-
-    if (weight_it != params_.end()) {
-      return op::WeightTensor<T>(&weight_it->second);
+    size_t get_max_seq_len() const override {
+        return max_position_embeddings_;
+    }
+    size_t get_head_dim() const override {
+        return head_dim_;
+    }
+    size_t get_n_kv_heads() const override {
+        return n_kv_heads_;
+    }
+    uint32_t get_eos_token_id() const override {
+        return eos_token_id_;
+    }
+    size_t get_hidden_size() const override {
+        return hidden_size_;
     }
 
-    // 如果找不到权重，抛出更明确的错误
-    throw std::runtime_error("Weight not found: " + key +
-                             (quant_type_ == 1
-                                  ? " (tried both quantized and regular)"
-                                  : " (tried regular)"));
-  }
+    // Additional getter methods for qwen_decode.cpp
+    size_t get_n_heads() const {
+        return n_heads_;
+    }
+    size_t get_intermediate_size() const {
+        return intermediate_size_;
+    }
+    float get_rms_norm_eps() const {
+        return rms_norm_eps_;
+    }
+    float get_rope_theta() const {
+        return rope_theta_;
+    }
+    size_t get_vocab_size() const {
+        return vocab_size_;
+    }
+    int get_quant_type() const {
+        return quant_type_;
+    }
+    const std::unordered_map<std::string, Tensor<T>>& get_params() const {
+        return params_;
+    }
+    const std::unordered_map<std::string, Tensor<int32_t>>& get_qweight_params() const {
+        return qweight_params_;
+    }
+    const std::unordered_map<std::string, Tensor<T>>& get_scales_params() const {
+        return scales_params_;
+    }
+    const std::unordered_map<std::string, Tensor<int32_t>>& get_qzeros_params() const {
+        return qzeros_params_;
+    }
 
-  // Device management
-  QwenModel& cuda() override;
-  QwenModel& cpu() override;
-  Device device() const override { return device_; }
+    // CUDA versions of forward and prefill.
+    // Their implementations can be filled in later (currently as stubs mimicking
+    // Llama).
+    Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+    Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
- private:
-  std::array<cudaEvent_t, 3> fa_done_events_;
-  size_t vocab_size_;
-  size_t n_layers_;
-  size_t n_heads_;
-  size_t n_kv_heads_;
-  size_t hidden_size_;
-  size_t head_dim_;
-  size_t intermediate_size_;
-  size_t max_position_embeddings_;
-  uint32_t bos_token_id_;
-  uint32_t eos_token_id_;
-  float rms_norm_eps_;
-  float rope_theta_;
+    // 简化版本的前向传播，用于图优化开发
+    // 特点：
+    // 1. 只包含必要的算子，去除了复杂的优化逻辑
+    // 2. 不使用KV缓存的复杂管理，简化注意力计算
+    // 3. 统一使用operators_接口，便于后续图优化
+    // 4. 移除了流并行和事件同步等优化
+    // 5. 支持指定流执行，用于 CUDA 图捕获
+    Tensor<T> forward_for_graph(const Tensor<uint32_t>* input, KVCache<T>* kv_cache, cudaStream_t stream = nullptr);
 
-  std::unordered_map<std::string, Tensor<T>> params_;
-  std::unordered_map<std::string, Tensor<int32_t>> qweight_params_;  // 量化权重
-  std::unordered_map<std::string, Tensor<T>> scales_params_;         // 缩放因子
-  std::unordered_map<std::string, Tensor<int32_t>> qzeros_params_;   // 零点
-  int quant_type_ = 0;    // 0: 非量化, 1: AWQ量化
-  int group_size_ = 128;  // 量化分组大小
-  Device device_;
+    // 获取权重（普通或量化）
+    op::WeightTensor<T> get_weight(const std::string& key) {
+        if (quant_type_ == 1) {
+            // 尝试获取量化权重
+            std::string qweight_key = key + ".qweight";
+            std::string scales_key = key + ".scales";
+            std::string qzeros_key = key + ".qzeros";
 
-  std::array<cudaStream_t, kNumStreams> compute_streams_;
+            auto qweight_it = qweight_params_.find(qweight_key);
+            auto scales_it = scales_params_.find(scales_key);
+            auto qzeros_it = qzeros_params_.find(qzeros_key);
 
-  // 统一算子接口
-  std::unique_ptr<op::UnifiedOperators<T>> operators_;
+            if (qweight_it != qweight_params_.end() && scales_it != scales_params_.end() &&
+                qzeros_it != qzeros_params_.end()) {
+                // 返回量化权重
+                return op::WeightTensor<T>(&qweight_it->second, &scales_it->second, &qzeros_it->second, group_size_);
+            }
+        }
+
+        auto weight_it = params_.find(key);
+        if (weight_it != params_.end()) {
+            return op::WeightTensor<T>(&weight_it->second);
+        }
+        // 尝试返回普通权重
+        std::string weight_key = key + ".weight";
+        weight_it = params_.find(weight_key);
+
+        if (weight_it != params_.end()) {
+            return op::WeightTensor<T>(&weight_it->second);
+        }
+
+        // 如果找不到权重，抛出更明确的错误
+        throw std::runtime_error("Weight not found: " + key +
+                                 (quant_type_ == 1 ? " (tried both quantized and regular)" : " (tried regular)"));
+    }
+
+    // Device management
+    QwenModel& cuda() override;
+    QwenModel& cpu() override;
+    Device device() const override {
+        return device_;
+    }
+
+   private:
+    std::array<cudaEvent_t, 3> fa_done_events_;
+    size_t vocab_size_;
+    size_t n_layers_;
+    size_t n_heads_;
+    size_t n_kv_heads_;
+    size_t hidden_size_;
+    size_t head_dim_;
+    size_t intermediate_size_;
+    size_t max_position_embeddings_;
+    uint32_t bos_token_id_;
+    uint32_t eos_token_id_;
+    float rms_norm_eps_;
+    float rope_theta_;
+
+    std::unordered_map<std::string, Tensor<T>> params_;
+    std::unordered_map<std::string, Tensor<int32_t>> qweight_params_;  // 量化权重
+    std::unordered_map<std::string, Tensor<T>> scales_params_;         // 缩放因子
+    std::unordered_map<std::string, Tensor<int32_t>> qzeros_params_;   // 零点
+    int quant_type_ = 0;                                               // 0: 非量化, 1: AWQ量化
+    int group_size_ = 128;                                             // 量化分组大小
+    Device device_;
+
+    std::array<cudaStream_t, kNumStreams> compute_streams_;
+
+    // 统一算子接口
+    std::unique_ptr<op::UnifiedOperators<T>> operators_;
+
+    // CUDA 图执行相关成员
+    cudaGraph_t cuda_graph_;
+    cudaGraphExec_t graph_exec_;
+    cudaStream_t graph_stream_;
+    bool graph_initialized_;
+
+    // 图执行所需的固定输入输出张量
+    Tensor<uint32_t> graph_input_tensor_;
+    Tensor<T> graph_output_tensor_;
 };
 
 // 使用 extern template 声明已在别处定义的模板特化
