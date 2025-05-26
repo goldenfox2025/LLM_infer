@@ -87,6 +87,10 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
 template <typename T>
 void rope(Tensor<T> *tensor, size_t current_pos, float theta, cudaStream_t stream = nullptr);
 
+// CUDA图优化版本：使用设备端固定内存的offset
+template <typename T>
+void rope_with_device_offset(Tensor<T> *tensor, const size_t* d_offset, float theta, cudaStream_t stream = nullptr);
+
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = true, int offset = 0,
@@ -230,6 +234,23 @@ void flash_attention_specialized_5branch(Tensor<T> &Q, const std::vector<Tensor<
 template <typename T>
 void dynamic_flash_attention_wrapper(Tensor<T> &Q, const Tensor<T> &total_K, const Tensor<T> &total_V,
                                      Tensor<T> &att_output, int n_kv_heads, cudaStream_t stream = nullptr);
+
+// CUDA图优化版本：使用固定内存地址和分段信息的flash attention
+template <typename T>
+void flash_attention_graph_fixed(Tensor<T> &Q,
+                                 const Tensor<T> &total_K,
+                                 const Tensor<T> &total_V,
+                                 T **d_output_ptrs,
+                                 int *d_segment_info,
+                                 int n_kv_heads,
+                                 cudaStream_t stream = nullptr);
+
+// CUDA图优化版本：使用固定内存地址的gather_fa
+template <typename T>
+void gather_fa_graph_fixed(T **d_input_ptrs,
+                           Tensor<T> &output,
+                           int *d_segment_info,
+                           cudaStream_t stream = nullptr);
 
 // AWQ量化矩阵乘法
 template <typename T, typename ScaleType = float>

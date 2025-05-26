@@ -400,16 +400,8 @@ class CudaMemoryPool {
 
     void* ptr = it->second;
 
-    auto active_it = tagged_memory_active_.find(tag);
-    if (active_it == tagged_memory_active_.end() || !active_it->second) {
-      return nullptr;
-    }
-
-    if (active_allocations_.find(ptr) == active_allocations_.end()) {
-      tagged_memory_active_[tag] = false;
-      return nullptr;
-    }
-
+    // 修改：无条件返回tagged memory，不检查active状态
+    // 这样可以确保tagged memory始终可用于写入
     return ptr;
   }
 

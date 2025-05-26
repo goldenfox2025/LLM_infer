@@ -245,8 +245,8 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     int* d_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));         // 存储原始索引
     T* d_sorted_logits = static_cast<T*>(pool.allocate(vocab_size * sizeof(T)));         // 存储排序后的 logits
     int* d_sorted_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));  // 存储排序后的索引
-    uint32_t* d_sampled_index;
-    (cudaMalloc(&d_sampled_index, sizeof(uint32_t)));  // 存储最终采样结果
+    // 使用tagged memory分配采样结果，确保每次都是相同的固定地址
+    uint32_t* d_sampled_index = static_cast<uint32_t*>(pool.allocate(sizeof(uint32_t), "sample_output"));
 
     // CUB 临时存储指针和大小 (初始为 nullptr 和 0)
     void* d_reduce_temp_storage = nullptr;

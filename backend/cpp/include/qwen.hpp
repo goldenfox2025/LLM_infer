@@ -36,10 +36,17 @@ class QwenModel : public BaseModel {
                       float temperature, float top_p, curandState* d_states = nullptr) override {
         // 使用 CUDA 图执行
         KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
-        // return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p, top_k, d_states);
+
+        // 延迟初始化CUDA图，使用真实的KV cache
         if (!graph_initialized_) {
-            throw std::runtime_error("CUDA graph not initialized. Call cuda() to initialize.");
+            initialize_cuda_graph_with_kv_cache(typed_cache);
         }
+
+        // 关键修复：在图执行前更新动态数据
+        // KV cache已经在inference.cpp中resize了，所以当前token的位置是size()-1
+        size_t rope_offset = typed_cache->size() - 1;  // 当前token的位置索引
+        size_t total_seq_len = typed_cache->size() - 1; // flash attention应该看到的是已有数据长度（不包含当前token）
+        prepare_graph_execution(rope_offset, total_seq_len, 0, typed_cache);
 
         // 将输入数据拷贝到图的固定输入张量
         cudaMemcpy(graph_input_tensor_.data_ptr(), input->data_ptr(), input->numel() * sizeof(uint32_t),
@@ -53,6 +60,9 @@ class QwenModel : public BaseModel {
 
         // 同步流
         cudaStreamSynchronize(graph_stream_);
+
+        // 图执行后：将计算出的K和V复制到KV cache
+        copy_kv_to_cache_after_graph(typed_cache, rope_offset);
 
         // 对输出进行采样
         return cuda_OP::sample(std::move(graph_output_tensor_), temperature, top_p, top_k, d_states);
@@ -178,6 +188,16 @@ class QwenModel : public BaseModel {
         return device_;
     }
 
+    // CUDA图优化相关方法
+    void initialize_graph_fixed_memory();  // 初始化图执行所需的固定内存
+    void cleanup_graph_fixed_memory();     // 清理图执行的固定内存
+    void update_rope_offset(size_t offset); // 更新RoPE offset到固定内存
+    void update_segment_info(size_t total_seq_len, int layer_idx); // 更新flash attention分段信息
+    void update_graph_kv_addresses(KVCache<T>* kv_cache, size_t offset); // 更新图中的KV复制目标地址
+    void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx, KVCache<T>* kv_cache); // 在图执行前准备所有动态数据
+    void initialize_cuda_graph_with_kv_cache(KVCache<T>* kv_cache); // 使用真实KV cache初始化CUDA图
+    void copy_kv_to_cache_after_graph(KVCache<T>* kv_cache, size_t offset); // 图执行后将K和V复制到KV cache
+
    private:
     std::array<cudaEvent_t, 3> fa_done_events_;
     size_t vocab_size_;
@@ -215,6 +235,24 @@ class QwenModel : public BaseModel {
     // 图执行所需的固定输入输出张量
     Tensor<uint32_t> graph_input_tensor_;
     Tensor<T> graph_output_tensor_;
+
+    // 问题1解决方案：RoPE offset的固定内存
+    size_t* d_rope_offset_;  // 设备端固定内存存储offset
+
+    // 当前KV写入offset（用于图执行）
+    size_t current_kv_offset_;
+
+    // 问题2解决方案：matmul固定中间缓冲区
+    std::vector<Tensor<T>> fixed_k_buffers_;  // 每层的K投影固定缓冲区
+    std::vector<Tensor<T>> fixed_v_buffers_;  // 每层的V投影固定缓冲区
+
+    // 图节点更新相关
+    std::vector<cudaGraphNode_t> kv_copy_nodes_;  // KV复制节点列表，用于更新目标地址
+
+    // 问题3解决方案：flash attention固定内存地址和分段信息
+    int* d_segment_info_;                       // 设备端分段信息：[total_seq_len, branch_count, branch_lengths...]
+    T** d_output_ptrs_;                         // 设备端输出指针数组
+    std::vector<Tensor<T>> fixed_fa_outputs_;   // 每层的flash attention输出固定内存
 };
 
 // 使用 extern template 声明已在别处定义的模板特化

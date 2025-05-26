@@ -348,6 +348,27 @@ void InferenceEngine<T>::generate_with_callback(
           model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k,
                           temperature, top_p, d_states);
 
+      // 如果是QwenModel且支持CUDA图，在预热阶段调用一次forward来初始化CUDA图
+      // 这样可以使用真实的KV cache
+      std::cout << "检查是否需要初始化CUDA图..." << std::endl;
+      try {
+        // 调整KV缓存大小为单token推理
+        kv_cache_.resize(kv_cache_.size() + 1);
+
+        // 创建单token输入用于图初始化
+        std::vector<uint32_t> graph_init_input = {1};  // 单个token
+        Tensor<uint32_t> graph_input_tensor(std::move(graph_init_input), {1}, device_);
+
+        // 调用forward来触发CUDA图初始化
+        uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor, thread_pool_, &kv_cache_,
+                                                      top_k, temperature, top_p, d_states);
+
+        std::cout << "CUDA图初始化完成！" << std::endl;
+      } catch (const std::exception& e) {
+        std::cout << "CUDA图初始化跳过或失败: " << e.what() << std::endl;
+        // 不是致命错误，继续执行
+      }
+
       // 停止计时
       warmup_timer.stop();
 
