@@ -45,12 +45,12 @@ class QwenModel : public BaseModel {
         // 关键修复：在图执行前更新动态数据
         // KV cache已经在inference.cpp中resize了，所以当前token的位置是size()-1
         size_t rope_offset = typed_cache->size() - 1;  // 当前token的位置索引
-        size_t total_seq_len = typed_cache->size() - 1; // flash attention应该看到的是已有数据长度（不包含当前token）
+        size_t total_seq_len = typed_cache->size(); // flash attention应该看到包含当前token的完整数据（与forward_for_graph一致）
         prepare_graph_execution(rope_offset, total_seq_len, 0, typed_cache);
 
         // 将输入数据拷贝到图的固定输入张量
-        cudaMemcpy(graph_input_tensor_.data_ptr(), input->data_ptr(), input->numel() * sizeof(uint32_t),
-                   cudaMemcpyDeviceToDevice);
+        cudaMemcpyAsync(graph_input_tensor_.data_ptr(), input->data_ptr(), input->numel() * sizeof(uint32_t),
+                       cudaMemcpyDeviceToDevice, graph_stream_);
 
         // 执行 CUDA 图
         cudaError_t result = cudaGraphLaunch(graph_exec_, graph_stream_);
@@ -61,10 +61,13 @@ class QwenModel : public BaseModel {
         // 同步流
         cudaStreamSynchronize(graph_stream_);
 
-        // 图执行后：将计算出的K和V复制到KV cache
-        copy_kv_to_cache_after_graph(typed_cache, rope_offset);
+        // 注意：KV复制现在在图内通过节点更新完成，不需要额外的复制操作
 
-        // 对输出进行采样
+        // 保存图执行后的张量（调试用）- 直接覆盖保存最新结果
+        save_graph_tensors_after_execution("graph/debug");
+
+        // 对输出进行采样 - 使用图执行的实际输出logits
+        // graph_output_tensor_已经包含了图执行的结果，直接使用它
         return cuda_OP::sample(std::move(graph_output_tensor_), temperature, top_p, top_k, d_states);
     }
     uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCacheBase* kv_cache, size_t top_k,
@@ -133,7 +136,7 @@ class QwenModel : public BaseModel {
     // CUDA versions of forward and prefill.
     // Their implementations can be filled in later (currently as stubs mimicking
     // Llama).
-    Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+    Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache, const std::string& save_prefix = "");
     Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
     // 简化版本的前向传播，用于图优化开发
@@ -193,10 +196,18 @@ class QwenModel : public BaseModel {
     void cleanup_graph_fixed_memory();     // 清理图执行的固定内存
     void update_rope_offset(size_t offset); // 更新RoPE offset到固定内存
     void update_segment_info(size_t total_seq_len, int layer_idx); // 更新flash attention分段信息
+    void extract_updateable_nodes(); // 从图中提取可更新的节点
     void update_graph_kv_addresses(KVCache<T>* kv_cache, size_t offset); // 更新图中的KV复制目标地址
     void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx, KVCache<T>* kv_cache); // 在图执行前准备所有动态数据
     void initialize_cuda_graph_with_kv_cache(KVCache<T>* kv_cache); // 使用真实KV cache初始化CUDA图
     void copy_kv_to_cache_after_graph(KVCache<T>* kv_cache, size_t offset); // 图执行后将K和V复制到KV cache
+
+    // 逐层输出保存功能
+    void save_tensor_to_binary(const Tensor<T>& tensor, const std::string& filename); // 保存张量到二进制文件
+    void save_uint32_tensor_to_binary(const Tensor<uint32_t>& tensor, const std::string& filename); // 保存uint32张量到二进制文件
+    void save_graph_tensors_after_execution(const std::string& save_prefix); // 图执行后保存重要张量
+
+
 
    private:
     std::array<cudaEvent_t, 3> fa_done_events_;

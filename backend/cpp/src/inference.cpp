@@ -186,7 +186,11 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
     }
 
     // 初始化CUDA资源
-    cudaMalloc(&d_states, sizeof(curandState));
+    cudaError_t err = cudaMalloc(&d_states, sizeof(curandState));
+    if (err != cudaSuccess) {
+        throw std::runtime_error("Failed to allocate CUDA memory for curand states: " +
+                                std::string(cudaGetErrorString(err)));
+    }
     int seed = std::chrono::system_clock::now().time_since_epoch().count();
     cuda_OP::init_curand(d_states, seed, 0, nullptr);
     this->cuda();
@@ -356,11 +360,10 @@ void InferenceEngine<T>::generate_with_callback(
         kv_cache_.resize(kv_cache_.size() + 1);
 
         // 创建单token输入用于图初始化
-        std::vector<uint32_t> graph_init_input = {1};  // 单个token
-        Tensor<uint32_t> graph_input_tensor(std::move(graph_init_input), {1}, device_);
-
+        std::vector<uint32_t> graph_init_input = {9707};  // 包含token 9707的向量
+        Tensor<uint32_t> graph_input_tensor_(std::move(graph_init_input), {1}, device_);
         // 调用forward来触发CUDA图初始化
-        uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor, thread_pool_, &kv_cache_,
+        uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor_, thread_pool_, &kv_cache_,
                                                       top_k, temperature, top_p, d_states);
 
         std::cout << "CUDA图初始化完成！" << std::endl;

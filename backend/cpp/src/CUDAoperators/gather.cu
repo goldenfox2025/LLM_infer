@@ -96,6 +96,8 @@ void gather(Tensor<T>* output, const Tensor<uint32_t>* input, const Tensor<T>* e
         throw std::runtime_error("Invalid dimensions in gather");
     }
 
+
+
     int threadsPerBlock = 256;
     int total = seq_len * embed_dim;
     // For gather_kernel_v2, the 'total' is actually seq_len * num_vec.

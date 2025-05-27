@@ -35,18 +35,36 @@ __global__ void flash_attention_kernel_graph_fixed(
 
   // 从设备内存读取分段信息
   int total_seq_len = segment_info[0];
-  int active_branches = segment_info[1];
+  // segment_info[1] (active_branches) 已经无用，始终使用固定3分支
+
+  // 固定使用3分支模式，blockIdx.y就是分支索引(0,1,2)
+  const int FIXED_BRANCHES = 3;
 
   // 检查分支ID是否有效
-  if (blockIdx.y >= active_branches) return;
+  if (blockIdx.y >= FIXED_BRANCHES) return;
 
-  // 计算当前分支的起始位置和长度
-  int tokens_per_branch = (total_seq_len + active_branches - 1) / active_branches;
-  int start_idx = blockIdx.y * tokens_per_branch;
-  int end_idx = min(start_idx + tokens_per_branch, total_seq_len);
+  // 关键修复：使用与普通推理完全相同的分段逻辑
+  // 普通推理使用：tokens_per_branch = (total_seq_len + branches_needed - 1) / branches_needed
+  // 这是向上取整的除法，确保所有token都被覆盖
+  int branches_needed = FIXED_BRANCHES;
+  int tokens_per_branch = (total_seq_len + branches_needed - 1) / branches_needed;
+
+  int start_idx, end_idx;
+  if (blockIdx.y == 0) {
+    start_idx = 0;
+    end_idx = min(tokens_per_branch, total_seq_len);
+  } else if (blockIdx.y == 1) {
+    start_idx = tokens_per_branch;
+    end_idx = min(2 * tokens_per_branch, total_seq_len);
+  } else { // blockIdx.y == 2
+    start_idx = 2 * tokens_per_branch;
+    end_idx = total_seq_len;
+  }
+
   int cache_length = end_idx - start_idx;
 
-  if (start_idx >= total_seq_len || cache_length <= 0) return;
+  // 如果分支长度为0，直接退出
+  if (cache_length <= 0) return;
 
   int T_c = (cache_length + B_c - 1) / B_c;
   T *att_output = output_ptrs[blockIdx.y];
@@ -88,10 +106,13 @@ __global__ void flash_attention_kernel_graph_fixed(
     float local_score = 0.0f;
 
     for (int i = d_tid; i < vecCount; i += blockDim.x) {
-      // 计算在连续KV缓存中的实际索引
-      int actual_token_idx = start_idx + token_index;
-      int index = (actual_token_idx * n_kv_h + kv_head) * dqkv + i * vec_unit;
-      if (valid) {
+      // 关键修复：正确计算在整个KV cache中的绝对索引
+      // token_index是分支内相对索引，需要加上start_idx得到绝对位置
+      int absolute_token_idx = start_idx + token_index;
+
+      // 关键修复：确保不会越界访问
+      if (valid && absolute_token_idx < total_seq_len) {
+        int index = (absolute_token_idx * n_kv_h + kv_head) * dqkv + i * vec_unit;
         vk.f4 = *reinterpret_cast<const float4 *>(&total_k[index]);
         vv.f4 = *reinterpret_cast<const float4 *>(&total_v[index]);
 #pragma unroll
@@ -112,7 +133,11 @@ __global__ void flash_attention_kernel_graph_fixed(
     __syncthreads();
 
     // Warp 内归约 QK Score
-    if (valid) {
+    // 关键修复：需要同时检查分支内有效性和绝对索引有效性
+    int absolute_token_idx = start_idx + token_index;
+    bool absolutely_valid = valid && (absolute_token_idx < total_seq_len);
+
+    if (absolutely_valid) {
       unsigned int mask = 0xFFFFFFFF;
       for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         local_score += __shfl_down_sync(mask, local_score, offset);
@@ -249,8 +274,9 @@ void flash_attention_graph_fixed(Tensor<T> &Q,
   int T_r = 1;
   int B_c = B_C_VALUE;
 
-  // 设置kernel参数 - 使用最大分支数，kernel内部会根据segment_info决定实际分支数
-  dim3 grid(n_q_h, MAX_BRANCHES);
+  // 设置kernel参数 - 强制使用3分支，类似flash_attention.cu的稳定模式
+  const int FIXED_BRANCHES = 3;
+  dim3 grid(n_q_h, FIXED_BRANCHES);
   dim3 block(32, B_c);
 
   // 启动kernel

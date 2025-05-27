@@ -17,11 +17,12 @@ __global__ void gather_fa_kernel_graph_fixed(T **input_ptrs,
                                              T *output_ptr,
                                              int *segment_info,
                                              int q_h, int dqkv) {
-  // 从设备内存读取分支信息
-  int active_branches = segment_info[1];
+  // 从设备内存读取分段信息
+  int total_seq_len = segment_info[0];
+  // segment_info[1] (active_branches) 已经无用，始终使用固定3分支
 
-  // 限制最大分支数
-  if (active_branches > MAX_BRANCHES) active_branches = MAX_BRANCHES;
+  // 固定使用3分支模式，与flash_attention_graph_fixed保持一致
+  // const int FIXED_BRANCHES = 3;
 
   // 每个 block 对应一个 head，每个线程处理该 head 中一个维度
   int head_id = blockIdx.x;
@@ -36,58 +37,55 @@ __global__ void gather_fa_kernel_graph_fixed(T **input_ptrs,
   int base_in = head_id * input_stride;
   int base_out = head_id * output_stride;
 
+  // 关键修复：与普通gather_fa.cu保持完全一致，不检查分支长度
+  // 普通版本假设所有3个分支都有数据，我们也应该这样做
+
   // 初始化归约变量
-  float global_m = -FLT_MAX;
-  float global_l = 0.0f;
-  float global_o = 0.0f;
+  float global_m;
+  float global_l;
+  float global_o;
 
-  // 处理第一个分支
-  if (active_branches > 0 && input_ptrs[0] != nullptr) {
-    T *T1_ptr = input_ptrs[0];
-    float m1 = static_cast<float>(T1_ptr[base_in + dqkv]);
-    float l1 = static_cast<float>(T1_ptr[base_in + dqkv + 1]);
-    float o1 = static_cast<float>(T1_ptr[base_in + tid]);
+  // 处理第一个分支 - 与普通版本完全一致，直接使用不检查
+  T *T1_ptr = input_ptrs[0];
+  float m1 = static_cast<float>(T1_ptr[base_in + dqkv]);
+  float l1 = static_cast<float>(T1_ptr[base_in + dqkv + 1]);
+  float o1 = static_cast<float>(T1_ptr[base_in + tid]);
 
-    global_m = m1;
-    global_l = l1;
-    global_o = o1;
-  }
+  global_m = m1;
+  global_l = l1;
+  global_o = o1;
 
-  // 处理第二个分支
-  if (active_branches > 1 && input_ptrs[1] != nullptr) {
-    T *T2_ptr = input_ptrs[1];
-    float m2 = static_cast<float>(T2_ptr[base_in + dqkv]);
-    float l2 = static_cast<float>(T2_ptr[base_in + dqkv + 1]);
-    float o2 = static_cast<float>(T2_ptr[base_in + tid]);
+  // 处理第二个分支 - 与普通版本完全一致
+  T *T2_ptr = input_ptrs[1];
+  float m2 = static_cast<float>(T2_ptr[base_in + dqkv]);
+  float l2 = static_cast<float>(T2_ptr[base_in + dqkv + 1]);
+  float o2 = static_cast<float>(T2_ptr[base_in + tid]);
 
-    float old_global_m = global_m;
-    float old_global_l = global_l;
-    float new_global_m = fmaxf(old_global_m, m2);
-    float exp_old = __expf(old_global_m - new_global_m);
-    float exp_cur = __expf(m2 - new_global_m);
-    global_l = old_global_l * exp_old + l2 * exp_cur;
-    global_o = global_o * exp_old + o2 * exp_cur;
-    global_m = new_global_m;
-  }
+  float old_global_m = global_m;
+  float old_global_l = global_l;
+  float new_global_m = fmaxf(old_global_m, m2);
+  float exp_old = __expf(old_global_m - new_global_m);
+  float exp_cur = __expf(m2 - new_global_m);
+  global_l = old_global_l * exp_old + l2 * exp_cur;
+  global_o = global_o * exp_old + o2 * exp_cur;
+  global_m = new_global_m;
 
-  // 处理第三个分支
-  if (active_branches > 2 && input_ptrs[2] != nullptr) {
-    T *T3_ptr = input_ptrs[2];
-    float m3 = static_cast<float>(T3_ptr[base_in + dqkv]);
-    float l3 = static_cast<float>(T3_ptr[base_in + dqkv + 1]);
-    float o3 = static_cast<float>(T3_ptr[base_in + tid]);
+  // 处理第三个分支 - 与普通版本完全一致
+  T *T3_ptr = input_ptrs[2];
+  float m3 = static_cast<float>(T3_ptr[base_in + dqkv]);
+  float l3 = static_cast<float>(T3_ptr[base_in + dqkv + 1]);
+  float o3 = static_cast<float>(T3_ptr[base_in + tid]);
 
-    float old_global_m = global_m;
-    float old_global_l = global_l;
-    float new_global_m = fmaxf(old_global_m, m3);
-    float exp_old = __expf(old_global_m - new_global_m);
-    float exp_cur = __expf(m3 - new_global_m);
-    global_l = old_global_l * exp_old + l3 * exp_cur;
-    global_o = global_o * exp_old + o3 * exp_cur;
-    global_m = new_global_m;
-  }
+  old_global_m = global_m;
+  old_global_l = global_l;
+  new_global_m = fmaxf(old_global_m, m3);
+  exp_old = __expf(old_global_m - new_global_m);
+  exp_cur = __expf(m3 - new_global_m);
+  global_l = old_global_l * exp_old + l3 * exp_cur;
+  global_o = global_o * exp_old + o3 * exp_cur;
+  global_m = new_global_m;
 
-  // 最终归一化
+  // 最终归一化 - 与普通版本完全一致
   float final_out = (global_l > 0.0f) ? global_o / global_l : 0.0f;
   output_ptr[base_out + tid] = static_cast<T>(final_out);
 }
