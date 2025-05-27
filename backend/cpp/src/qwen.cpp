@@ -439,6 +439,8 @@ void QwenModel<T>::print_model_info() const {
             << (quant_type_ == 0 ? "None"
                                  : (quant_type_ == 1 ? "AWQ" : "Unknown"))
             << std::endl;
+  std::cout << "  CUDA Graph: " << (use_cuda_graph_ ? "Enabled" : "Disabled")
+            << std::endl;
   if (quant_type_ != 0) {
     std::cout << "  Group size: " << group_size_ << std::endl;
     std::cout << "  Quantized weights count: " << qweight_params_.size()
@@ -478,48 +480,48 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
   Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA, false,
                           "hidden_states");
 
-  // 保存输入token（调试用）
-  std::cout << "forward_cuda: save_prefix = '" << save_prefix << "'"
-            << std::endl;
-  if (!save_prefix.empty()) {
-    std::cout << "保存输入token到: " << save_prefix + "_cuda_input_token.bin"
-              << std::endl;
-    save_uint32_tensor_to_binary(*input, save_prefix + "_cuda_input_token.bin");
+//   // 保存输入token（调试用）
+//   std::cout << "forward_cuda: save_prefix = '" << save_prefix << "'"
+//             << std::endl;
+//   if (!save_prefix.empty()) {
+//     std::cout << "保存输入token到: " << save_prefix + "_cuda_input_token.bin"
+//               << std::endl;
+//     save_uint32_tensor_to_binary(*input, save_prefix + "_cuda_input_token.bin");
 
-    // 调试：打印输入token值和embedding权重信息
-    std::vector<uint32_t> host_input(input->numel());
-    cudaMemcpy(host_input.data(), input->data_ptr(),
-               input->numel() * sizeof(uint32_t), cudaMemcpyDeviceToHost);
-    std::cout << "CUDA推理输入token: " << host_input[0] << std::endl;
+//     // 调试：打印输入token值和embedding权重信息
+//     std::vector<uint32_t> host_input(input->numel());
+//     cudaMemcpy(host_input.data(), input->data_ptr(),
+//                input->numel() * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+//     std::cout << "CUDA推理输入token: " << host_input[0] << std::endl;
 
-    // 打印embedding权重的地址和前几个值
-    auto &embedding_weight = params_.at("token_embeddings.weight");
-    std::cout << "CUDA推理embedding权重地址: " << embedding_weight.data_ptr()
-              << std::endl;
-    std::cout << "CUDA推理embedding权重形状: [" << embedding_weight.sizes()[0]
-              << ", " << embedding_weight.sizes()[1] << "]" << std::endl;
+//     // 打印embedding权重的地址和前几个值
+//     auto &embedding_weight = params_.at("token_embeddings.weight");
+//     std::cout << "CUDA推理embedding权重地址: " << embedding_weight.data_ptr()
+//               << std::endl;
+//     std::cout << "CUDA推理embedding权重形状: [" << embedding_weight.sizes()[0]
+//               << ", " << embedding_weight.sizes()[1] << "]" << std::endl;
 
-    // 保存当前token对应的embedding向量（用于对比）
-    uint32_t token_id = host_input[0];
-    if (token_id < embedding_weight.sizes()[0]) {
-      // 创建一个临时张量来保存这个token的embedding
-      Tensor<T> token_embedding(
-          {1, static_cast<size_t>(embedding_weight.sizes()[1])}, Device::CUDA,
-          false);
-      size_t offset = token_id * embedding_weight.sizes()[1];
-      cudaMemcpy(token_embedding.data_ptr(),
-                 static_cast<const T *>(embedding_weight.data_ptr()) + offset,
-                 embedding_weight.sizes()[1] * sizeof(T),
-                 cudaMemcpyDeviceToDevice);
-      save_tensor_to_binary(token_embedding, save_prefix + "_cuda_token_" +
-                                                 std::to_string(token_id) +
-                                                 "_embedding.bin");
-      std::cout << "保存了token " << token_id << " 的embedding向量"
-                << std::endl;
-    }
-  } else {
-    std::cout << "save_prefix为空，跳过保存输入token" << std::endl;
-  }
+//     // 保存当前token对应的embedding向量（用于对比）
+//     uint32_t token_id = host_input[0];
+//     if (token_id < embedding_weight.sizes()[0]) {
+//       // 创建一个临时张量来保存这个token的embedding
+//       Tensor<T> token_embedding(
+//           {1, static_cast<size_t>(embedding_weight.sizes()[1])}, Device::CUDA,
+//           false);
+//       size_t offset = token_id * embedding_weight.sizes()[1];
+//       cudaMemcpy(token_embedding.data_ptr(),
+//                  static_cast<const T *>(embedding_weight.data_ptr()) + offset,
+//                  embedding_weight.sizes()[1] * sizeof(T),
+//                  cudaMemcpyDeviceToDevice);
+//       save_tensor_to_binary(token_embedding, save_prefix + "_cuda_token_" +
+//                                                  std::to_string(token_id) +
+//                                                  "_embedding.bin");
+//       std::cout << "保存了token " << token_id << " 的embedding向量"
+//                 << std::endl;
+//     }
+//   } else {
+//     std::cout << "save_prefix为空，跳过保存输入token" << std::endl;
+//   }
 
   // Token嵌入 (从embedding_table中获取token嵌入)
   cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
@@ -582,15 +584,15 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     operators_->matmul(&k_slice, &hidden_states, k_weight, k_bias);
     operators_->matmul(&v_slice, &hidden_states, v_weight, v_bias);
 
-    // 保存QKV投影结果
-    if (!save_prefix.empty()) {
-      save_tensor_to_binary(q_buf, save_prefix + "_cuda_layer_" +
-                                       std::to_string(i) + "_q_proj.bin");
-      save_tensor_to_binary(k_slice, save_prefix + "_cuda_layer_" +
-                                         std::to_string(i) + "_k_proj.bin");
-      save_tensor_to_binary(v_slice, save_prefix + "_cuda_layer_" +
-                                         std::to_string(i) + "_v_proj.bin");
-    }
+    // // 保存QKV投影结果
+    // if (!save_prefix.empty()) {
+    //   save_tensor_to_binary(q_buf, save_prefix + "_cuda_layer_" +
+    //                                    std::to_string(i) + "_q_proj.bin");
+    //   save_tensor_to_binary(k_slice, save_prefix + "_cuda_layer_" +
+    //                                      std::to_string(i) + "_k_proj.bin");
+    //   save_tensor_to_binary(v_slice, save_prefix + "_cuda_layer_" +
+    //                                      std::to_string(i) + "_v_proj.bin");
+    // }
 
     // 重塑张量，准备应用RoPE
     Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
@@ -620,13 +622,13 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     operators_->rope(&q_buf_view, offset_q, rope_theta_, nullptr);
     operators_->rope(&k_buf_view, offset_k, rope_theta_, nullptr);
 
-    // 保存RoPE后的结果
-    if (!save_prefix.empty()) {
-      save_tensor_to_binary(q_buf_view, save_prefix + "_cuda_layer_" +
-                                            std::to_string(i) + "_q_rope.bin");
-      save_tensor_to_binary(k_buf_view, save_prefix + "_cuda_layer_" +
-                                            std::to_string(i) + "_k_rope.bin");
-    }
+    // // 保存RoPE后的结果
+    // if (!save_prefix.empty()) {
+    //   save_tensor_to_binary(q_buf_view, save_prefix + "_cuda_layer_" +
+    //                                         std::to_string(i) + "_q_rope.bin");
+    //   save_tensor_to_binary(k_buf_view, save_prefix + "_cuda_layer_" +
+    //                                         std::to_string(i) + "_k_rope.bin");
+    // }
 
     // 旧算子
     // cuda_OP::rope(&q_buf_view, offset, rope_theta_, nullptr);
@@ -736,23 +738,23 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     //                    nullptr);
 
     // 保存完整的KV
-    if (!save_prefix.empty()) {
-      save_tensor_to_binary(total_K, save_prefix + "_cuda_layer_" +
-                                         std::to_string(i) + "_total_k.bin");
-      save_tensor_to_binary(total_V, save_prefix + "_cuda_layer_" +
-                                         std::to_string(i) + "_total_v.bin");
-    }
+    // if (!save_prefix.empty()) {
+    //   save_tensor_to_binary(total_K, save_prefix + "_cuda_layer_" +
+    //                                      std::to_string(i) + "_total_k.bin");
+    //   save_tensor_to_binary(total_V, save_prefix + "_cuda_layer_" +
+    //                                      std::to_string(i) + "_total_v.bin");
+    // }
 
     // 使用新的动态分支数量的flash attention包装函数
     cuda_OP::dynamic_flash_attention_wrapper(Q_3d, total_K, total_V, att_heads,
                                              n_kv_heads_, nullptr);
 
     // 保存attention输出
-    if (!save_prefix.empty()) {
-      save_tensor_to_binary(
-          att_heads,
-          save_prefix + "_cuda_layer_" + std::to_string(i) + "_att_heads.bin");
-    }
+    // if (!save_prefix.empty()) {
+    //   save_tensor_to_binary(
+    //       att_heads,
+    //       save_prefix + "_cuda_layer_" + std::to_string(i) + "_att_heads.bin");
+    // }
     // Tensor<T> att_scores({n_heads_, total_seq_len}, Device::CUDA);
     // // // cuda_OP::compute_attention_scores(Q_3d, total_K, n_heads_,
     // head_dim_,
@@ -835,13 +837,13 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
     operators_->matmul(&up_buf, &hidden_states, up_weight, up_bias);
 
-    // 保存MLP投影
-    if (!save_prefix.empty()) {
-      save_tensor_to_binary(gate_buf, save_prefix + "_cuda_layer_" +
-                                          std::to_string(i) + "_gate_proj.bin");
-      save_tensor_to_binary(up_buf, save_prefix + "_cuda_layer_" +
-                                        std::to_string(i) + "_up_proj.bin");
-    }
+    // // 保存MLP投影
+    // if (!save_prefix.empty()) {
+    //   save_tensor_to_binary(gate_buf, save_prefix + "_cuda_layer_" +
+    //                                       std::to_string(i) + "_gate_proj.bin");
+    //   save_tensor_to_binary(up_buf, save_prefix + "_cuda_layer_" +
+    //                                     std::to_string(i) + "_up_proj.bin");
+    // }
 
     // cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
     // cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
@@ -889,16 +891,16 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input,
     }
 
     // 保存层结束后的状态
-    if (!save_prefix.empty()) {
-      save_tensor_to_binary(residual, save_prefix + "_cuda_layer_" +
-                                          std::to_string(i) +
-                                          "_final_residual.bin");
-      if (i < n_layers_ - 1) {
-        save_tensor_to_binary(hidden_states, save_prefix + "_cuda_layer_" +
-                                                 std::to_string(i) +
-                                                 "_final_hidden.bin");
-      }
-    }
+    // if (!save_prefix.empty()) {
+    //   save_tensor_to_binary(residual, save_prefix + "_cuda_layer_" +
+    //                                       std::to_string(i) +
+    //                                       "_final_residual.bin");
+    //   if (i < n_layers_ - 1) {
+    //     save_tensor_to_binary(hidden_states, save_prefix + "_cuda_layer_" +
+    //                                              std::to_string(i) +
+    //                                              "_final_hidden.bin");
+    //   }
+    // }
   }
 
   // 最终的LayerNorm (RMSNorm)
