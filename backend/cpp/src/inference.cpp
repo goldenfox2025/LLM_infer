@@ -355,21 +355,29 @@ void InferenceEngine<T>::generate_with_callback(
       // 如果是QwenModel且支持CUDA图，在预热阶段调用一次forward来初始化CUDA图
       // 这样可以使用真实的KV cache
       std::cout << "检查是否需要初始化CUDA图..." << std::endl;
-      try {
-        // 调整KV缓存大小为单token推理
-        kv_cache_.resize(kv_cache_.size() + 1);
 
-        // 创建单token输入用于图初始化
-        std::vector<uint32_t> graph_init_input = {9707};  // 包含token 9707的向量
-        Tensor<uint32_t> graph_input_tensor_(std::move(graph_init_input), {1}, device_);
-        // 调用forward来触发CUDA图初始化
-        uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor_, thread_pool_, &kv_cache_,
-                                                      top_k, temperature, top_p, d_states);
+      // 尝试向下转型为QwenModel，支持两种模板实例化
+      auto qwen_model_bf16 = dynamic_cast<QwenModel<__nv_bfloat16>*>(model_.get());
+      auto qwen_model_float = dynamic_cast<QwenModel<float>*>(model_.get());
 
-        std::cout << "CUDA图初始化完成！" << std::endl;
-      } catch (const std::exception& e) {
-        std::cout << "CUDA图初始化跳过或失败: " << e.what() << std::endl;
-        // 不是致命错误，继续执行
+      if (qwen_model_bf16 || qwen_model_float) {
+        std::cout << "检测到QwenModel，开始CUDA图初始化..." << std::endl;
+        try {
+          // 调整KV缓存大小为单token推理
+          kv_cache_.resize(kv_cache_.size() + 1);
+
+          // 创建单token输入用于图初始化
+          std::vector<uint32_t> graph_init_input = {9707};  // 包含token 9707的向量
+          Tensor<uint32_t> graph_input_tensor_(std::move(graph_init_input), {1}, device_);
+          // 调用forward来触发CUDA图初始化
+          uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor_, thread_pool_, &kv_cache_,
+                                                        top_k, temperature, top_p, d_states);
+
+          std::cout << "CUDA图初始化完成！" << std::endl;
+        } catch (const std::exception& e) {
+          std::cout << "CUDA图初始化跳过或失败: " << e.what() << std::endl;
+          // 不是致命错误，继续执行
+        }
       }
 
       // 停止计时
