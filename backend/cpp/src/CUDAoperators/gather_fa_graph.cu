@@ -13,12 +13,11 @@ namespace cuda_OP {
 // CUDA图优化版本的gather_fa kernel
 // 仿照gather_fa_variable的模式，支持最多3个分支
 template <typename T>
-__global__ void gather_fa_kernel_graph_fixed(T **input_ptrs,
-                                             T *output_ptr,
-                                             int *segment_info,
-                                             int q_h, int dqkv) {
+__global__ void gather_fa_kernel_graph_fixed(T **input_ptrs, T *output_ptr,
+                                             int *segment_info, int q_h,
+                                             int dqkv) {
   // 从设备内存读取分段信息
-  int total_seq_len = segment_info[0];
+  //   int total_seq_len = segment_info[0];
   // segment_info[1] (active_branches) 已经无用，始终使用固定3分支
 
   // 固定使用3分支模式，与flash_attention_graph_fixed保持一致
@@ -92,10 +91,8 @@ __global__ void gather_fa_kernel_graph_fixed(T **input_ptrs,
 
 // CUDA图优化版本：使用固定内存地址的gather_fa
 template <typename T>
-void gather_fa_graph_fixed(T **d_input_ptrs,
-                           Tensor<T> &output,
-                           int *d_segment_info,
-                           cudaStream_t stream) {
+void gather_fa_graph_fixed(T **d_input_ptrs, Tensor<T> &output,
+                           int *d_segment_info, cudaStream_t stream) {
   int dqkv = output.sizes()[1];
   int q_h = output.sizes()[0];
 
@@ -111,21 +108,18 @@ void gather_fa_graph_fixed(T **d_input_ptrs,
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA error in gather_fa_graph_fixed: " +
-                            std::string(cudaGetErrorString(err)));
+                             std::string(cudaGetErrorString(err)));
   }
 }
 
 // 显式模板实例化
-template void gather_fa_graph_fixed<float>(
-    float **d_input_ptrs,
-    Tensor<float> &output,
-    int *d_segment_info,
-    cudaStream_t stream);
+template void gather_fa_graph_fixed<float>(float **d_input_ptrs,
+                                           Tensor<float> &output,
+                                           int *d_segment_info,
+                                           cudaStream_t stream);
 
 template void gather_fa_graph_fixed<__nv_bfloat16>(
-    __nv_bfloat16 **d_input_ptrs,
-    Tensor<__nv_bfloat16> &output,
-    int *d_segment_info,
-    cudaStream_t stream);
+    __nv_bfloat16 **d_input_ptrs, Tensor<__nv_bfloat16> &output,
+    int *d_segment_info, cudaStream_t stream);
 
 }  // namespace cuda_OP
