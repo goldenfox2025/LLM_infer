@@ -4,5 +4,10 @@
 2. Qwen2.5支持CUDA GRAPH √
 
 3. 加速投机解码 []
+增强并行度，节约数据移动操作等。
 
-4. 在Qwen3上尝试Page Attention []
+4. 在Qwen3上尝试Page Attention ×
+工程量太大，将于新项目实现。
+
+5. 普通推理加速 []
+仍然部分工作可完成。如QKV融合。
