@@ -26,13 +26,13 @@ namespace cuda_OP {
 template <typename T>
 __global__ void flash_attention_kernel_graph_fixed(
     T *q,
-    const T *total_k,    // 连续的K缓存 [total_seq_len, n_kv_h, dqkv]
-    const T *total_v,    // 连续的V缓存 [total_seq_len, n_kv_h, dqkv]
-    T **output_ptrs,     // 固定的输出指针数组
-    int *segment_info,   // 分段信息：[total_seq_len, branch_count, branch_lengths...]
+    const T *total_k,   // 连续的K缓存 [total_seq_len, n_kv_h, dqkv]
+    const T *total_v,   // 连续的V缓存 [total_seq_len, n_kv_h, dqkv]
+    T **output_ptrs,    // 固定的输出指针数组
+    int *segment_info,  // 分段信息：[total_seq_len, branch_count,
+                        // branch_lengths...]
     int n_q_h, int n_kv_h, int dqkv, int B_c, int B_r, int n_groups, int T_r,
     T softmax_scale) {
-
   // 从设备内存读取分段信息
   int total_seq_len = segment_info[0];
   // segment_info[1] (active_branches) 已经无用，始终使用固定3分支
@@ -43,11 +43,9 @@ __global__ void flash_attention_kernel_graph_fixed(
   // 检查分支ID是否有效
   if (blockIdx.y >= FIXED_BRANCHES) return;
 
-  // 关键修复：使用与普通推理完全相同的分段逻辑
-  // 普通推理使用：tokens_per_branch = (total_seq_len + branches_needed - 1) / branches_needed
-  // 这是向上取整的除法，确保所有token都被覆盖
   int branches_needed = FIXED_BRANCHES;
-  int tokens_per_branch = (total_seq_len + branches_needed - 1) / branches_needed;
+  int tokens_per_branch =
+      (total_seq_len + branches_needed - 1) / branches_needed;
 
   int start_idx, end_idx;
   if (blockIdx.y == 0) {
@@ -56,7 +54,7 @@ __global__ void flash_attention_kernel_graph_fixed(
   } else if (blockIdx.y == 1) {
     start_idx = tokens_per_branch;
     end_idx = min(2 * tokens_per_branch, total_seq_len);
-  } else { // blockIdx.y == 2
+  } else {  // blockIdx.y == 2
     start_idx = 2 * tokens_per_branch;
     end_idx = total_seq_len;
   }
@@ -112,7 +110,8 @@ __global__ void flash_attention_kernel_graph_fixed(
 
       // 关键修复：确保不会越界访问
       if (valid && absolute_token_idx < total_seq_len) {
-        int index = (absolute_token_idx * n_kv_h + kv_head) * dqkv + i * vec_unit;
+        int index =
+            (absolute_token_idx * n_kv_h + kv_head) * dqkv + i * vec_unit;
         vk.f4 = *reinterpret_cast<const float4 *>(&total_k[index]);
         vv.f4 = *reinterpret_cast<const float4 *>(&total_v[index]);
 #pragma unroll
@@ -143,7 +142,8 @@ __global__ void flash_attention_kernel_graph_fixed(
         local_score += __shfl_down_sync(mask, local_score, offset);
       }
       if (d_tid == 0) {
-        s_score_buf[token_tid] = local_score * static_cast<float>(softmax_scale);
+        s_score_buf[token_tid] =
+            local_score * static_cast<float>(softmax_scale);
       }
     } else {
       if (d_tid == 0) {
@@ -154,7 +154,8 @@ __global__ void flash_attention_kernel_graph_fixed(
 
     // Local Softmax
     __shared__ float cur_m_s;
-    float warp_val = (d_tid < B_c && threadIdx.y == 0) ? s_score_buf[d_tid] : -FLT_MAX;
+    float warp_val =
+        (d_tid < B_c && threadIdx.y == 0) ? s_score_buf[d_tid] : -FLT_MAX;
     unsigned int mask_max = 0xFFFFFFFF;
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
       warp_val = fmaxf(warp_val, __shfl_down_sync(mask_max, warp_val, offset));
@@ -198,7 +199,8 @@ __global__ void flash_attention_kernel_graph_fixed(
           for (int i_tok = 0; i_tok < B_c; ++i_tok) {
             float exp_score = s_s_score[i_tok];
             float v_val = s_vj[i_tok * DQKV_VALUE + k_dim];
-            current_dim_partial_out = fmaf(exp_score, v_val, current_dim_partial_out);
+            current_dim_partial_out =
+                fmaf(exp_score, v_val, current_dim_partial_out);
           }
           s_o[k_dim] = current_dim_partial_out;
         }
@@ -221,10 +223,12 @@ __global__ void flash_attention_kernel_graph_fixed(
           for (int i_tok = 0; i_tok < B_c; ++i_tok) {
             float exp_score = s_s_score[i_tok];
             float v_val = s_vj[i_tok * DQKV_VALUE + k_dim];
-            current_dim_partial_out = fmaf(exp_score, v_val, current_dim_partial_out);
+            current_dim_partial_out =
+                fmaf(exp_score, v_val, current_dim_partial_out);
           }
           float old_out_val = s_o[k_dim];
-          float new_out_val = old_out_val * exp_old + current_dim_partial_out * exp_cur;
+          float new_out_val =
+              old_out_val * exp_old + current_dim_partial_out * exp_cur;
           s_o[k_dim] = new_out_val;
         }
       }
@@ -254,14 +258,10 @@ __global__ void flash_attention_kernel_graph_fixed(
 // CUDA图优化版本：使用固定内存地址和分段信息的flash attention
 // 仿照dynamic_flash_attention_wrapper的模式，直接接受连续的KV缓存
 template <typename T>
-void flash_attention_graph_fixed(Tensor<T> &Q,
-                                 const Tensor<T> &total_K,
-                                 const Tensor<T> &total_V,
-                                 T **d_output_ptrs,
-                                 int *d_segment_info,
-                                 int n_kv_heads,
+void flash_attention_graph_fixed(Tensor<T> &Q, const Tensor<T> &total_K,
+                                 const Tensor<T> &total_V, T **d_output_ptrs,
+                                 int *d_segment_info, int n_kv_heads,
                                  cudaStream_t stream) {
-
   int dqkv = Q.sizes()[2];
   if (dqkv != DQKV_VALUE) {
     throw std::runtime_error("dqkv 不匹配预定义的值");
@@ -281,39 +281,27 @@ void flash_attention_graph_fixed(Tensor<T> &Q,
 
   // 启动kernel
   flash_attention_kernel_graph_fixed<T><<<grid, block, 0, stream>>>(
-      Q.data_ptr(),
-      total_K.data_ptr(),
-      total_V.data_ptr(),
-      d_output_ptrs,
-      d_segment_info,
-      n_q_h, n_kv_heads, dqkv, B_c, B_r, n_groups, T_r,
+      Q.data_ptr(), total_K.data_ptr(), total_V.data_ptr(), d_output_ptrs,
+      d_segment_info, n_q_h, n_kv_heads, dqkv, B_c, B_r, n_groups, T_r,
       static_cast<T>(softmax_scale));
 
   // 检查错误
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
     throw std::runtime_error("CUDA error in flash_attention_graph_fixed: " +
-                            std::string(cudaGetErrorString(err)));
+                             std::string(cudaGetErrorString(err)));
   }
 }
 
 // 显式模板实例化
 template void flash_attention_graph_fixed<float>(
-    Tensor<float> &Q,
-    const Tensor<float> &total_K,
-    const Tensor<float> &total_V,
-    float **d_output_ptrs,
-    int *d_segment_info,
-    int n_kv_heads,
-    cudaStream_t stream);
+    Tensor<float> &Q, const Tensor<float> &total_K,
+    const Tensor<float> &total_V, float **d_output_ptrs, int *d_segment_info,
+    int n_kv_heads, cudaStream_t stream);
 
 template void flash_attention_graph_fixed<__nv_bfloat16>(
-    Tensor<__nv_bfloat16> &Q,
-    const Tensor<__nv_bfloat16> &total_K,
-    const Tensor<__nv_bfloat16> &total_V,
-    __nv_bfloat16 **d_output_ptrs,
-    int *d_segment_info,
-    int n_kv_heads,
-    cudaStream_t stream);
+    Tensor<__nv_bfloat16> &Q, const Tensor<__nv_bfloat16> &total_K,
+    const Tensor<__nv_bfloat16> &total_V, __nv_bfloat16 **d_output_ptrs,
+    int *d_segment_info, int n_kv_heads, cudaStream_t stream);
 
 }  // namespace cuda_OP

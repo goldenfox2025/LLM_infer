@@ -13,6 +13,14 @@
 #include "llama.hpp"
 #include "operators.hpp"
 #include "qwen.hpp"
+
+// 关于如何测试Qwen2.5的图推理
+// 1. 修改 `qwen.hpp` 中的 `use_cuda_graph_` 值
+// 2. 运行 `./build.sh` 重新编译
+// 3. 运行 `python frontend/chat.py --model_type qwen_bf16`
+// 4. 观察模型信息中的 "CUDA Graph" 状态
+// 5. 测试推理性能和正确性
+
 // 使用 common.hpp 中定义的 checkCudaErrors 宏
 // 定义用于结果队列的类型
 enum class Signal { EndOfStream };  // 定义 Signal 枚举
@@ -188,8 +196,9 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model,
     // 初始化CUDA资源
     cudaError_t err = cudaMalloc(&d_states, sizeof(curandState));
     if (err != cudaSuccess) {
-        throw std::runtime_error("Failed to allocate CUDA memory for curand states: " +
-                                std::string(cudaGetErrorString(err)));
+      throw std::runtime_error(
+          "Failed to allocate CUDA memory for curand states: " +
+          std::string(cudaGetErrorString(err)));
     }
     int seed = std::chrono::system_clock::now().time_since_epoch().count();
     cuda_OP::init_curand(d_states, seed, 0, nullptr);
@@ -357,7 +366,8 @@ void InferenceEngine<T>::generate_with_callback(
       std::cout << "检查是否需要初始化CUDA图..." << std::endl;
 
       // 尝试向下转型为QwenModel，支持两种模板实例化
-      auto qwen_model_bf16 = dynamic_cast<QwenModel<__nv_bfloat16>*>(model_.get());
+      auto qwen_model_bf16 =
+          dynamic_cast<QwenModel<__nv_bfloat16>*>(model_.get());
       auto qwen_model_float = dynamic_cast<QwenModel<float>*>(model_.get());
 
       if (qwen_model_bf16 || qwen_model_float) {
@@ -367,11 +377,14 @@ void InferenceEngine<T>::generate_with_callback(
           kv_cache_.resize(kv_cache_.size() + 1);
 
           // 创建单token输入用于图初始化
-          std::vector<uint32_t> graph_init_input = {9707};  // 包含token 9707的向量
-          Tensor<uint32_t> graph_input_tensor_(std::move(graph_init_input), {1}, device_);
+          std::vector<uint32_t> graph_init_input = {
+              9707};  // 包含token 9707的向量
+          Tensor<uint32_t> graph_input_tensor_(std::move(graph_init_input), {1},
+                                               device_);
           // 调用forward来触发CUDA图初始化
-          uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor_, thread_pool_, &kv_cache_,
-                                                        top_k, temperature, top_p, d_states);
+          uint32_t* graph_warmup_token =
+              model_->forward(&graph_input_tensor_, thread_pool_, &kv_cache_,
+                              top_k, temperature, top_p, d_states);
 
           std::cout << "CUDA图初始化完成！" << std::endl;
         } catch (const std::exception& e) {
@@ -379,7 +392,6 @@ void InferenceEngine<T>::generate_with_callback(
           // 不是致命错误，继续执行
         }
       }
-
       // 停止计时
       warmup_timer.stop();
 
@@ -497,10 +509,10 @@ void InferenceEngine<T>::generate_with_callback(
         // --- 异步拷贝结果回 CPU ---
         GpuTimer copy_timer;
         copy_timer.start();
-        checkCudaErrors(cudaMemcpyAsync(
-            &next_token_host, next_token_gpu_ptr, sizeof(uint32_t),
-            cudaMemcpyDeviceToHost, cudaStreamDefault));  // 假设用默认流
-        checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
+        checkCudaErrors(cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr,
+                                        sizeof(uint32_t),
+                                        cudaMemcpyDeviceToHost));
+
         copy_timer.stop();
 
         // 停止整体计时
@@ -582,12 +594,11 @@ void InferenceEngine<T>::generate_with_callback(
       }
     }
   } catch (...) {
-    // 捕获主线程中重新抛出的异常 (来自工作线程或回调函数)
-    // 确保即使出错也要尝试 join 线程
+    std::cerr << "No!" << std::endl;
     if (generation_thread.joinable()) {
       generation_thread.join();
     }
-    throw;  // 将异常继续向外层传递
+    throw;
   }
 
   // --- Cleanup ---
@@ -603,6 +614,17 @@ void InferenceEngine<T>::generate_with_callback(
 template <typename T>
 void InferenceEngine<T>::reset() {
   kv_cache_.clear();
+
+  // 重置模型的异步预准备状态
+  // 尝试转换为QwenModel并调用重置方法
+  auto qwen_model_bf16 = dynamic_cast<QwenModel<__nv_bfloat16>*>(model_.get());
+  auto qwen_model_float = dynamic_cast<QwenModel<float>*>(model_.get());
+
+  if (qwen_model_bf16) {
+    qwen_model_bf16->reset_async_preparation_state();
+  } else if (qwen_model_float) {
+    qwen_model_float->reset_async_preparation_state();
+  }
 }
 template <typename T>
 InferenceEngine<T>& InferenceEngine<T>::cuda() {
