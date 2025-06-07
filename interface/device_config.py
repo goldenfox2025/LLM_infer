@@ -1,37 +1,36 @@
 """
-Device configuration module for the inference system.
-This module provides functions to set and get the default device for model execution.
+推理系统的设备配置模块，提供设置和获取默认设备的函数。
 """
 
 import model_bridge
 
 def set_device(device: str) -> bool:
     """
-    Set the default device for model execution.
-    
-    Args:
-        device: The device to use ('cuda' or 'cpu')
-        
-    Returns:
-        bool: True if the device was set successfully, False otherwise
+    设置模型执行的默认设备。
+
+    参数：
+        device: 目标设备（"cuda" 或 "cpu"）
+
+    返回：
+        bool: 设置成功返回 True，否则返回 False
     """
     return model_bridge.set_default_device(device)
 
 def get_device() -> str:
     """
-    Get the current default device for model execution.
-    
-    Returns:
-        str: The current default device ('cuda' or 'cpu')
+    获取当前默认设备。
+
+    返回：
+        str: 当前默认设备（"cuda" 或 "cpu"）
     """
     return model_bridge.get_default_device()
 
 def is_cuda_available() -> bool:
     """
-    Check if CUDA is available.
-    
-    Returns:
-        bool: True if CUDA is available, False otherwise
+    检查 CUDA 是否可用。
+
+    返回：
+        bool: CUDA 可用返回 True，否则返回 False
     """
-    # If the current device is 'cuda', then CUDA is available
+    # 当前默认设备为 "cuda" 时视为可用
     return get_device() == 'cuda'

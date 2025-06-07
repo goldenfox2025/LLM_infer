@@ -224,24 +224,24 @@ void generate_text_stream_speculative(const std::vector<uint32_t>& input_ids,
 // Pybind11 模块定义
 PYBIND11_MODULE(model_bridge, m) {
   m.def("init_model", &init_model, py::arg("config"), py::arg("weights"),
-        py::arg("model_type") = "llama", "Initialize and verify the model");
+        py::arg("model_type") = "llama", "初始化并验证模型");
   m.def("generate_text_stream", &generate_text_stream, py::arg("input_ids"),
         py::arg("callback"), py::arg("max_length") = 100,
         py::arg("temperature") = 1.0f, py::arg("top_p") = 0.9f,
-        py::arg("top_k") = 50, "Stream generated tokens via callback");
+        py::arg("top_k") = 50, "通过回调流式返回生成的 token");
   m.def("set_default_device", &set_default_device, py::arg("device"),
-        "Set the default device for model execution (cuda or cpu)");
+        "设置模型执行的默认设备（cuda 或 cpu）");
   m.def("get_default_device", &get_default_device,
-        "Get the current default device for model execution");
+        "获取当前的默认设备");
 
   // 投机解码相关接口
   m.def("init_speculative_decoder", &init_speculative_decoder,
         py::arg("config"), py::arg("weights"), py::arg("draft_model_type"),
         py::arg("spec_length") = 4,
-        "Initialize speculative decoder with a draft model");
+        "使用草稿模型初始化投机解码器");
   m.def("generate_text_stream_speculative", &generate_text_stream_speculative,
         py::arg("input_ids"), py::arg("callback"), py::arg("max_length") = 100,
         py::arg("temperature") = 1.0f, py::arg("top_p") = 0.9f,
         py::arg("top_k") = 50,
-        "Stream generated tokens via speculative decoding");
+        "通过投机解码流式生成 token");
 }

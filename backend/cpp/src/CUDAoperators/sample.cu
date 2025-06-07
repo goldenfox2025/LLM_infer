@@ -18,15 +18,11 @@
 #include "CudaMemoryPool.hpp"
 #include "cudaOP.cuh"
 #include "tensor.hpp"
+#include "common.hpp"
 
-// --- 常量定义 (cudaOP.cuh定义) ---
+// --- 常量定义 ---
 // 示例: 定义 Kernel 2 中共享内存数组的最大大小
-// #define MAX_TOPK 256 // 重要: 必须定义此宏, 否则 Kernel 2 无法编译!
-// 假设 MAX_TOPK 在其他地方定义
 #define MAX_TOPK 1024
-// --- 检查 CUDA 错误的宏 (cudaOP.cuh定义) ---
-// #define CUDA_CHECK(call) ... // 重要: 必须定义此宏!
-// 假设 CUDA_CHECK 在其他地方定义
 
 namespace cuda_OP {
 
@@ -359,7 +355,6 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     // 返回指向设备端采样结果的指针
     return d_sampled_index;
 }
-#include "common.hpp"
 // 批量采样函数
 // 功能: 对输入的每个序列位置进行采样，返回指向设备端采样结果的指针数组
 // 输入:

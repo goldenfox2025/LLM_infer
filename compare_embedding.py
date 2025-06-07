@@ -4,53 +4,10 @@
 """
 
 import os
-import struct
-import numpy as np
 import sys
+import numpy as np
 
-def read_tensor_from_binary(filename: str) -> np.ndarray:
-    """从二进制文件读取张量数据"""
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"文件不存在: {filename}")
-    
-    with open(filename, 'rb') as f:
-        # 读取维度数量
-        ndim = struct.unpack('Q', f.read(8))[0]  # size_t = uint64
-        
-        # 读取各维度大小
-        shape = []
-        for _ in range(ndim):
-            dim = struct.unpack('Q', f.read(8))[0]
-            shape.append(dim)
-        
-        # 读取数据类型大小
-        dtype_size = struct.unpack('Q', f.read(8))[0]
-        
-        # 根据数据类型大小确定numpy数据类型
-        if dtype_size == 4:
-            if filename.endswith('input_token.bin'):
-                dtype = np.uint32
-            else:
-                dtype = np.float32
-        elif dtype_size == 2:
-            dtype = np.float16  # 对于bfloat16，我们用float16近似
-        else:
-            raise ValueError(f"不支持的数据类型大小: {dtype_size}")
-        
-        # 读取张量数据
-        total_elements = np.prod(shape)
-        data = f.read(total_elements * dtype_size)
-        
-        # 转换为numpy数组
-        if dtype_size == 2:
-            # 对于bfloat16，需要特殊处理
-            raw_data = np.frombuffer(data, dtype=np.uint16)
-            # 简单的bfloat16到float32转换（不完全准确，但足够对比）
-            tensor_data = raw_data.astype(np.float32) / 256.0
-        else:
-            tensor_data = np.frombuffer(data, dtype=dtype)
-        
-        return tensor_data.reshape(shape)
+from tools.binary_utils import read_tensor_from_binary
 
 def compare_embedding_vectors(cuda_file: str, graph_file: str):
     """对比CUDA和图推理的embedding向量"""

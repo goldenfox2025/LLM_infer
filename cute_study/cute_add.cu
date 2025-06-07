@@ -18,15 +18,7 @@
 #include <cute/algorithm/copy.hpp>
 #include <cute/algorithm/fill.hpp>
 
-// CUDA错误检查宏
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
-        if (error != cudaSuccess) { \
-            fprintf(stderr, "CUDA error at %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(error)); \
-            exit(1); \
-        } \
-    } while(0)
+#include "common.hpp"  // 提供 CUDA_CHECK 宏
 
 using namespace cute;
 

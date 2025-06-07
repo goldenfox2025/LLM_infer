@@ -14,28 +14,9 @@
 #include <stdexcept>
 #include <vector>
 
+#include "common.hpp"  // 提供 CUDA/CUBLAS 错误检查宏
 #include "inference.hpp"
 #include "tensor.hpp"
-#define CUTLASS_CHECK(status)                                             \
-  {                                                                       \
-    cutlass::Status error = status;                                       \
-    if (error != cutlass::Status::kSuccess) {                             \
-      std::cerr << "Got cutlass error: " << cutlassGetStatusString(error) \
-                << " at: " << __LINE__ << std::endl;                      \
-      exit(EXIT_FAILURE);                                                 \
-    }                                                                     \
-  }
-
-// CUDA Error Check Macro
-#define CUDA_CHECK(call)                                                \
-  do {                                                                  \
-    cudaError_t err = call;                                             \
-    if (err != cudaSuccess) {                                           \
-      fprintf(stderr, "CUDA Error at %s:%d - %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(err));                                 \
-      throw std::runtime_error(cudaGetErrorString(err));                \
-    }                                                                   \
-  } while (0)
 template <typename T, int N>
 union Vec {
   float4 f4;  // 实际载入 16 字节数据
