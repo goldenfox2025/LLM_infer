@@ -429,7 +429,7 @@ class Tensor {
         }
         std::vector<size_t> new_shape(shape_.size());
         for (size_t i = 0; i < shape_.size(); i++) {
-            if (start[i] >= shape_[i] || end[i] > shape_[i] || start[i] >= end[i]) {
+            if (start[i] > shape_[i] || end[i] > shape_[i] || start[i] > end[i]) {
                 throw std::runtime_error("slice: invalid start or end indices");
             }
             new_shape[i] = end[i] - start[i];
