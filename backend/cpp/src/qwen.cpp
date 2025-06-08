@@ -1184,50 +1184,61 @@ QwenModel<T> &QwenModel<T>::cuda() {
     // CUDA图初始化现在延迟到第一次forward调用时进行
     // 这样可以使用真实的KV cache
     if (quant_type_ == 0) {
-        // 合并gate和up权重，通过cudamemcpy
+        // 合并Q、K和V权重，通过cudamemcpy
         for (int i = 0; i < n_layers_; i++) {
             std::string layer_prefix = "layers." + std::to_string(i) + ".";
-            auto gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
-            auto up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
-
-            Tensor<T> merged_weight({gate_weight.sizes()[0], 2 * gate_weight.sizes()[1]}, Device::CUDA, false,
-                                    "merged_mlp_" + std::to_string(i));
-            cudaMemcpy(merged_weight.data_ptr(), gate_weight.data_ptr(), gate_weight.nbytes(),
-                       cudaMemcpyDeviceToDevice);
-            cudaMemcpy(merged_weight.data_ptr() + gate_weight.numel(), up_weight.data_ptr(), up_weight.nbytes(),
-                       cudaMemcpyDeviceToDevice);
-            params_["merged_mlp_" + std::to_string(i)] = std::move(merged_weight);
-        }
-
-        // 合并K和V权重，通过cudamemcpy
-        for (int i = 0; i < n_layers_; i++) {
-            std::string layer_prefix = "layers." + std::to_string(i) + ".";
+            auto q_weight = params_.at(layer_prefix + "self_attn.q_proj.weight");
             auto k_weight = params_.at(layer_prefix + "self_attn.k_proj.weight");
             auto v_weight = params_.at(layer_prefix + "self_attn.v_proj.weight");
 
-            // 创建合并的KV权重张量：[hidden_size, n_kv_heads * head_dim + n_kv_heads * head_dim]
-            // 即：[hidden_size, 2 * n_kv_heads * head_dim]
-            Tensor<T> merged_kv_weight({k_weight.sizes()[0], k_weight.sizes()[1] + v_weight.sizes()[1]}, Device::CUDA, false,
-                                       "merged_kv_" + std::to_string(i));
-            
-            // 先拷贝K权重，再拷贝V权重
-            cudaMemcpy(merged_kv_weight.data_ptr(), k_weight.data_ptr(), k_weight.nbytes(),
-                       cudaMemcpyDeviceToDevice);
-            cudaMemcpy(merged_kv_weight.data_ptr() + k_weight.numel(), v_weight.data_ptr(), v_weight.nbytes(),
-                       cudaMemcpyDeviceToDevice);
-            params_["merged_kv_" + std::to_string(i)] = std::move(merged_kv_weight);
+            // 创建合并的QKV权重张量：[hidden_size, n_heads * head_dim + n_kv_heads * head_dim + n_kv_heads * head_dim]
+            size_t total_width = q_weight.sizes()[1] + k_weight.sizes()[1] + v_weight.sizes()[1];
+            Tensor<T> merged_qkv_weight({q_weight.sizes()[0], total_width}, Device::CUDA, false,
+                                        "merged_qkv_" + std::to_string(i));
 
-            // 合并bias
-            auto k_bias = params_.at(layer_prefix + "self_attn.k_proj.bias");
-            auto v_bias = params_.at(layer_prefix + "self_attn.v_proj.bias");
-            Tensor<T> merged_bias({k_bias.sizes()[0] + v_bias.sizes()[0]}, Device::CUDA, false,
-                                   "merged_bias_" + std::to_string(i));
-            cudaMemcpy(merged_bias.data_ptr(), k_bias.data_ptr(), k_bias.nbytes(),
+            // 按顺序拷贝Q、K、V权重
+            cudaMemcpy(merged_qkv_weight.data_ptr(), q_weight.data_ptr(), q_weight.nbytes(), cudaMemcpyDeviceToDevice);
+            cudaMemcpy(merged_qkv_weight.data_ptr() + q_weight.numel(), k_weight.data_ptr(), k_weight.nbytes(),
                        cudaMemcpyDeviceToDevice);
-            cudaMemcpy(merged_bias.data_ptr() + k_bias.numel(), v_bias.data_ptr(), v_bias.nbytes(),
-                       cudaMemcpyDeviceToDevice);
-            params_["merged_bias_" + std::to_string(i)] = std::move(merged_bias);
+            cudaMemcpy(merged_qkv_weight.data_ptr() + q_weight.numel() + k_weight.numel(), v_weight.data_ptr(),
+                       v_weight.nbytes(), cudaMemcpyDeviceToDevice);
+            params_["merged_qkv_" + std::to_string(i)] = std::move(merged_qkv_weight);
+
+            // 合并QKV bias（如果存在）
+            try {
+                auto q_bias = params_.at(layer_prefix + "self_attn.q_proj.bias");
+                auto k_bias = params_.at(layer_prefix + "self_attn.k_proj.bias");
+                auto v_bias = params_.at(layer_prefix + "self_attn.v_proj.bias");
+
+                size_t total_bias_size = q_bias.sizes()[0] + k_bias.sizes()[0] + v_bias.sizes()[0];
+                Tensor<T> merged_qkv_bias({total_bias_size}, Device::CUDA, false,
+                                          "merged_qkv_bias_" + std::to_string(i));
+
+                cudaMemcpy(merged_qkv_bias.data_ptr(), q_bias.data_ptr(), q_bias.nbytes(), cudaMemcpyDeviceToDevice);
+                cudaMemcpy(merged_qkv_bias.data_ptr() + q_bias.numel(), k_bias.data_ptr(), k_bias.nbytes(),
+                           cudaMemcpyDeviceToDevice);
+                cudaMemcpy(merged_qkv_bias.data_ptr() + q_bias.numel() + k_bias.numel(), v_bias.data_ptr(),
+                           v_bias.nbytes(), cudaMemcpyDeviceToDevice);
+                params_["merged_qkv_bias_" + std::to_string(i)] = std::move(merged_qkv_bias);
+            } catch (const std::out_of_range &) {
+                // 如果没有bias则跳过
+            }
+            for (int i = 0; i < n_layers_; i++) {
+                std::string layer_prefix = "layers." + std::to_string(i) + ".";
+                auto gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
+                auto up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
+
+                Tensor<T> merged_weight({gate_weight.sizes()[0], 2 * gate_weight.sizes()[1]}, Device::CUDA, false,
+                                        "merged_mlp_" + std::to_string(i));
+                cudaMemcpy(merged_weight.data_ptr(), gate_weight.data_ptr(), gate_weight.nbytes(),
+                           cudaMemcpyDeviceToDevice);
+                cudaMemcpy(merged_weight.data_ptr() + gate_weight.numel(), up_weight.data_ptr(), up_weight.nbytes(),
+                           cudaMemcpyDeviceToDevice);
+                params_["merged_mlp_" + std::to_string(i)] = std::move(merged_weight);
+            }
         }
+
+        // 合并gate和up权重，通过cudamemcpy
     }
 
     return *this;
@@ -1326,38 +1337,43 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         } catch (const std::out_of_range &) {
         }
 
-        // KV投影优化：对于非量化模型，使用合并的KV权重
+        // KV投影优化：对于非量化模型，使用合并的QKV权重
         if (quant_type_ == 0) {
-            // 使用合并的KV权重进行单次矩阵乘法
-            auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
-            auto merged_kv_weight = params_.at("merged_kv_" + std::to_string(i));
-            
-            // Q投影
-            operators_->matmul(&q_buf, &hidden_states, q_weight, q_bias, stream);
-            auto merged_bias = params_.at("merged_bias_" + std::to_string(i));
-            // 合并的KV投影：一次矩阵乘法得到K和V
-            Tensor<T> merged_kv_result({seq_len, 2 * n_kv_heads_ * head_dim_}, Device::CUDA, false,
-                                       "merged_kv_result_" + std::to_string(i));
-            cuda_OP::matmul(hidden_states, merged_kv_weight, &merged_kv_result, stream, &merged_bias);
-            
-            // 从合并结果中拆分K和V
-            // K部分：[0, n_kv_heads_ * head_dim_)
-            // V部分：[n_kv_heads_ * head_dim_, 2 * n_kv_heads_ * head_dim_)
-            Tensor<T> k_slice = merged_kv_result.slice({0, 0}, {seq_len, n_kv_heads_ * head_dim_});
-            Tensor<T> v_slice = merged_kv_result.slice({0, n_kv_heads_ * head_dim_}, {seq_len, 2 * n_kv_heads_ * head_dim_});
-            
-            // 拷贝到固定缓冲区
-            cudaMemcpyAsync(k_buf.data_ptr(), k_slice.data_ptr(), k_slice.numel() * sizeof(T), 
-                           cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(v_buf.data_ptr(), v_slice.data_ptr(), v_slice.numel() * sizeof(T), 
-                           cudaMemcpyDeviceToDevice, stream);
-            
+            // 使用合并的QKV权重进行单次矩阵乘法
+            auto merged_qkv_weight = params_.at("merged_qkv_" + std::to_string(i));
+
+            // 合并的QKV投影：一次矩阵乘法得到Q、K和V
+            Tensor<T> merged_qkv_result({seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_}, Device::CUDA,
+                                        false, "merged_qkv_result_" + std::to_string(i));
+
             // 处理bias（如果存在）
-            // 注意：对于合并的KV投影，bias处理比较复杂，暂时跳过
-            // 在实际应用中，Qwen模型通常不使用attention的bias
-            if (k_bias != nullptr || v_bias != nullptr) {
-                std::cout << "Warning: KV bias is not supported in merged KV projection mode" << std::endl;
+            const Tensor<T> *merged_qkv_bias = nullptr;
+            try {
+                merged_qkv_bias = &params_.at("merged_qkv_bias_" + std::to_string(i));
+            } catch (const std::out_of_range &) {
+                // 如果没有bias则为空
             }
+
+            cuda_OP::matmul(hidden_states, merged_qkv_weight, &merged_qkv_result, stream, merged_qkv_bias);
+
+            // 从合并结果中拆分Q、K、V
+            // Q部分：[0, n_heads_ * head_dim_)
+            // K部分：[n_heads_ * head_dim_, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_)
+            // V部分：[n_heads_ * head_dim_ + n_kv_heads_ * head_dim_, n_heads_ * head_dim_ + 2 * n_kv_heads_ *
+            // head_dim_)
+            Tensor<T> q_slice = merged_qkv_result.slice({0, 0}, {seq_len, n_heads_ * head_dim_});
+            Tensor<T> k_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_},
+                                                        {seq_len, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_});
+            Tensor<T> v_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_},
+                                                        {seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_});
+
+            // 拷贝到固定缓冲区
+            cudaMemcpyAsync(q_buf.data_ptr(), q_slice.data_ptr(), q_slice.numel() * sizeof(T), cudaMemcpyDeviceToDevice,
+                            stream);
+            cudaMemcpyAsync(k_buf.data_ptr(), k_slice.data_ptr(), k_slice.numel() * sizeof(T), cudaMemcpyDeviceToDevice,
+                            stream);
+            cudaMemcpyAsync(v_buf.data_ptr(), v_slice.data_ptr(), v_slice.numel() * sizeof(T), cudaMemcpyDeviceToDevice,
+                            stream);
         } else {
             auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
             auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");

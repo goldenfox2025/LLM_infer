@@ -318,8 +318,8 @@ def create_callback(q: queue.Queue):
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description='LLaMA/Qwen/Qwen3 模型聊天')
-    parser.add_argument('--model_path', type=str, default="./models/Qwen2.5-1.5B-AWQ", help='模型路径')
-    parser.add_argument('--model_type', type=str, default="qwen_awq", 
+    parser.add_argument('--model_path', type=str, default="./models/Qwen2.5-1.5B", help='模型路径')
+    parser.add_argument('--model_type', type=str, default="qwen_bf16", 
                        choices=['llama', 'qwen', 'qwen_bf16', 'qwen_awq', 'qwen3_bf16', 'qwen3_awq'], 
                        help='模型类型')
     parser.add_argument('--device', type=str, default="cuda", choices=['cuda', 'cpu'], help='运行设备 (cuda 或 cpu)') # qwen不支持cpu 会强制使用cuda
