@@ -80,6 +80,13 @@ class QwenModel : public BaseModel {
             // 关键修复：确保图执行完成后再调用sample
             // cudaStreamSynchronize(graph_stream_);
 
+            
+        cudaEventCreate(&fa_done_events_[0]);
+cudaEventRecord(fa_done_events_[0], graph_stream_);
+
+// 3) 让默认流（或你专门的 sample_stream_）等待这个事件
+//    这里用 0 表示 per-thread default stream，如果你有专门的 sample_stream_，就替换成它
+cudaStreamWaitEvent(0, fa_done_events_[0], 0);
             size_t next_rope_offset = typed_cache->size();  // 下一个token的位置
             update_graph_kv_addresses_async_for_next(typed_cache, next_rope_offset);
             // 优化：立即开始准备下一次执行的其他参数（异步）
@@ -162,13 +169,7 @@ class QwenModel : public BaseModel {
     Tensor<T> forward_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache, const std::string& save_prefix = "");
     Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
-    // 简化版本的前向传播，用于图优化开发
-    // 特点：
-    // 1. 只包含必要的算子，去除了复杂的优化逻辑
-    // 2. 不使用KV缓存的复杂管理，简化注意力计算
-    // 3. 统一使用operators_接口，便于后续图优化
-    // 4. 移除了流并行和事件同步等优化
-    // 5. 支持指定流执行，用于 CUDA 图捕获
+
     Tensor<T> forward_for_graph(const Tensor<uint32_t>* input, KVCache<T>* kv_cache, cudaStream_t stream = nullptr);
 
     // 获取权重（普通或量化）
