@@ -1239,8 +1239,6 @@ QwenModel<T> &QwenModel<T>::cuda() {
         }
     }
 
-    // 合并gate和up权重，通过cudamemcpy
-}
 
 return *this;
 }
