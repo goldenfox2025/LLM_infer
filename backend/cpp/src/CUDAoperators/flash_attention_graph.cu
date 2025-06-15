@@ -14,7 +14,7 @@
 #include "cudaOP.cuh"
 
 #define DQKV_VALUE 128
-#define B_C_VALUE 8
+#define B_C_VALUE 16
 // #define MAX_BRANCHES 5
 
 constexpr int WARP_SIZE = 32;
@@ -25,13 +25,11 @@ namespace cuda_OP {
 // 直接从连续的KV缓存中读取数据，仿照flash_attention_variable的模式
 template <typename T>
 __global__ void flash_attention_kernel_graph_fixed(T *q,
-                                                   const T *total_k,   // 连续的K缓存 [total_seq_len, n_kv_h, dqkv]
-                                                   const T *total_v,   // 连续的V缓存 [total_seq_len, n_kv_h, dqkv]
-                                                   T **output_ptrs,    // 固定的输出指针数组
-                                                   int *segment_info,  // 分段信息：[total_seq_len, branch_count,
-                                                                       // branch_lengths...]
-                                                   int n_q_h, int n_kv_h, int dqkv, int B_c, int B_r, int n_groups,
-                                                   int T_r, T softmax_scale) {
+                                                   const T *total_k,  // 连续的K缓存 [total_seq_len, n_kv_h, dqkv]
+                                                   const T *total_v,  // 连续的V缓存 [total_seq_len, n_kv_h, dqkv]
+                                                   T **output_ptrs,   // 固定的输出指针数组
+                                                   int *segment_info, int n_q_h, int n_kv_h, int dqkv, int B_c, int B_r,
+                                                   int n_groups, int T_r, T softmax_scale) {
     // 从设备内存读取分段信息
     int total_seq_len = segment_info[0];
     // segment_info[1] (active_branches) 已经无用，始终使用固定3分支

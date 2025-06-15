@@ -1239,8 +1239,7 @@ QwenModel<T> &QwenModel<T>::cuda() {
         }
     }
 
-
-return *this;
+    return *this;
 }
 
 // -------------------------------
@@ -1280,14 +1279,9 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
 
     const size_t seq_len = 1;  // 单token推理
 
-    // 创建基本张量 - 使用tagged memory
     Tensor<T> residual({seq_len, hidden_size_}, Device::CUDA, false, "graph_residual");
     Tensor<T> hidden_states({seq_len, hidden_size_}, Device::CUDA, false, "graph_hidden_states");
 
-    // 1. Token嵌入 - 关键修复：使用固定的输入张量，确保地址一致性
-    // 在图执行前，graph_input_tensor_的内容已经通过cudaMemcpyAsync更新到正确的token值
-
-    // 调试：打印gather操作的参数地址
     std::cout << "gather操作参数地址:" << std::endl;
     std::cout << "  residual地址: " << residual.data_ptr() << std::endl;
     std::cout << "  graph_input_tensor_地址: " << graph_input_tensor_.data_ptr() << std::endl;
@@ -1299,25 +1293,15 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
     // 使用新的算子抽象层
     operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight, rms_norm_eps_, stream);
 
-    // 2. Transformer层循环
     for (size_t i = 0; i < n_layers_; i++) {
         std::string layer_prefix = "layers." + std::to_string(i) + ".";
 
-        // // 2.1 输入层归一化
-        // auto &attention_norm_weight = params_.at(layer_prefix +
-        // "input_layernorm.weight"); operators_->rms_norm(&hidden_states,
-        // &residual, &attention_norm_weight, rms_norm_eps_, stream);
-
-        // 2.2 自注意力机制
-        // 关键修复：直接使用固定缓冲区作为matmul的输出，确保K和V写入正确位置
         std::string q_tag = "graph_q_buf_" + std::to_string(i);
         Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA, false, q_tag);
 
-        // 关键修复：直接使用固定的K/V缓冲区作为matmul输出
         Tensor<T> &k_buf = fixed_k_buffers_[i];
         Tensor<T> &v_buf = fixed_v_buffers_[i];
 
-        // 获取偏置项（如果存在）- 仿照普通forward的bias读取
         const Tensor<T> *q_bias = nullptr;
         const Tensor<T> *k_bias = nullptr;
         const Tensor<T> *v_bias = nullptr;
@@ -1366,13 +1350,20 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             Tensor<T> v_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_},
                                                         {seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_});
 
-            // 拷贝到固定缓冲区
-            cudaMemcpyAsync(q_buf.data_ptr(), q_slice.data_ptr(), q_slice.numel() * sizeof(T), cudaMemcpyDeviceToDevice,
-                            stream);
-            cudaMemcpyAsync(k_buf.data_ptr(), k_slice.data_ptr(), k_slice.numel() * sizeof(T), cudaMemcpyDeviceToDevice,
-                            stream);
-            cudaMemcpyAsync(v_buf.data_ptr(), v_slice.data_ptr(), v_slice.numel() * sizeof(T), cudaMemcpyDeviceToDevice,
-                            stream);
+            // // 拷贝到固定缓冲区
+            // cudaMemcpyAsync(q_buf.data_ptr(), q_slice.data_ptr(), q_slice.numel() * sizeof(T),
+            // cudaMemcpyDeviceToDevice,
+            //                 stream);
+            // cudaMemcpyAsync(k_buf.data_ptr(), k_slice.data_ptr(), k_slice.numel() * sizeof(T),
+            // cudaMemcpyDeviceToDevice,
+            //                 stream);
+            // cudaMemcpyAsync(v_buf.data_ptr(), v_slice.data_ptr(), v_slice.numel() * sizeof(T),
+            // cudaMemcpyDeviceToDevice,
+            //                 stream);
+
+            q_buf = q_slice;
+            k_buf = k_slice;
+            v_buf = v_slice;
         } else {
             auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
             auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
@@ -1387,26 +1378,20 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         // 关键修复：确保K和V的计算结果写入到固定缓冲区
         // 这样图执行后可以正确复制到KV cache
         // 注意：这里不能直接写入KV cache，因为地址会变化，但必须写入固定缓冲区
-
         // 重塑为3D张量
+
         Tensor<T> q_3d = q_buf.view({seq_len, n_heads_, head_dim_});
         Tensor<T> k_3d = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_3d = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        // 问题1解决方案：RoPE使用固定设备内存的offset
-        // 注意：offset的更新必须在图执行之前完成，这里只是读取固定内存中的值
         cuda_OP::rope_with_device_offset(&q_3d, d_rope_offset_, rope_theta_, stream);
         cuda_OP::rope_with_device_offset(&k_3d, d_rope_offset_, rope_theta_, stream);
 
-        // 关键修复：先写入KV cache，然后读取完整数据，与forward_cuda保持一致
-        // KV缓存必须存在，否则是错误的
         if (!kv_cache) {
             throw std::runtime_error("forward_for_graph requires KV cache");
         }
 
-        // 方案：使用图节点更新来处理动态KV地址
         // 在图中直接写入KV cache，然后通过图节点更新来改变目标地址
-
         // 获取当前token在KV cache中的位置（图捕获时使用默认位置）
         size_t current_offset = kv_cache->size() - 1;
 
@@ -1425,7 +1410,6 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         // 获取包含当前token的完整KV cache数据
         auto [total_K_flat, total_V_flat] = kv_cache->get_contiguous_tensor(i);
 
-        // 问题3解决方案：使用固定内存地址的flash attention
         std::string att_tag = "graph_att_heads_" + std::to_string(i);
         Tensor<T> att_heads({n_heads_, head_dim_}, Device::CUDA, false, att_tag);
 
@@ -1483,16 +1467,14 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             gate_buf = merged_mlp_result.slice({0, 0}, {1, intermediate_size_});
             up_buf = merged_mlp_result.slice({0, intermediate_size_}, {1, 2 * intermediate_size_});
         }
-        // SiLU激活和逐元素相乘
+
         operators_->silu(&gate_buf, &gate_buf, stream);
         operators_->multiply(&gate_buf, &gate_buf, &up_buf, stream);
 
-        // 下投影 - 使用tagged memory
         Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA, false, ffn_tag);
         auto down_weight = get_weight(layer_prefix + "mlp.down_proj");
         operators_->matmul(&ffn_out, &gate_buf, down_weight, nullptr, stream);
 
-        // 残差连接和下一层的input_layernorm - 仿照普通模式的逻辑
         if (i == n_layers_ - 1) {
             // 最后一层只做残差连接
             operators_->add(&residual, &residual, &ffn_out, stream);
@@ -1504,12 +1486,10 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         }
     }
 
-    // 3. 最终层归一化 - 使用tagged memory
     auto &norm_weight = params_.at("norm.weight");
     Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA, false, "graph_final_h");
     operators_->rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_, stream);
 
-    // 4. LM Head投影 - 使用固定tag确保地址一致
     auto lm_head_weight = get_weight("lm_head");
     Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA, false, "graph_fixed_logits");
     operators_->matmul(&logits, &final_h, lm_head_weight, nullptr, stream);
@@ -1546,21 +1526,15 @@ void QwenModel<T>::initialize_graph_fixed_memory() {
         fixed_v_buffers_.push_back(std::move(v_buf));
     }
 
-    // 初始化KV复制节点列表
     kv_copy_nodes_.clear();
 
-    // 问题3解决方案：分配flash attention的固定内存和分段信息
-    // 使用tagged memory分配分段信息内存：[total_seq_len, branch_count,
-    // branch_lengths...]
     const int max_branches = 3;
     Tensor<int> segment_info_tensor({2 + max_branches}, Device::CUDA, false, "graph_segment_info");
     d_segment_info_ = segment_info_tensor.data_ptr();
 
-    // 只需要输出指针数组，不再需要K/V切片指针
     Tensor<T *> output_ptrs_tensor({max_branches}, Device::CUDA, false, "graph_output_ptrs");
     d_output_ptrs_ = output_ptrs_tensor.data_ptr();
 
-    // 为每层分配flash attention输出缓冲区
     fixed_fa_outputs_.clear();
     fixed_fa_outputs_.reserve(max_branches);
 
@@ -1576,7 +1550,6 @@ void QwenModel<T>::initialize_graph_fixed_memory() {
 
 template <typename T>
 void QwenModel<T>::cleanup_graph_fixed_memory() {
-    // 清理RoPE offset设备内存（这个仍然使用cudaMalloc分配的）
     if (d_rope_offset_) {
         cudaFree(d_rope_offset_);
         d_rope_offset_ = nullptr;
@@ -1930,7 +1903,6 @@ void QwenModel<T>::initialize_cuda_graph_with_kv_cache(KVCache<T> *kv_cache) {
     // 预热运行：先运行一次forward_for_graph来分配所有tagged memory
     std::cout << "使用真实KV cache进行预热运行..." << std::endl;
     try {
-        // 关键修复：图捕获时使用与图执行时相同的offset计算逻辑
         // 图执行时：rope_offset = typed_cache->size() - 1（当前token位置）
         // 图执行时：total_seq_len = typed_cache->size()（包含当前token的完整数据）
         size_t default_offset = kv_cache->size() - 1;     // 与图执行时保持一致
