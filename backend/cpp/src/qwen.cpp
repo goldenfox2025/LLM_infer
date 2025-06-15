@@ -1350,18 +1350,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             Tensor<T> v_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_},
                                                         {seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_});
 
-            // // 拷贝到固定缓冲区
-            // cudaMemcpyAsync(q_buf.data_ptr(), q_slice.data_ptr(), q_slice.numel() * sizeof(T),
-            // cudaMemcpyDeviceToDevice,
-            //                 stream);
-            // cudaMemcpyAsync(k_buf.data_ptr(), k_slice.data_ptr(), k_slice.numel() * sizeof(T),
-            // cudaMemcpyDeviceToDevice,
-            //                 stream);
-            // cudaMemcpyAsync(v_buf.data_ptr(), v_slice.data_ptr(), v_slice.numel() * sizeof(T),
-            // cudaMemcpyDeviceToDevice,
-            //                 stream);
-
-            q_buf = q_slice;
+             q_buf = q_slice;
             k_buf = k_slice;
             v_buf = v_slice;
         } else {
