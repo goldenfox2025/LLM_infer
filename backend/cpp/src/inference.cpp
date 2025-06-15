@@ -34,8 +34,10 @@ KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim, Device
     // 初始化 KVCache
 
     // 分配连续内存，形状为 [n_layers, max_seq_len, head_dim]
-    k_cache_contiguous_ = Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_);
-    v_cache_contiguous_ = Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_);
+    // 关键修复：强制KV Cache从独立内存分配，不使用prefill buffer
+    // 通过设置is_prefill=false确保不会从prefill buffer分配
+    k_cache_contiguous_ = Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_, false);
+    v_cache_contiguous_ = Tensor<T>({n_layers_, max_seq_len_, head_dim_}, device_, false);
 
     // 分配一维 vector 存储所有 slice
     k_cache_slices_.resize(n_layers_ * max_seq_len_);
@@ -44,8 +46,7 @@ KVCache<T>::KVCache(size_t n_layers, size_t max_seq_len, size_t head_dim, Device
         for (size_t pos = 0; pos < max_seq_len_; pos++) {
             size_t idx = layer * max_seq_len_ + pos;
             // 利用 slice 方法构造对应的 view，
-            // 对于 k_cache_contiguous_，取范围 [layer, pos, 0] 到 [layer+1, pos+1,
-            // head_dim_]
+            // 对于 k_cache_contiguous_，取范围 [layer, pos, 0] 到 [layer+1, pos+1, head_dim_]
             k_cache_slices_[idx] = k_cache_contiguous_.slice({layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
             v_cache_slices_[idx] = v_cache_contiguous_.slice({layer, pos, 0}, {layer + 1, pos + 1, head_dim_});
         }

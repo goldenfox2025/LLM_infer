@@ -78,7 +78,7 @@ class QwenModel : public BaseModel {
             }
 
             // 关键修复：确保图执行完成后再调用sample
-            cudaStreamSynchronize(graph_stream_);
+            // cudaStreamSynchronize(graph_stream_);
 
             size_t next_rope_offset = typed_cache->size();  // 下一个token的位置
             update_graph_kv_addresses_async_for_next(typed_cache, next_rope_offset);
