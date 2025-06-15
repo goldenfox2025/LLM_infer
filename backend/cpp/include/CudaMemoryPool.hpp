@@ -145,7 +145,7 @@ class CudaMemoryPool {
                         break;
                     }
                 }
-                
+
                 if (!has_active_tagged_memory) {
                     ptr = try_allocate_from_prefill(size, aligned_size, true);
                 }
