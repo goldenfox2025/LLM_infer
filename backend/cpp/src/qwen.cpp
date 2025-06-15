@@ -1223,25 +1223,26 @@ QwenModel<T> &QwenModel<T>::cuda() {
             } catch (const std::out_of_range &) {
                 // 如果没有bias则跳过
             }
-            for (int i = 0; i < n_layers_; i++) {
-                std::string layer_prefix = "layers." + std::to_string(i) + ".";
-                auto gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
-                auto up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
-
-                Tensor<T> merged_weight({gate_weight.sizes()[0], 2 * gate_weight.sizes()[1]}, Device::CUDA, false,
-                                        "merged_mlp_" + std::to_string(i));
-                cudaMemcpy(merged_weight.data_ptr(), gate_weight.data_ptr(), gate_weight.nbytes(),
-                           cudaMemcpyDeviceToDevice);
-                cudaMemcpy(merged_weight.data_ptr() + gate_weight.numel(), up_weight.data_ptr(), up_weight.nbytes(),
-                           cudaMemcpyDeviceToDevice);
-                params_["merged_mlp_" + std::to_string(i)] = std::move(merged_weight);
-            }
         }
+        for (int i = 0; i < n_layers_; i++) {
+            std::string layer_prefix = "layers." + std::to_string(i) + ".";
+            auto gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
+            auto up_weight = params_.at(layer_prefix + "mlp.up_proj.weight");
 
-        // 合并gate和up权重，通过cudamemcpy
+            Tensor<T> merged_weight({gate_weight.sizes()[0], 2 * gate_weight.sizes()[1]}, Device::CUDA, false,
+                                    "merged_mlp_" + std::to_string(i));
+            cudaMemcpy(merged_weight.data_ptr(), gate_weight.data_ptr(), gate_weight.nbytes(),
+                       cudaMemcpyDeviceToDevice);
+            cudaMemcpy(merged_weight.data_ptr() + gate_weight.numel(), up_weight.data_ptr(), up_weight.nbytes(),
+                       cudaMemcpyDeviceToDevice);
+            params_["merged_mlp_" + std::to_string(i)] = std::move(merged_weight);
+        }
     }
 
-    return *this;
+    // 合并gate和up权重，通过cudamemcpy
+}
+
+return *this;
 }
 
 // -------------------------------
