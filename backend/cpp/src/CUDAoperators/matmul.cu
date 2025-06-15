@@ -479,7 +479,6 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
                 // 在这里可能需要做更健壮的错误处理，比如抛出异常或终止程序
                 handle = nullptr;  // 确保句柄无效
             } else {
-                // 可选：如果需要关联特定流，可以在这里设置
                 // cudaStream_t stream = nullptr; // 或获取一个全局流
                 // cublasSetStream(handle, stream);
                 // printf("--- Static cublasHandle initialized: %p ---\n",
@@ -534,33 +533,6 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
         }
         // std::cout << "cublas_matmul_wrapper<T> 调用成功" << std::endl;
         if (bias != nullptr) {
-            // printf("Launching add_bias_kernel:\n");
-            // printf("  C ptr: %p\n", (void *)C->data_ptr());
-            // printf("  bias ptr: %p\n", (void *)bias->data_ptr());
-            // printf("  M: %d\n", static_cast<int>(M));
-            // printf("  N: %d\n", static_cast<int>(N));
-            // printf("  ldc: %d\n", ldc);
-            // fflush(stdout);  // 确保打印出来
-
-            // --- 检查指针是否为 NULL ---
-            // if (C->data_ptr() == nullptr || bias->data_ptr() == nullptr) {
-            //   fprintf(stderr, "错误: C 或 bias 指针为 NULL!\n");
-            //   // 可能需要在这里中断或返回错误
-            // }
-            // // --- 检查 ldc ---
-            // if (ldc < static_cast<int>(N)) {
-            //   fprintf(stderr, "错误: ldc (%d) 小于 N (%d)!\n", ldc,
-            //           static_cast<int>(N));
-            //   // 可能需要在这里中断或返回错误
-            // }
-            // // --- 检查维度是否合理 ---
-            // if (static_cast<int>(M) <= 0 || static_cast<int>(N) <= 0) {
-            //   fprintf(stderr, "错误: M (%d) 或 N (%d) 无效!\n",
-            //   static_cast<int>(M),
-            //           static_cast<int>(N));
-            //   // 可能需要在这里中断或返回错误
-            // }
-
             dim3 blockDim(16, 16);
             // 计算网格大小，确保覆盖所有元素
             dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
