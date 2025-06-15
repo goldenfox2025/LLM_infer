@@ -21,24 +21,24 @@ constexpr int WARP_SIZE = 32;           // CUDA Warp 大小
 
 // gemv 格式的 awq 权重打包是顺序的
 // 仅支持bf16
-template <typename T,                                                  // 输入/输出数据类型 (half, bfloat16, float)
-          typename S,                                                  // Scale 数据类型 (通常是 float)
-          int BM,                                                      // M 方向的 Block 大小
-          int BN,                                                      // N 方向的 Block 大小
-          int BK,                                                      // K 方向的 Block 大小
-          int WMMA_M,                                                  // WMMA 指令的 M 方向大小
-          int WMMA_N,                                                  // WMMA 指令的 N 方向大小
-          int WMMA_K,                                                  // WMMA 指令的 K 方向大小
-          int WARP_CNT>                                                // 每个 Block 的 Warp 数量
-__global__ void matmul_awq_gemm_kernel_opt(const T* __restrict__ inp,  // 输入矩阵 [M, K]
-                                           const int32_t* __restrict__ qwt,  // 量化权重 [N, K/8] (N-Major)
-                                           const S* __restrict__ scl,        // 缩放因子 [N, G_padded] (N-Major)
-                                           const int32_t* __restrict__ zos,  // 零点 [N, G/8] (N-Major)
-                                           T* __restrict__ out,              // 输出矩阵 [M, N]
-                                           int M, int K, int N,
-                                           int group_size,  // AWQ group 大小
-                                           int G_PADDED,    // !!! 新增: Scales 张量的实际第二维度 (Padding) !!!
-                                           const T* __restrict__ bias) {
+template <typename T,                                                    // 输入/输出数据类型 (half, bfloat16, float)
+          typename S,                                                    // Scale 数据类型 (通常是 float)
+          int BM,                                                        // M 方向的 Block 大小
+          int BN,                                                        // N 方向的 Block 大小
+          int BK,                                                        // K 方向的 Block 大小
+          int WMMA_M,                                                    // WMMA 指令的 M 方向大小
+          int WMMA_N,                                                    // WMMA 指令的 N 方向大小
+          int WMMA_K,                                                    // WMMA 指令的 K 方向大小
+          int WARP_CNT>                                                  // 每个 Block 的 Warp 数量
+__global__ void matmul_awq_gemm_kernel(const T* __restrict__ inp,        // 输入矩阵 [M, K]
+                                       const int32_t* __restrict__ qwt,  // 量化权重 [N, K/8] (N-Major)
+                                       const S* __restrict__ scl,        // 缩放因子 [N, G_padded] (N-Major)
+                                       const int32_t* __restrict__ zos,  // 零点 [N, G/8] (N-Major)
+                                       T* __restrict__ out,              // 输出矩阵 [M, N]
+                                       int M, int K, int N,
+                                       int group_size,  // AWQ group 大小
+                                       int G_PADDED,    // !!! 新增: Scales 张量的实际第二维度 (Padding) !!!
+                                       const T* __restrict__ bias) {
     const int G = K / group_size;
     const int K_PACKED = (K + PACK_FACTOR - 1) / PACK_FACTOR;
     const int G_PACKED = (G + PACK_FACTOR - 1) / PACK_FACTOR;
@@ -267,12 +267,12 @@ __global__ void matmul_awq_gemv_kernel_opt(const T* __restrict__ inp,  // 输入
     }
 }
 template <int BLOCK_N_GEMV, typename ScaleType = float>
-__global__ void matmul_awq_gemv_bf16_vectorized_kernel(  // <--- 重命名 Kernel
-    const __nv_bfloat16* __restrict__ inp,               // 输入向量 [K] (BF16)
-    const int32_t* __restrict__ qwt,                     // 权重 [N, K/8]
-    const ScaleType* __restrict__ scl,                   // Scales [N, G_padded] (ScaleType)
-    const int32_t* __restrict__ zos,                     // Zeros [N, G/8]
-    __nv_bfloat16* __restrict__ out,                     // 输出向量 [N] (BF16)
+__global__ void matmul_awq_gemv_bf16_vectorized_kernel(
+    const __nv_bfloat16* __restrict__ inp,  // 输入向量 [K] (BF16)
+    const int32_t* __restrict__ qwt,        // 权重 [N, K/8]
+    const ScaleType* __restrict__ scl,      // Scales [N, G_padded] (ScaleType)
+    const int32_t* __restrict__ zos,        // Zeros [N, G/8]
+    __nv_bfloat16* __restrict__ out,        // 输出向量 [N] (BF16)
     int K, int N, int group_size,
     int G_PADDED,                            // Scales 张量的实际第二维度
     const __nv_bfloat16* __restrict__ bias)  // 偏置向量 [N] (BF16, 可选)
@@ -512,7 +512,7 @@ void matmul_quantized_gemv(const Tensor<T>& input,           // 输入 [M, K]
         const dim3 grid_gemm((M + BM - 1) / BM, (N + BN - 1) / BN);  // 2D Grid
 
         if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-            matmul_awq_gemm_kernel_opt<T, ScaleType, BM, BN, BK, WMMA_M, WMMA_N, WMMA_K, WARP_CNT>
+            matmul_awq_gemm_kernel<T, ScaleType, BM, BN, BK, WMMA_M, WMMA_N, WMMA_K, WARP_CNT>
                 <<<grid_gemm, threads_gemm, 0, stream>>>(  // 使用静态共享内存
                     input.data_ptr(), qweight.data_ptr(), scales.data_ptr(), zeros.data_ptr(), output->data_ptr(), M, K,
                     N, group_size,
