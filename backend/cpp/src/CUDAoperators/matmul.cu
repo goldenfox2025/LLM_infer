@@ -31,17 +31,18 @@ inline void checkCublasStatus(cublasStatus_t status, const char *file, int line)
 #define CHECK_CUBLAS(call) checkCublasStatus(call, __FILE__, __LINE__)
 
 namespace cuda_OP {
+// === 类型映射特化: 将 __nv_bfloat16 转为 cutlass::bfloat16_t ===
 // 定义类型转换 traits（可扩展支持更多类型）
 template <typename T>
 struct to_cutlass_type {
     using type = T;
 };
-
 template <>
 struct to_cutlass_type<__nv_bfloat16> {
-    using type = cutlass::bfloat16_t;
+    using type = cutlass::bfloat16_t;  // 专门处理 bfloat16 类型
 };
 
+// === 通用 CUTLASS GEMM 调用模板 ===
 template <typename ElementA, typename ElementB, typename ElementOutput, typename LayoutA, typename LayoutB,
           typename LayoutOutput, typename ElementAccumulator = float,
           typename ElementComputeEpilogue = ElementAccumulator, typename MMAOp = cutlass::arch::OpClassTensorOp,
@@ -53,158 +54,59 @@ cutlass::Status run_cutlass_gemm_raw_templated(int m, int n, int k, ElementA con
                                                ElementOutput const *d_bias, ElementOutput *d_d, cudaStream_t stream = 0,
                                                ElementComputeEpilogue alpha = ElementComputeEpilogue(1),
                                                int split_k_slices = 1) {
-    // 使用 to_cutlass_type 对输入数据类型做转换
+    // 1. 类型转换: 使用 to_cutlass_type 将用户类型映射为 Cutlass 支持类型
     using ElementA_t = typename to_cutlass_type<ElementA>::type;
     using ElementB_t = typename to_cutlass_type<ElementB>::type;
     using ElementOutput_t = typename to_cutlass_type<ElementOutput>::type;
 
-    // 定义 epilogue 操作（注意用转换后的 ElementOutput_t）
+    // 2. 定义 Epilogue 操作: alpha * (A*B) + bias, 不启用 Beta 缩放
     using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
         ElementOutput_t, 128 / cutlass::sizeof_bits<ElementOutput_t>::value, ElementAccumulator, ElementComputeEpilogue,
         cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
-    // std::cout << "value: " << cutlass::sizeof_bits<ElementOutput_t>::value
-    //           << std::endl;
-    // 定义 GEMM 操作类型，使用转换后的类型
-    using Gemm = cutlass::gemm::device::Gemm<ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
-                                             ElementAccumulator, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp,
-                                             ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages, 8, 8>;
 
-    // 构造问题尺寸
+    // 3. 定义 GEMM 类型: 指定所有核心模板参数
+    using Gemm =
+        cutlass::gemm::device::Gemm<ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
+                                    ElementAccumulator, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp, ShapeMMAOp,
+                                    EpilogueOp, SwizzleThreadBlock, NumStages, 8, 8  // 可选的线程副本分区参数
+                                    >;
+
+    // 4. 构造问题规模
     cutlass::gemm::GemmCoord problem_size(m, n, k);
 
+    // 5. 构造 TensorRef: 将原始指针和布局转换为 Cutlass 张量引用
     cutlass::TensorRef<ElementA_t, LayoutA> ref_A(const_cast<ElementA_t *>(reinterpret_cast<const ElementA_t *>(d_a)),
-                                                  LayoutA(k));
+                                                  LayoutA(k)  // leading dimension = k
+    );
     cutlass::TensorRef<ElementB_t, LayoutB> ref_B(const_cast<ElementB_t *>(reinterpret_cast<const ElementB_t *>(d_b)),
                                                   LayoutB(n));
     cutlass::TensorRef<ElementOutput_t, LayoutOutput> ref_D(reinterpret_cast<ElementOutput_t *>(d_d), LayoutOutput(n));
 
-    // 构造 Gemm kernel 参数。bias 同样进行类型转换
+    // 6. 构造参数对象: 包含输入、输出、bias、alpha、split-K 切片等
     typename Gemm::Arguments arguments{
-        problem_size, ref_A,   ref_B,         {reinterpret_cast<const ElementOutput_t *>(d_bias), 0},
-        ref_D,        {alpha}, split_k_slices};
+        problem_size,  ref_A,   ref_B, {reinterpret_cast<const ElementOutput_t *>(d_bias), 0},  // bias ptr + stride
+        ref_D,         {alpha},                                                                 // epilogue 参数
+        split_k_slices                                                                          // split-K 切片数
+    };
 
-    // 查询 workspace 内存大小并分配
+    // 7. 分配内部 workspace
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-    // 实例化 GEMM 对象，并检查问题是否可实现
+    // 8. 实例化运算对象，并检查是否可实现
     Gemm gemm_op;
     cutlass::Status status = gemm_op.can_implement(arguments);
     CUTLASS_CHECK(status);
 
-    // 初始化 GEMM 操作
+    // 9. 初始化并执行
     status = gemm_op.initialize(arguments, workspace.get());
     CUTLASS_CHECK(status);
-
-    // 调用 CUTLASS GEMM 内核
-    status = gemm_op(stream);
+    status = gemm_op(stream);  // 在指定的 CUDA 流上执行
     CUTLASS_CHECK(status);
 
     return status;
 }
 
-// --- FP32 Specialization ---
-// We specialize for ElementA=float, ElementB=float, ElementOutput=float
-// We keep Layouts, Shapes, Arch, etc., templated for flexibility within FP32
-// case.
-template <typename LayoutA, typename LayoutB, typename LayoutOutput,
-          typename MMAOp,                // Allow specifying MMAOp (though FP32 might ignore
-                                         // TensorCore specifics)
-          typename SmArch,               // Allow specifying Arch
-          typename ShapeMMAThreadBlock,  // Allow specifying Threadblock shape
-          typename ShapeMMAWarp,         // Allow specifying Warp shape
-          typename ShapeMMAOp,           // Allow specifying MMA Op shape (e.g., with
-                                         // K=16 if desired)
-          typename SwizzleThreadBlock, int NumStages>
-cutlass::Status run_cutlass_gemm_raw_templated<
-    /*ElementA=*/float, /*ElementB=*/float, /*ElementOutput=*/float, LayoutA, LayoutB, LayoutOutput,
-    /*ElementAccumulator=*/float,      // Fixed to float for FP32 accumulation
-    /*ElementComputeEpilogue=*/float,  // Fixed to float for FP32 epilogue
-                                       // computation
-    MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp, ShapeMMAOp, SwizzleThreadBlock, NumStages>(
-    int m, int n, int k,
-    float const *d_a,     // Use float directly
-    float const *d_b,     // Use float directly
-    float const *d_bias,  // Use float directly (can be nullptr if not used)
-    float *d_d,           // Use float directly
-    cudaStream_t stream,
-    float alpha,  // Default alpha for float is 1.0f
-    int split_k_slices) {
-    // Use float types directly
-    using ElementA_t = float;
-    using ElementB_t = float;
-    using ElementOutput_t = float;
-    using ElementAccumulator_t = float;
-    using ElementComputeEpilogue_t = float;
-
-    // Define epilogue operation for FP32 output.
-    // Vector width = 128 / sizeof_bits<float>::value = 128 / 32 = 4 elements.
-    // This corresponds to 4 * sizeof(float) = 16 bytes alignment requirement for
-    // d_d and d_bias.
-    using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-        ElementOutput_t, 4,  // Explicitly 4 elements per vector access (16 bytes)
-        ElementAccumulator_t, ElementComputeEpilogue_t,
-        cutlass::epilogue::thread::ScaleType::NoBetaScaling>;  // Assuming bias is
-                                                               // added (alpha*AB
-                                                               // + bias)
-
-    // Define the GEMM kernel using the FP32 types and specified parameters
-    using Gemm = cutlass::gemm::device::Gemm<ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
-                                             ElementAccumulator_t, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp,
-                                             ShapeMMAOp, EpilogueOp, SwizzleThreadBlock, NumStages, 32, 32>;
-
-    // Construct the problem size
-    cutlass::gemm::GemmCoord problem_size(m, n, k);
-
-    // Define TensorRefs for inputs and outputs using float*
-    // Use the layout objects passed as template arguments to determine strides.
-    // The original code used Layout(k) and Layout(n), which implies specific
-    // leading dimensions.
-    cutlass::TensorRef<ElementA_t, LayoutA> ref_A(const_cast<ElementA_t *>(d_a), LayoutA(k));
-    cutlass::TensorRef<ElementB_t, LayoutB> ref_B(const_cast<ElementB_t *>(d_b), LayoutB(n));
-    cutlass::TensorRef<ElementOutput_t, LayoutOutput> ref_D(d_d, LayoutOutput(n));
-
-    // Construct arguments for the GEMM kernel
-    // Handle bias: pass the pointer and a stride of 0 (common for vector bias)
-    // If d_bias is nullptr, the epilogue should handle it gracefully (often
-    // requires a different epilogue type or checks inside). The LinearCombination
-    // epilogue typically expects a valid pointer if used. Let's assume d_bias is
-    // valid if provided, matching the original structure.
-    typename Gemm::Arguments arguments{problem_size,
-                                       ref_A,
-                                       ref_B,
-                                       {d_bias, 0},  // Pass bias pointer and stride (0 for vector bias)
-                                       ref_D,
-                                       {alpha},  // Epilogue parameters (alpha, beta=0 implicitly
-                                                 // by NoBetaScaling)
-                                       split_k_slices};
-
-    // --- Rest of the execution logic is the same ---
-
-    // Query workspace memory size and allocate
-    size_t workspace_size = Gemm::get_workspace_size(arguments);
-    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-
-    // Instantiate the GEMM operation object
-    Gemm gemm_op;
-
-    // Check if the problem can be implemented by this kernel configuration
-    cutlass::Status status = gemm_op.can_implement(arguments);
-    CUTLASS_CHECK(status);  // Use your error checking macro
-
-    // Initialize the GEMM operation
-    // Note: Some CUTLASS versions might require stream in initialize()
-    status = gemm_op.initialize(arguments, workspace.get(), stream);
-    CUTLASS_CHECK(status);
-
-    // Run the GEMM kernel
-    status = gemm_op(stream);
-    CUTLASS_CHECK(status);
-
-    return status;  // Return success
-}
-// --------------------------------------------------
-// --------------------------------------------------
 template <typename T>
 __global__ void matmul_kernel(const T *A, const T *B, T *C, int M, int K, int N) {
     __shared__ T As[16][16];
