@@ -77,14 +77,17 @@ class QwenModel : public BaseModel {
                 throw std::runtime_error("Failed to launch CUDA graph: " + std::string(cudaGetErrorString(result)));
             }
 
+            // 关键修复：确保图执行完成后再调用sample
+            cudaStreamSynchronize(graph_stream_);
+
             size_t next_rope_offset = typed_cache->size();  // 下一个token的位置
             update_graph_kv_addresses_async_for_next(typed_cache, next_rope_offset);
             // 优化：立即开始准备下一次执行的其他参数（异步）
             size_t next_total_seq_len = typed_cache->size() + 1;  // 下一次的序列长度
             prepare_next_graph_execution_async(next_rope_offset, next_total_seq_len, 0, typed_cache);
-            //   cudaStreamSynchronize(graph_stream_);
 
-            return cuda_OP::sample(std::move(graph_output_tensor_), temperature, top_p, top_k, d_states, graph_stream_);
+            // 修复：不传递stream参数给sample，避免重复词汇问题
+            return cuda_OP::sample(std::move(graph_output_tensor_), temperature, top_p, top_k, d_states);
         } else {
             // 使用常规CUDA推理
             return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p, top_k, d_states);
