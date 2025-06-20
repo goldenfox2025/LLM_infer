@@ -358,7 +358,6 @@ void sample_to_fixed(Tensor<T>&& input, uint32_t* output_ptr, float temperature,
 template <typename T>
 void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float temperature, float top_p, size_t top_k,
                            curandState* d_states, cudaStream_t stream) {
-    // --- 输入验证 ---
     if (logits.device() != Device::CUDA) {
         throw std::runtime_error("输入张量必须在 CUDA 设备上");
     }
@@ -386,16 +385,13 @@ void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float tempe
     }
 }
 
-// 为 float 和 __nv_bfloat16 类型实例化 sample 函数
 template uint32_t* sample<float>(Tensor<float>&&, float, float, size_t, curandState*, cudaStream_t);
 template uint32_t* sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float, size_t, curandState*, cudaStream_t);
 
-// 为 float 和 __nv_bfloat16 类型实例化 sample_to_fixed 函数
 template void sample_to_fixed<float>(Tensor<float>&&, uint32_t*, float, float, size_t, curandState*, cudaStream_t);
 template void sample_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, uint32_t*, float, float, size_t, curandState*,
                                              cudaStream_t);
 
-// 为 float 和 __nv_bfloat16 类型实例化 sample_batch_to_fixed 函数
 template void sample_batch_to_fixed<float>(Tensor<float>&&, uint32_t*, float, float, size_t, curandState*,
                                            cudaStream_t);
 template void sample_batch_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, uint32_t*, float, float, size_t,

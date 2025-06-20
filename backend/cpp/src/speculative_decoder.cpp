@@ -740,8 +740,6 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_greedy(const std::vector<uint3
         Tensor<T> logits_tensor = qwen3->prefill_cuda(&combined_tokens, &target_kv_cache_);
 
         // 保存目标模型的logits到文件
-        // 注意：combined_tokens中可能有多个token，每个token对应一个logits输出
-        // 我们需要分别保存每个token位置的logits
         size_t base_position = original_cache_size;  // 验证开始时的KV缓存位置
         // for (size_t i = 0; i < combined_tokens.numel(); i++) {
         //     Tensor<T> single_logits = logits_tensor.slice({i, 0}, {i + 1, logits_tensor.sizes()[1]});
