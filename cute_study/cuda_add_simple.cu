@@ -1,12 +1,8 @@
 /***************************************************************************************************
- * CuTe Add Kernel Study
+ * 朴素CUDA向量加法 - 用于与CuTe版本对比
  *
- * 基于CUTLASS官方示例的真正CuTe向量加法实现
- * 只使用<cute/tensor.hpp>，避免复杂算法头文件
+ * 这是标准的CUDA实现，不使用任何CuTe特性
  **************************************************************************************************/
-
-#include <thrust/device_vector.h>
-#include <thrust/host_vector.h>
 
 #include <cassert>
 #include <chrono>
@@ -15,9 +11,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
-
-// 只包含CuTe核心头文件，如官方示例所示
-#include <cute/tensor.hpp>
 
 // CUDA错误检查宏
 #define CUDA_CHECK(call)                                                                                  \
@@ -29,10 +22,8 @@
         }                                                                                                 \
     } while (0)
 
-using namespace cute;
-
 /**
- * GPU预热内核 - 简单的向量操作来预热GPU
+ * GPU预热内核
  */
 template <typename T>
 __global__ void warmup_kernel(T* data, int size) {
@@ -43,24 +34,15 @@ __global__ void warmup_kernel(T* data, int size) {
 }
 
 /**
- * 基于官方示例的CuTe向量加法内核
+ * 朴素CUDA向量加法内核
  */
 template <typename T>
-__global__ void cute_add_kernel(T const* A, T const* B, T* C, int M) {
-    using namespace cute;
-
-    // 创建全局内存张量，如官方示例
-    Tensor mA = make_tensor(make_gmem_ptr(A), make_shape(M));  // (M)
-    Tensor mB = make_tensor(make_gmem_ptr(B), make_shape(M));  // (M)
-    Tensor mC = make_tensor(make_gmem_ptr(C), make_shape(M));  // (M)
-
-    // 计算全局线程索引
+__global__ void cuda_add_kernel(const T* A, const T* B, T* C, int size) {
+    // 标准CUDA实现
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // 边界检查
-    if (tid < M) {
-        // 使用CuTe张量访问语法
-        mC(tid) = mA(tid) + mB(tid);
+    if (tid < size) {
+        C[tid] = A[tid] + B[tid];
     }
 }
 
@@ -97,28 +79,37 @@ int main(int argc, char** argv) {
         size = atoi(argv[1]);
     }
 
-    printf("CuTe向量加法示例（基于CUTLASS官方示例）\n");
+    printf("朴素CUDA向量加法示例（用于与CuTe对比）\n");
     printf("向量大小: %d 个元素\n", size);
     printf("数据类型: float\n");
-    printf("使用真正的CuTe库 <cute/tensor.hpp>\n\n");
+    printf("使用标准CUDA实现，无CuTe抽象\n\n");
 
-    // 使用thrust分配内存，如官方示例
-    thrust::host_vector<Element> h_A(size);
-    thrust::host_vector<Element> h_B(size);
-    thrust::host_vector<Element> h_C_gpu(size);
-    thrust::host_vector<Element> h_C_cpu(size);
+    // 分配主机内存
+    std::vector<Element> h_A(size);
+    std::vector<Element> h_B(size);
+    std::vector<Element> h_C_gpu(size);
+    std::vector<Element> h_C_cpu(size);
 
     // 初始化数据
-    srand(42);  // 固定种子确保可重复性
+    srand(42);  // 固定种子确保与CuTe版本一致
     for (int i = 0; i < size; ++i) {
         h_A[i] = static_cast<Element>(rand()) / RAND_MAX;
         h_B[i] = static_cast<Element>(rand()) / RAND_MAX;
     }
 
-    thrust::device_vector<Element> d_A = h_A;
-    thrust::device_vector<Element> d_B = h_B;
-    thrust::device_vector<Element> d_C(size);
-    thrust::device_vector<Element> d_warmup(size);
+    // 分配设备内存
+    Element *d_A, *d_B, *d_C, *d_warmup;
+    size_t bytes = size * sizeof(Element);
+
+    CUDA_CHECK(cudaMalloc(&d_A, bytes));
+    CUDA_CHECK(cudaMalloc(&d_B, bytes));
+    CUDA_CHECK(cudaMalloc(&d_C, bytes));
+    CUDA_CHECK(cudaMalloc(&d_warmup, bytes));
+
+    // 拷贝数据到设备
+    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_warmup, h_A.data(), bytes, cudaMemcpyHostToDevice));
 
     // 配置内核启动参数
     const int threads_per_block = 256;
@@ -129,7 +120,7 @@ int main(int argc, char** argv) {
     // === GPU预热 ===
     printf("\n正在进行GPU预热（使用专用缓冲区）...\n");
     for (int i = 0; i < 3; ++i) {
-        warmup_kernel<<<blocks, threads_per_block>>>(thrust::raw_pointer_cast(d_warmup.data()), size);
+        warmup_kernel<<<blocks, threads_per_block>>>(d_warmup, size);
         CUDA_CHECK(cudaDeviceSynchronize());
         printf("预热轮次 %d/3 完成\n", i + 1);
     }
@@ -140,12 +131,10 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    // 启动CuTe内核
-    printf("=== 测试真正的CuTe向量加法内核 ===\n");
+    // 启动朴素CUDA内核
+    printf("=== 测试朴素CUDA向量加法内核 ===\n");
     CUDA_CHECK(cudaEventRecord(start));
-    cute_add_kernel<<<blocks, threads_per_block>>>(thrust::raw_pointer_cast(d_A.data()),
-                                                   thrust::raw_pointer_cast(d_B.data()),
-                                                   thrust::raw_pointer_cast(d_C.data()), size);
+    cuda_add_kernel<<<blocks, threads_per_block>>>(d_A, d_B, d_C, size);
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
 
@@ -157,7 +146,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaGetLastError());
 
     // 拷贝结果回主机
-    h_C_gpu = d_C;
+    CUDA_CHECK(cudaMemcpy(h_C_gpu.data(), d_C, bytes, cudaMemcpyDeviceToHost));
 
     // CPU参考计算
     auto cpu_start = std::chrono::high_resolution_clock::now();
@@ -170,24 +159,26 @@ int main(int argc, char** argv) {
 
     // 输出结果
     printf("\n=== 性能结果 ===\n");
-    printf("GPU时间 (CuTe): %.3f ms\n", gpu_time);
+    printf("GPU时间 (朴素CUDA): %.3f ms\n", gpu_time);
     printf("CPU时间: %.3f ms\n", cpu_time);
     printf("加速比: %.2fx\n", cpu_time / gpu_time);
     printf("带宽: %.2f GB/s\n", (3.0f * size * sizeof(Element)) / (gpu_time * 1e6));
     printf("结果验证: %s\n", correct ? "✅ 通过" : "❌ 失败");
 
-    // 显示CuTe特性验证
-    printf("\n=== CuTe特性验证 ===\n");
-    printf("✅ 基于CUTLASS官方示例编写\n");
-    printf("✅ 只使用 <cute/tensor.hpp>\n");
-    printf("✅ cute::make_tensor 张量创建\n");
-    printf("✅ cute::make_gmem_ptr 全局内存指针\n");
-    printf("✅ cute::make_shape 形状定义\n");
-    printf("✅ tensor(index) 张量访问语法\n");
+    // 显示实现特性
+    printf("\n=== 实现特性 ===\n");
+    printf("✅ 标准CUDA内核实现\n");
+    printf("✅ 直接指针访问 C[tid] = A[tid] + B[tid]\n");
+    printf("✅ 简单线程ID计算\n");
+    printf("✅ 无额外抽象层开销\n");
     printf("✅ GPU预热机制正确实现\n");
-    printf("✅ 使用thrust内存管理（如官方示例）\n");
+    printf("✅ 标准cudaMalloc内存管理\n");
 
     // 清理资源
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_C));
+    CUDA_CHECK(cudaFree(d_warmup));
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
 
