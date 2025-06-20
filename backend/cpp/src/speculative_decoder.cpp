@@ -937,14 +937,14 @@ size_t SpeculativeDecoder<T>::verify_draft_tokens_prob_ratio(const std::vector<u
         // 注意：combined_tokens中可能有多个token，每个token对应一个logits输出
         // 我们需要分别保存每个token位置的logits
         size_t base_position = original_cache_size;  // 验证开始时的KV缓存位置
-        for (size_t i = 0; i < combined_tokens.numel(); i++) {
-            Tensor<T> single_logits = target_logits.slice({i, 0}, {i + 1, target_logits.sizes()[1]});
-            // 计算token在整个序列中的绝对位置
-            size_t absolute_position = base_position + i;
-            std::string logits_file = "./logits_data/target/logits_" + std::to_string(absolute_position) + ".bin";
-            saveTensorToFile(single_logits, logits_file);
-            std::cout << "已保存目标模型logits到: " << logits_file << std::endl;
-        }
+        // for (size_t i = 0; i < combined_tokens.numel(); i++) {
+        //     Tensor<T> single_logits = target_logits.slice({i, 0}, {i + 1, target_logits.sizes()[1]});
+        //     // 计算token在整个序列中的绝对位置
+        //     size_t absolute_position = base_position + i;
+        //     std::string logits_file = "./logits_data/target/logits_" + std::to_string(absolute_position) + ".bin";
+        //     saveTensorToFile(single_logits, logits_file);
+        //     std::cout << "已保存目标模型logits到: " << logits_file << std::endl;
+        // }
 
         prefill_timer.stop();
         float prefill_time = prefill_timer.milliseconds();
