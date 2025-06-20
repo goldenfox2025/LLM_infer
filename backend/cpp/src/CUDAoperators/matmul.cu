@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>  // printf
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -17,6 +19,8 @@
 #include "cutlass/util/reference/host/tensor_compare.h"
 #include "cutlass/util/reference/host/tensor_fill.h"
 #include "cutlass/util/tensor_view_io.h"
+
+#define WARP_SIZE 32
 
 inline void checkCublasStatus(cublasStatus_t status, const char *file, int line) {
     if (status != CUBLAS_STATUS_SUCCESS) {
@@ -31,6 +35,172 @@ inline void checkCublasStatus(cublasStatus_t status, const char *file, int line)
 #define CHECK_CUBLAS(call) checkCublasStatus(call, __FILE__, __LINE__)
 
 namespace cuda_OP {
+// === Warp Reduce Sum 模板函数 ===
+template <typename T, const int kWarpSize = WARP_SIZE>
+__device__ __forceinline__ T warp_reduce_sum(T val) {
+#pragma unroll
+    for (int mask = kWarpSize >> 1; mask >= 1; mask >>= 1) {
+        val += __shfl_xor_sync(0xffffffff, val, mask);
+    }
+    return val;
+}
+
+// === 高效的 GEMV kernel (M=1, 支持bias) ===
+// 计算 C = A * B^T + bias，其中 A: [1, K], B: [N, K], C: [1, N]
+template <typename T>
+__global__ void gemv_with_bias_kernel(const T *A, const T *B, const T *bias, T *C, int M, int K, int N) {
+    // A: [1, K] (行主序), B: [N, K] (列主序存储！), C: [1, N]
+    // 计算: C[n] = sum(A[k] * B[n, k]) + bias[n] for k in [0, K)
+    // 注意：B是列主序存储，所以 B[n, k] = B[n * K + k]
+    // 每个warp负责一个输出元素
+    int tx = threadIdx.x;          // 0~31
+    int ty = threadIdx.y;          // 0~blockDim.y
+    int bx = blockIdx.x;           // 0~(N-1)/blockDim.y
+    int lane = tx % WARP_SIZE;     // 0~31
+    int n = bx * blockDim.y + ty;  // 输出元素索引
+
+    if (n < N) {
+        T sum = T(0);
+
+        // 计算需要的warp数量来覆盖K维度
+        int NUM_WARPS = (K + WARP_SIZE - 1) / WARP_SIZE;
+
+#pragma unroll
+        for (int w = 0; w < NUM_WARPS; ++w) {
+            int k = w * WARP_SIZE + lane;
+            if (k < K) {
+                // A[k] * B[n, k]，B是列主序存储，所以 B[n, k] = B[n * K + k]
+                sum += A[k] * B[n * K + k];
+            }
+        }
+
+        // warp内规约
+        sum = warp_reduce_sum<T, WARP_SIZE>(sum);
+
+        // 只有第一个线程写结果，并加上bias
+        if (lane == 0) {
+            C[n] = sum + bias[n];
+        }
+    }
+}
+
+// === 高效的 GEMV kernel (M=1, 无bias) ===
+// 计算 C = A * B^T，其中 A: [1, K], B: [N, K], C: [1, N]
+template <typename T>
+__global__ void gemv_kernel(const T *A, const T *B, T *C, int M, int K, int N) {
+    // A: [1, K] (行主序), B: [N, K] (列主序存储！), C: [1, N]
+    // 计算: C[n] = sum(A[k] * B[n, k]) for k in [0, K)
+    // 注意：B是列主序存储，所以 B[n, k] = B[n * K + k]
+    // 每个warp负责一个输出元素
+    int tx = threadIdx.x;          // 0~31
+    int ty = threadIdx.y;          // 0~blockDim.y
+    int bx = blockIdx.x;           // 0~(N-1)/blockDim.y
+    int lane = tx % WARP_SIZE;     // 0~31
+    int n = bx * blockDim.y + ty;  // 输出元素索引
+
+    if (n < N) {
+        T sum = T(0);
+
+        // 计算需要的warp数量来覆盖K维度
+        int NUM_WARPS = (K + WARP_SIZE - 1) / WARP_SIZE;
+
+#pragma unroll
+        for (int w = 0; w < NUM_WARPS; ++w) {
+            int k = w * WARP_SIZE + lane;
+            if (k < K) {
+                // A[k] * B[n, k]，B是列主序存储，所以 B[n, k] = B[n * K + k]
+                sum += A[k] * B[n * K + k];
+            }
+        }
+
+        // warp内规约
+        sum = warp_reduce_sum<T, WARP_SIZE>(sum);
+
+        // 只有第一个线程写结果
+        if (lane == 0) {
+            C[n] = sum;
+        }
+    }
+}
+
+// === 向量化版本的 GEMV kernel (适用于 K 是 4 的倍数) ===
+// 计算 C = A * B^T + bias，其中 A: [1, K], B: [N, K], C: [1, N]
+template <typename T>
+__global__ void gemv_with_bias_vectorized_kernel(const T *A, const T *B, const T *bias, T *C, int M, int K, int N) {
+    // 每个线程处理4个K元素来提高内存带宽利用率
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int lane = tx % WARP_SIZE;
+    int n = bx * blockDim.y + ty;
+
+    if (n < N) {
+        T sum = T(0);
+
+        // 每个warp处理 4*WARP_SIZE 个K元素
+        int NUM_WARPS = (((K + WARP_SIZE - 1) / WARP_SIZE) + 4 - 1) / 4;
+
+#pragma unroll
+        for (int w = 0; w < NUM_WARPS; ++w) {
+            int k_base = (w * WARP_SIZE + lane) * 4;
+
+            // 向量化加载和计算
+            for (int i = 0; i < 4; ++i) {
+                int k = k_base + i;
+                if (k < K) {
+                    // A[k] * B[n, k]，B是列主序存储，所以 B[n, k] = B[n * K + k]
+                    sum += A[k] * B[n * K + k];
+                }
+            }
+        }
+
+        sum = warp_reduce_sum<T, WARP_SIZE>(sum);
+
+        if (lane == 0) {
+            C[n] = sum + bias[n];
+        }
+    }
+}
+
+// === 向量化版本的 GEMV kernel (无bias) ===
+// 计算 C = A * B^T，其中 A: [1, K], B: [N, K], C: [1, N]
+template <typename T>
+__global__ void gemv_vectorized_kernel(const T *A, const T *B, T *C, int M, int K, int N) {
+    // 每个线程处理4个K元素来提高内存带宽利用率
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int lane = tx % WARP_SIZE;
+    int n = bx * blockDim.y + ty;
+
+    if (n < N) {
+        T sum = T(0);
+
+        // 每个warp处理 4*WARP_SIZE 个K元素
+        int NUM_WARPS = (((K + WARP_SIZE - 1) / WARP_SIZE) + 4 - 1) / 4;
+
+#pragma unroll
+        for (int w = 0; w < NUM_WARPS; ++w) {
+            int k_base = (w * WARP_SIZE + lane) * 4;
+
+            // 向量化加载和计算
+            for (int i = 0; i < 4; ++i) {
+                int k = k_base + i;
+                if (k < K) {
+                    // A[k] * B[n, k]，B是列主序存储，所以 B[n, k] = B[n * K + k]
+                    sum += A[k] * B[n * K + k];
+                }
+            }
+        }
+
+        sum = warp_reduce_sum<T, WARP_SIZE>(sum);
+
+        if (lane == 0) {
+            C[n] = sum;
+        }
+    }
+}
+
 // === 类型映射特化: 将 __nv_bfloat16 转为 cutlass::bfloat16_t ===
 // 定义类型转换 traits（可扩展支持更多类型）
 template <typename T>
@@ -345,6 +515,61 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
     size_t M = A_shape[0];
     size_t K = A_shape[1];
     size_t N = B_shape[1];
+
+    // === 特殊处理: M=1的GEMV情况 ===
+    if (M == 1) {
+        // printf("使用 GEMV 优化分支 (M=1)\n");
+
+        // 使用优化的GEMV kernel
+        constexpr int ROWS_PER_BLOCK = 4;   // 每个block处理4个输出元素
+        dim3 blockDim(32, ROWS_PER_BLOCK);  // 32线程构成一个warp，4个warp处理4个输出
+        dim3 gridDim((N + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, 1);
+
+        if (bias != nullptr) {
+            // 检查偏置形状
+            const std::vector<size_t> &bias_shape = bias->sizes();
+            if (bias_shape.size() != 1) {
+                throw std::runtime_error("Bias must be a 1D tensor");
+            }
+            if (bias_shape[0] != N) {
+                throw std::runtime_error("Bias size must match output column dimension");
+            }
+
+            printf("使用带bias的GEMV kernel\n");
+            // 根据K的大小选择不同的优化策略
+            if (K % 4 == 0 && K >= 128) {
+                // K较大且是4的倍数，使用向量化版本
+                gemv_with_bias_vectorized_kernel<T>
+                    <<<gridDim, blockDim, 0, stream>>>(A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(),
+                                                       static_cast<int>(M), static_cast<int>(K), static_cast<int>(N));
+            } else {
+                // 使用标准版本
+                gemv_with_bias_kernel<T><<<gridDim, blockDim, 0, stream>>>(A.data_ptr(), B.data_ptr(), bias->data_ptr(),
+                                                                           C->data_ptr(), static_cast<int>(M),
+                                                                           static_cast<int>(K), static_cast<int>(N));
+            }
+        } else {
+            printf("使用无bias的GEMV kernel\n");
+            // 根据K的大小选择不同的优化策略
+            if (K % 4 == 0 && K >= 128) {
+                // K较大且是4的倍数，使用向量化版本
+                gemv_vectorized_kernel<T><<<gridDim, blockDim, 0, stream>>>(A.data_ptr(), B.data_ptr(), C->data_ptr(),
+                                                                            static_cast<int>(M), static_cast<int>(K),
+                                                                            static_cast<int>(N));
+            } else {
+                // 使用标准版本
+                gemv_kernel<T><<<gridDim, blockDim, 0, stream>>>(A.data_ptr(), B.data_ptr(), C->data_ptr(),
+                                                                 static_cast<int>(M), static_cast<int>(K),
+                                                                 static_cast<int>(N));
+            }
+        }
+
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            throw std::runtime_error("CUDA GEMV kernel launch failed: " + std::string(cudaGetErrorString(err)));
+        }
+        return;
+    }
 
     if (bias == nullptr && use_ == 2) {
         use_ = 1;

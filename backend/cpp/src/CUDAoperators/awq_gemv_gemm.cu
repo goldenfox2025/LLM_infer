@@ -173,13 +173,13 @@ __global__ void matmul_awq_gemm_kernel(const T* __restrict__ inp,        // 输�
     }
 }
 
-// --- GEMV Kernel (M = 1, N-Major 优化版) ---
+// GEMV Kernel (M = 1, N-Major 优化版)
 // 专门为 M = 1 优化，假设权重、scales、zeros 为 N-Major 布局
 // 使用动态共享内存，因其大小依赖运行时的 K 和 G
 template <typename T,                                                  // 输入/输出数据类型
           typename S,                                                  // Scale 数据类型
           int BLOCK_N_GEMV>                                            // Block 内的线程数 (必须是 WARP_SIZE 的倍数)
-__global__ void matmul_awq_gemv_kernel_opt(const T* __restrict__ inp,  // 输入向量 [K]
+__global__ void matmul_awq_gemv_kernel_M_1(const T* __restrict__ inp,  // 输入向量 [K]
                                            const int32_t* __restrict__ qwt,  // 权重 [N, K/8]
                                            const S* __restrict__ scl,        // Scales [N, G_padded]
                                            const int32_t* __restrict__ zos,  // Zeros [N, G/8]
@@ -187,14 +187,14 @@ __global__ void matmul_awq_gemv_kernel_opt(const T* __restrict__ inp,  // 输入
                                            int K, int N, int group_size,
                                            int G_PADDED,  // !!! 新增: Scales 张量的实际第二维度 (Padding) !!!
                                            const T* __restrict__ bias) {  // 偏置向量 [N]
-    // --- 常量 ---
+    // 常量
     static_assert(BLOCK_N_GEMV % WARP_SIZE == 0, "BLOCK_N_GEMV 必须是 WARP_SIZE 的倍数");
     const int G = K / group_size;
     const int K_PACKED = (K + PACK_FACTOR - 1) / PACK_FACTOR;
     const int G_PACKED = (G + PACK_FACTOR - 1) / PACK_FACTOR;
     // G_PADDED 作为参数传入
 
-    // --- Grid/Block/Warp 映射 ---
+    // Grid/Block/Warp 映射
     const int warps_per_block = BLOCK_N_GEMV / WARP_SIZE;
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane = threadIdx.x % WARP_SIZE;
@@ -203,14 +203,13 @@ __global__ void matmul_awq_gemv_kernel_opt(const T* __restrict__ inp,  // 输入
     if (n >= N)
         return;  // 边界检查
 
-    // --- 动态共享内存声明与指针分配 ---
+    // 动态共享内存声明与指针分配
     extern __shared__ char sh_mem_raw[];
     T* sh_inp = reinterpret_cast<T*>(sh_mem_raw);  // sh_inp [K]
     S* sh_scl = reinterpret_cast<S*>(&sh_inp[K]);  // sh_scl [warps_per_block][G_PADDED]
     int32_t* sh_zos =
         reinterpret_cast<int32_t*>(&sh_scl[warps_per_block * G_PADDED]);  // sh_zos [warps_per_block][G_PACKED]
 
-    // --- 加载共享内存 (Block 协作) ---
     // 加载 sh_inp
     for (int k_idx = threadIdx.x; k_idx < K; k_idx += BLOCK_N_GEMV) {
         sh_inp[k_idx] = inp[k_idx];
@@ -226,7 +225,7 @@ __global__ void matmul_awq_gemv_kernel_opt(const T* __restrict__ inp,  // 输入
     }
     __syncthreads();  // 确保加载完成
 
-    // --- 计算核心 ---
+    // 计算核心
     float acc = 0.0f;
     for (int k = lane; k < K; k += WARP_SIZE) {    // Warp 内线程并行处理 K
         float iv = static_cast<float>(sh_inp[k]);  // 读共享内存
@@ -252,13 +251,13 @@ __global__ void matmul_awq_gemv_kernel_opt(const T* __restrict__ inp,  // 输入
         acc = __fmaf_rn(iv, (static_cast<float>(w) - static_cast<float>(z)) * scale_val, acc);
     }
 
-// --- Warp 内规约 ---
+// Warp 内规约
 #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
     }
 
-    // --- 写回结果 (Lane 0) ---
+    // 写回结果 (Lane 0)
     if (lane == 0) {
         if (bias) {
             acc += static_cast<float>(bias[n]);
@@ -470,16 +469,16 @@ void matmul_quantized_gemv(const Tensor<T>& input,           // 输入 [M, K]
                                  std::to_string(G) + ")");
     }
 
-    // --- 根据 M 选择 Kernel ---
+    // 根据 M 选择 Kernel
     if (M == 1) {
-        // --- GEMV 路径 (M=1) ---
+        // GEMV 路径 (M=1)
         constexpr int BLOCK_N_GEMV = 256;  // GEMV Kernel 的 Block 线程数
         constexpr int WARPS_PER_BLOCK = BLOCK_N_GEMV / WARP_SIZE;
 
         const dim3 grid_gemv((N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK);  // 1D Grid
         const dim3 threads_gemv(BLOCK_N_GEMV);                              // 1D Block
 
-        // 计算 GEMV Kernel 所需的动态共享内存大小c
+        // 计算 GEMV Kernel 所需的动态共享内存大小
         size_t shmem_size_gemv = K * sizeof(T);                             // sh_inp
         shmem_size_gemv += WARPS_PER_BLOCK * G_PADDED * sizeof(ScaleType);  // sh_scl
         shmem_size_gemv += WARPS_PER_BLOCK * G_PACKED * sizeof(int32_t);    // sh_zos
@@ -493,7 +492,7 @@ void matmul_quantized_gemv(const Tensor<T>& input,           // 输入 [M, K]
                                                                        G_PADDED,  // !!! 传递 G_PADDED !!!
                                                                        bias ? bias->data_ptr() : nullptr);
         } else
-            matmul_awq_gemv_kernel_opt<T, ScaleType, BLOCK_N_GEMV>
+            matmul_awq_gemv_kernel_M_1<T, ScaleType, BLOCK_N_GEMV>
                 <<<grid_gemv, threads_gemv, shmem_size_gemv, stream>>>(input.data_ptr(), qweight.data_ptr(),
                                                                        scales.data_ptr(), zeros.data_ptr(),
                                                                        output->data_ptr(), K, N, group_size,
