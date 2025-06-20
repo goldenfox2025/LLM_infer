@@ -245,6 +245,7 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     int* d_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));         // 存储原始索引
     T* d_sorted_logits = static_cast<T*>(pool.allocate(vocab_size * sizeof(T)));         // 存储排序后的 logits
     int* d_sorted_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));  // 存储排序后的索引
+
     // 使用tagged memory分配采样结果，确保每次都是相同的固定地址
     uint32_t* d_sampled_index = static_cast<uint32_t*>(pool.allocate(sizeof(uint32_t), "sample_output"));
 
@@ -254,16 +255,17 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     void* d_sort_temp_storage = nullptr;
     size_t sort_temp_storage_bytes = 0;
 
-    // --- 步骤 1 (融合 Kernel): 缩放 Logits 并初始化索引 ---
+    // 步骤 1 (融合 Kernel): 缩放 Logits 并初始化索引
     const int scale_init_block_size = 256;  // 定义块大小
     const int scale_init_grid_size =        // 计算网格大小
         (vocab_size + scale_init_block_size - 1) / scale_init_block_size;
+
     // 启动 Kernel 1
     scale_logits_and_init_indices_kernel<T><<<scale_init_grid_size, scale_init_block_size, 0, stream>>>(
         d_logits_ptr, d_scaled_logits, d_indices, vocab_size, temperature);
     CUDA_CHECK(cudaGetLastError());  // 检查核函数启动错误
 
-    // --- 步骤 2: 查找最大缩放 Logit (使用 CUB Device Reduce) ---
+    // 步骤 2: 查找最大缩放 Logit (使用 CUB Device Reduce)
     // 创建一个转换迭代器，在计算 Max 时将 T 动态转换为 float
     cub::TransformInputIterator<float, ConvertToFloatFunctor<T>, const T*> itr(d_scaled_logits,
                                                                                ConvertToFloatFunctor<T>());
@@ -283,13 +285,13 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     // 作用: 在设备上计算输入范围内的最大值。
     CUDA_CHECK(
         cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_val, vocab_size, stream));
-    CUDA_CHECK(cudaGetLastError());  // 检查 CUB 调用错误
 
-    // --- 步骤 3: 按 Logit 值降序排序 (Logit, Index) 对 (使用 CUB Device Radix
-    // Sort) --- 第一次调用 CUB Sort: 获取所需的临时存储大小 CUB 调用:
-    // DeviceRadixSort::SortPairsDescending (第一次调用) 输入: d_scaled_logits
-    // (键), d_indices (值), vocab_size 输出: sort_temp_storage_bytes
-    // (所需的临时存储大小) 作用: 计算执行降序键值对排序所需的临时设备内存大小。
+    // 步骤 3: 按 Logit 值降序排序 (Logit, Index) 对 (使用 CUB Device Radix Sort)
+    // 第一次调用 CUB Sort: 获取所需的临时存储大小
+    // CUB 调用: DeviceRadixSort::SortPairsDescending (第一次调用)
+    // 输入: d_scaled_logits (键), d_indices (值), vocab_size
+    // 输出: sort_temp_storage_bytes (所需的临时存储大小)
+    // 作用: 计算执行降序键值对排序所需的临时设备内存大小。
     CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits,
                                                          d_sorted_logits, d_indices, d_sorted_indices, vocab_size, 0,
                                                          sizeof(T) * 8, stream));  // sizeof(T)*8 是 T 类型的位数
@@ -303,28 +305,16 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits,
                                                          d_sorted_logits, d_indices, d_sorted_indices, vocab_size, 0,
                                                          sizeof(T) * 8, stream));
-    CUDA_CHECK(cudaGetLastError());  // 检查 CUB 调用错误
 
-    // --- 步骤 4: 从 Top-K 结果中进行最终加权采样 (单块 Kernel) ---
+    // 步骤 4: 从 Top-K 结果中进行最终加权采样 (单块 Kernel)
     // 为采样核函数选择块大小 (必须与核函数模板参数匹配)
     const int sample_block_size = 128;  // 示例块大小
-
     // 计算 Kernel 2 所需的共享内存大小
     // 需要 CUB Reduce 的临时存储大小 + 存储 exp 值的数组大小
-    // 注意: 精确计算 CUB Reduce 存储需要模板特化，这里用 sizeof 估算
     size_t reduce_storage_size_est = sizeof(cub::BlockReduce<float,
                                                              sample_block_size>::TempStorage);  // CUB Reduce 存储
     size_t exp_values_size = MAX_TOPK * sizeof(float);                     // 存储 exp 值的数组大小 (基于 MAX_TOPK)
     size_t sample_shared_mem = reduce_storage_size_est + exp_values_size;  // 总共享内存需求
-
-    // 检查所需共享内存是否超过设备限制
-    int max_shared_mem_per_block = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, 0));
-    if (sample_shared_mem > max_shared_mem_per_block) {
-        throw std::runtime_error("计算出的所需共享内存 (" + std::to_string(sample_shared_mem) + ") 超过设备限制 (" +
-                                 std::to_string(max_shared_mem_per_block) +
-                                 ")。检查 MAX_TOPK 或减小 sample_block_size。");
-    }
 
     // 启动 Kernel 2 (单块，块大小为 sample_block_size)
     // 模板参数 <T, sample_block_size> 必须与核函数定义匹配
@@ -338,87 +328,19 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     );
     CUDA_CHECK(cudaGetLastError());  // 检查核函数启动错误
 
-    // --- 结果处理 ---
-    // 注意: 此函数返回的是指向设备内存中结果的指针 `d_sampled_index`。
-    // 如果需要将结果复制回主机，需要在此处添加 cudaMemcpy 调用。
-    // uint32_t h_result = 0;
-    // CUDA_CHECK(cudaMemcpy(&h_result, d_sampled_index, sizeof(uint32_t),
-    // cudaMemcpyDeviceToHost));
-
-    // --- 释放临时内存 ---
     // 将所有临时分配的设备内存返还给内存池
+    // 但其实意义不大
     pool.free(d_scaled_logits);
     pool.free(d_max_val);
     pool.free(d_indices);
     pool.free(d_sorted_logits);
     pool.free(d_sorted_indices);
-    // pool.free(d_sampled_index); // 不释放，因为它是返回值
+    // pool.free(d_sampled_index); // 不释放返回值
     pool.free(d_reduce_temp_storage);
     pool.free(d_sort_temp_storage);
 
     // 返回指向设备端采样结果的指针
     return d_sampled_index;
-}
-#include "common.hpp"
-// 批量采样函数
-// 功能: 对输入的每个序列位置进行采样，返回指向设备端采样结果的指针数组
-// 输入:
-//   - logits: 输入的 logits 张量 (T 类型, 形状 [seq_len, vocab_size], 必须在
-//   CUDA 设备上)
-//   - temperature: 温度系数，用于缩放 logits
-//   - top_p: Top-P 采样的概率阈值 (当前代码中未使用)
-//   - top_k: Top-K 采样的 K 值
-//   - d_states: 指向设备端 cuRAND 状态的指针
-//   - stream: CUDA 流
-// 返回:
-//   - 包含指向设备端存储采样结果的指针数组，每个指针对应一个序列位置的采样结果
-template <typename T>
-std::vector<uint32_t*> sample_batch(Tensor<T>&& logits, float temperature,
-                                    float top_p,  // top_p 未在此实现中使用
-                                    size_t top_k, curandState* d_states, cudaStream_t stream) {
-    // --- 输入验证 ---
-    if (logits.device() != Device::CUDA) {
-        throw std::runtime_error("输入张量必须在 CUDA 设备上");
-    }
-    // Top-K 采样至少需要 k=1
-    if (top_k == 0) {
-        throw std::runtime_error("top_k 必须至少为 1");
-    }
-
-    const auto& shape = logits.sizes();
-    if (shape.size() != 2 || shape[0] == 0 || shape[1] == 0) {
-        throw std::runtime_error("输入张量必须是二维且维度非零 [seq_len, vocab_size]");
-    }
-
-    const size_t seq_len = shape[0];
-    const size_t vocab_size = shape[1];
-
-    // 如果 K 大于词汇表大小，则将其限制为词汇表大小
-    if (top_k > vocab_size) {
-        top_k = vocab_size;
-    }
-    // 检查 K 是否超过 Kernel 2 中共享内存的限制 (MAX_TOPK)
-    if (top_k > MAX_TOPK) {
-        throw std::runtime_error("请求的 top_k (" + std::to_string(top_k) + ") 超过了 Kernel 2 的 MAX_TOPK 限制 (" +
-                                 std::to_string(MAX_TOPK) + ")，无法在共享内存中分配。");
-    }
-
-    // 创建结果向量，存储每个序列位置的采样结果指针
-    std::vector<uint32_t*> result_tokens;
-    result_tokens.reserve(seq_len);
-
-    // 为每个序列位置创建一个视图并调用sample函数
-    for (size_t i = 0; i < seq_len; i++) {
-        // 创建当前位置logits的视图
-        // 使用slice方法，需要为每个维度提供start和end向量
-        std::vector<size_t> start = {i, 0};
-        std::vector<size_t> end = {i + 1, vocab_size};
-        Tensor<T> logit_view = logits.slice(start, end);
-        uint32_t* token_ptr = sample(std::move(logit_view), temperature, top_p, top_k, d_states, stream);
-        result_tokens.push_back(token_ptr);
-    }
-
-    return result_tokens;
 }
 
 // 采样函数的变体，将结果写入指定的GPU内存位置
@@ -427,14 +349,11 @@ void sample_to_fixed(Tensor<T>&& input, uint32_t* output_ptr, float temperature,
                      curandState* d_states, cudaStream_t stream) {
     // 使用原始sample函数获取采样结果
     uint32_t* sampled_ptr = sample(std::move(input), temperature, top_p, top_k, d_states, stream);
-
     // 将结果复制到指定的输出位置
     cudaMemcpyAsync(output_ptr, sampled_ptr, sizeof(uint32_t), cudaMemcpyDeviceToDevice, stream);
-
     // 释放原始sample函数分配的内存
     cudaFree(sampled_ptr);
 }
-
 // 批量采样函数的变体，将结果写入指定的GPU内存位置数组
 template <typename T>
 void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float temperature, float top_p, size_t top_k,
@@ -455,7 +374,6 @@ void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float tempe
 
     const size_t seq_len = shape[0];
     const size_t vocab_size = shape[1];
-
     // 为每个序列位置创建一个视图并调用sample_to_fixed函数
     for (size_t i = 0; i < seq_len; i++) {
         // 创建当前位置logits的视图
@@ -468,7 +386,6 @@ void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float tempe
     }
 }
 
-// --- 模板显式实例化 ---
 // 为 float 和 __nv_bfloat16 类型实例化 sample 函数
 template uint32_t* sample<float>(Tensor<float>&&, float, float, size_t, curandState*, cudaStream_t);
 template uint32_t* sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float, size_t, curandState*, cudaStream_t);
@@ -477,11 +394,6 @@ template uint32_t* sample<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float, 
 template void sample_to_fixed<float>(Tensor<float>&&, uint32_t*, float, float, size_t, curandState*, cudaStream_t);
 template void sample_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, uint32_t*, float, float, size_t, curandState*,
                                              cudaStream_t);
-
-// 为 float 和 __nv_bfloat16 类型实例化 sample_batch 函数
-template std::vector<uint32_t*> sample_batch<float>(Tensor<float>&&, float, float, size_t, curandState*, cudaStream_t);
-template std::vector<uint32_t*> sample_batch<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, float, float, size_t, curandState*,
-                                                            cudaStream_t);
 
 // 为 float 和 __nv_bfloat16 类型实例化 sample_batch_to_fixed 函数
 template void sample_batch_to_fixed<float>(Tensor<float>&&, uint32_t*, float, float, size_t, curandState*,
