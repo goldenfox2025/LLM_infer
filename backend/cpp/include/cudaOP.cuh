@@ -44,7 +44,7 @@ union Vec {
 
 template <typename T, int N>
 union Vec_2 {
-  float2 f4;  // 实际载入 8 字节数据
+  float2 f2;  // 实际载入 8 字节数据
   T t[N];     // 重解释为 N 个 T 类型元素
 };
 
