@@ -3,7 +3,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 def main():
-    model_name = "/home/LLM_infer/models/Qwen2.5-1.5B-Instruct"
+    model_name = "/home/LLM_infer/models/Qwen2.5-1.5B"
 
     # 加载模型和 tokenizer
     print("Loading model and tokenizer...")

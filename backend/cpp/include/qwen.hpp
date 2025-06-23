@@ -232,6 +232,14 @@ class QwenModel : public BaseModel {
                                       const std::string& filename);           // 保存uint32张量到二进制文件
     void save_graph_tensors_after_execution(const std::string& save_prefix);  // 图执行后保存重要张量
 
+    // RoPE相关方法
+    const Tensor<float>& get_rope_sin_cos_cache() const {
+        return rope_sin_cos_cache_;
+    }  // 获取RoPE sin/cos缓存
+    bool has_rope_cache() const {
+        return rope_sin_cos_cache_.numel() > 0;
+    }  // 检查是否已初始化RoPE缓存
+
    private:
     std::array<cudaEvent_t, 3> fa_done_events_;
     size_t vocab_size_;
@@ -273,7 +281,9 @@ class QwenModel : public BaseModel {
     Tensor<uint32_t> graph_input_tensor_;
     Tensor<T> graph_output_tensor_;
 
-    // 问题1解决方案：RoPE offset的固定内存
+    // RoPE预计算的sin/cos缓存
+    Tensor<float> rope_sin_cos_cache_;  // 存储预计算的sin/cos值，形状为[max_seq_len, head_dim]
+
     size_t* d_rope_offset_;  // 设备端固定内存存储offset
 
     // 当前KV写入offset（用于图执行）

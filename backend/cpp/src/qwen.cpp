@@ -1184,6 +1184,38 @@ QwenModel<T> &QwenModel<T>::cuda() {
     // CUDA图初始化现在延迟到第一次forward调用时进行
     // 这样可以使用真实的KV cache
     if (quant_type_ == 0) {
+        std::cout << "预计算RoPE sin/cos值, head_dim: " << head_dim_ << std::endl;
+        std::vector<float> freq_(head_dim_ / 2);  // RoPE只需要head_dim/2个频率
+        for (int i = 0; i < head_dim_ / 2; ++i) {
+            freq_[i] = 1.0f / powf(rope_theta_, (2.0f * i) / static_cast<float>(head_dim_));
+        }
+        // 假设最大序列长度为max_position_embeddings_，为每个位置和每个频率计算sin/cos
+        size_t max_seq_len = max_position_embeddings_;
+        std::vector<float> sin_cos_cpu(2 * max_seq_len * head_dim_ / 2);  // 存储[pos][freq][sin,cos]格式
+        for (size_t pos = 0; pos < max_seq_len; ++pos) {
+            for (int i = 0; i < head_dim_ / 2; ++i) {
+                float angle = static_cast<float>(pos) * freq_[i];
+
+                // 交错存储sin和cos：[sin0, cos0, sin1, cos1, ...]
+                size_t base_idx = pos * head_dim_ + i * 2;
+                sin_cos_cpu[base_idx] = sinf(angle);      // sin值
+                sin_cos_cpu[base_idx + 1] = cosf(angle);  // cos值
+            }
+        }
+
+        rope_sin_cos_cache_ = Tensor<float>({max_seq_len, head_dim_}, Device::CUDA, false, "rope_sin_cos_cache");
+
+        cudaError_t err = cudaMemcpy(rope_sin_cos_cache_.data_ptr(), sin_cos_cpu.data(),
+                                     sin_cos_cpu.size() * sizeof(float), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to copy RoPE sin/cos cache to GPU: " +
+                                     std::string(cudaGetErrorString(err)));
+        }
+
+        std::cout << "RoPE sin/cos缓存已创建，形状: [" << max_seq_len << ", " << head_dim_ << "]" << std::endl;
+
+        std::vector<float>().swap(freq_);
+        std::vector<float>().swap(sin_cos_cpu);
         // 合并Q、K和V权重，通过cudamemcpy
         for (int i = 0; i < n_layers_; i++) {
             std::string layer_prefix = "layers." + std::to_string(i) + ".";
@@ -1350,7 +1382,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             Tensor<T> v_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_},
                                                         {seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_});
 
-             q_buf = q_slice;
+            q_buf = q_slice;
             k_buf = k_slice;
             v_buf = v_slice;
         } else {
@@ -1373,8 +1405,15 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         Tensor<T> k_3d = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_3d = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        cuda_OP::rope_with_device_offset(&q_3d, d_rope_offset_, rope_theta_, stream);
-        cuda_OP::rope_with_device_offset(&k_3d, d_rope_offset_, rope_theta_, stream);
+        // 使用预计算的sin/cos缓存进行RoPE，如果缓存可用
+        if (has_rope_cache()) {
+            cuda_OP::rope_with_precomputed_cache(&q_3d, d_rope_offset_, &rope_sin_cos_cache_, stream);
+            cuda_OP::rope_with_precomputed_cache(&k_3d, d_rope_offset_, &rope_sin_cos_cache_, stream);
+        } else {
+            // 回退到原来的动态计算版本
+            cuda_OP::rope_with_device_offset(&q_3d, d_rope_offset_, rope_theta_, stream);
+            cuda_OP::rope_with_device_offset(&k_3d, d_rope_offset_, rope_theta_, stream);
+        }
 
         if (!kv_cache) {
             throw std::runtime_error("forward_for_graph requires KV cache");
@@ -1486,19 +1525,14 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
     return logits;
 }
 
-// -------------------------------
-// CUDA图优化相关方法实现
-// -------------------------------
-
+// 初始化固定内存
 template <typename T>
 void QwenModel<T>::initialize_graph_fixed_memory() {
-    // 问题1解决方案：分配RoPE offset的固定设备内存
     cudaError_t err = cudaMalloc(&d_rope_offset_, sizeof(size_t));
     if (err != cudaSuccess) {
         throw std::runtime_error("Failed to allocate device memory for RoPE offset: " +
                                  std::string(cudaGetErrorString(err)));
     }
-
     fixed_k_buffers_.clear();
     fixed_v_buffers_.clear();
     fixed_k_buffers_.reserve(n_layers_);
