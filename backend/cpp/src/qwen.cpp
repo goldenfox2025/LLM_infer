@@ -1189,7 +1189,7 @@ QwenModel<T> &QwenModel<T>::cuda() {
         for (int i = 0; i < head_dim_ / 2; ++i) {
             freq_[i] = 1.0f / powf(rope_theta_, (2.0f * i) / static_cast<float>(head_dim_));
         }
-        // 假设最大序列长度为max_position_embeddings_，为每个位置和每个频率计算sin/cos
+
         size_t max_seq_len = max_position_embeddings_;
         std::vector<float> sin_cos_cpu(2 * max_seq_len * head_dim_ / 2);  // 存储[pos][freq][sin,cos]格式
         for (size_t pos = 0; pos < max_seq_len; ++pos) {
@@ -1407,6 +1407,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
 
         // 使用预计算的sin/cos缓存进行RoPE，如果缓存可用
         if (has_rope_cache()) {
+            std::cout << "TEST." << std::endl;
             cuda_OP::rope_with_precomputed_cache(&q_3d, d_rope_offset_, &rope_sin_cos_cache_, stream);
             cuda_OP::rope_with_precomputed_cache(&k_3d, d_rope_offset_, &rope_sin_cos_cache_, stream);
         } else {

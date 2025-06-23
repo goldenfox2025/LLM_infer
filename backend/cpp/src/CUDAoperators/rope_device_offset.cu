@@ -163,19 +163,13 @@ __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size
 
         // 边界检查：确保 rot_dim 没有超出当前头向量的一半长度
         if (rot_dim < head_dim_half) {
-            // 从预计算缓存中读取sin/cos值
-            // 缓存格式：[max_seq_len, head_dim] 其中每个位置按[sin0, cos0, sin1, cos1, ...]存储
             size_t cache_idx = absolute_seq_pos * cache_stride + rot_dim * 2;
-            float sin_val = sin_cos_cache[cache_idx];      // sin值
-            float cos_val = sin_cos_cache[cache_idx + 1];  // cos值
+            float2 sincos = *reinterpret_cast<const float2 *>(sin_cos_cache + cache_idx);
 
-            // 取出要旋转的一对数
             float x0 = static_cast<float>(current_head_ptr[rot_dim]);
             float x1 = static_cast<float>(current_head_ptr[rot_dim + head_dim_half]);
-
-            // 执行旋转并写回
-            current_head_ptr[rot_dim] = static_cast<T>(x0 * cos_val - x1 * sin_val);
-            current_head_ptr[rot_dim + head_dim_half] = static_cast<T>(x0 * sin_val + x1 * cos_val);
+            current_head_ptr[rot_dim] = static_cast<T>(x0 * sincos.y - x1 * sincos.x);
+            current_head_ptr[rot_dim + head_dim_half] = static_cast<T>(x0 * sincos.x + x1 * sincos.y);
         }
     }
 }
