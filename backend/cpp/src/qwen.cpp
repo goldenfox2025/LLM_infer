@@ -1195,8 +1195,6 @@ QwenModel<T> &QwenModel<T>::cuda() {
         for (size_t pos = 0; pos < max_seq_len; ++pos) {
             for (int i = 0; i < head_dim_ / 2; ++i) {
                 float angle = static_cast<float>(pos) * freq_[i];
-
-                // 交错存储sin和cos：[sin0, cos0, sin1, cos1, ...]
                 size_t base_idx = pos * head_dim_ + i * 2;
                 sin_cos_cpu[base_idx] = sinf(angle);      // sin值
                 sin_cos_cpu[base_idx + 1] = cosf(angle);  // cos值
@@ -1256,6 +1254,7 @@ QwenModel<T> &QwenModel<T>::cuda() {
                 // 如果没有bias则跳过
             }
         }
+        std::cout << "合并MLP权重" << std::endl;
         for (int i = 0; i < n_layers_; i++) {
             std::string layer_prefix = "layers." + std::to_string(i) + ".";
             auto gate_weight = params_.at(layer_prefix + "mlp.gate_proj.weight");
