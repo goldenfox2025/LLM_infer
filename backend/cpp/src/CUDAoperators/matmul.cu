@@ -163,7 +163,6 @@ __global__ void gemv_with_bias_vectorized_kernel(const T *A, const T *B, const T
     }
 }
 
-// === 向量化版本的 GEMV kernel (无bias) ===
 // 计算 C = A * B^T，其中 A: [1, K], B: [N, K], C: [1, N]
 template <typename T>
 __global__ void gemv_vectorized_kernel(const T *A, const T *B, T *C, int M, int K, int N) {
@@ -203,8 +202,6 @@ __global__ void gemv_vectorized_kernel(const T *A, const T *B, T *C, int M, int 
     }
 }
 
-// === 类型映射特化: 将 __nv_bfloat16 转为 cutlass::bfloat16_t ===
-// 定义类型转换 traits（可扩展支持更多类型）
 template <typename T>
 struct to_cutlass_type {
     using type = T;
@@ -401,28 +398,6 @@ void cublas_matmul_wrapper(cublasHandle_t handle, cublasOperation_t transa, cubl
                            const float *beta,  // 改回 const float*
                            InputType *d_C,     // *** 输出类型为 InputType* ***
                            int ldc) {
-    // printf("--- 进入 cublas_matmul_wrapper ---\n");
-    // printf("模板类型 InputType: %s\n", std::is_same_v<InputType, float> ?
-    // "float"
-    //                                    : std::is_same_v<InputType, nv_bfloat16>
-    //                                        ? "nv_bfloat16"
-    //                                        : "未知");
-
-    // // 打印输入参数
-    // printf("cuBLAS Handle: %p\n", (void *)handle);
-    // printf("transa: %d (N=%d, T=%d)\n", transa, CUBLAS_OP_N, CUBLAS_OP_T);
-    // printf("transb: %d (N=%d, T=%d)\n", transb, CUBLAS_OP_N, CUBLAS_OP_T);
-    // printf("m: %d, n: %d, k: %d\n", m, n, k);
-    // printf("alpha: %f (来自地址 %p)\n", *alpha, (void *)alpha);
-    // printf("d_A: %p\n", (void *)d_A);
-    // printf("lda: %d\n", lda);
-    // printf("d_B: %p\n", (void *)d_B);
-    // printf("ldb: %d\n", ldb);
-    // printf("beta: %f (来自地址 %p)\n", *beta, (void *)beta);
-    // printf("d_C: %p\n", (void *)d_C);
-    // printf("ldc: %d\n", ldc);
-    // fflush(stdout);  // 确保在调用 cuBLAS 前打印出来
-
     cudaDataType_t cuda_data_type_A;
     cudaDataType_t cuda_data_type_B;
     cudaDataType_t cuda_data_type_C;
@@ -447,26 +422,13 @@ void cublas_matmul_wrapper(cublasHandle_t handle, cublasOperation_t transa, cubl
         // 可选: Ampere+ 可考虑 TF32 计算
         // compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
     } else {
-        // 这个 static_assert 会在编译时检查，如果运行到这里说明模板参数类型不对
-        // 但为了运行时更明确，可以加个错误打印
-        // fprintf(stderr, "错误：不支持的 InputType!\n");
         static_assert(std::is_same_v<InputType, nv_bfloat16> || std::is_same_v<InputType, float>,
                       "cublas_matmul_wrapper 只支持 nv_bfloat16 和 float "
                       "输入/输出类型。");
         return;  // 或者抛出异常
     }
 
-    // printf("计算类型 compute_type: %d (CUBLAS_COMPUTE_32F=%d)\n", compute_type,
-    //        CUBLAS_COMPUTE_32F);
-
-    // // --- 选择算法 ---
     cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT;  // 让 cuBLAS 选择
-    // printf("选择算法: CUBLAS_GEMM_DEFAULT (%d)\n", algo);
-    // fflush(stdout);  // 再次确保打印
-
-    // // --- 执行 GEMM 操作 ---
-    // printf("即将调用 cublasGemmEx...\n");
-    // fflush(stdout);
 
     cublasStatus_t status = cublasGemmEx(handle, transa, transb, m, n, k,
                                          alpha,             // 标量 alpha (主机)
@@ -483,27 +445,10 @@ void cublas_matmul_wrapper(cublasHandle_t handle, cublasOperation_t transa, cubl
                                          compute_type,  // 内部计算精度 (推荐保持 FP32)
                                          algo);
 
-    // printf("cublasGemmEx 调用返回，状态码: %d\n", status);
-    // fflush(stdout);
-
     // 使用 CHECK_CUBLAS 宏来检查返回状态
     CHECK_CUBLAS(status);
-
-    // 可选：添加 CUDA 同步和错误检查，确保 GEMM 内核执行完成且没有异步错误
-    // cudaError_t cuda_err = cudaDeviceSynchronize();
-    // if (cuda_err != cudaSuccess) {
-    //   fprintf(stderr, "CUDA error after cublasGemmEx sync: %s\n",
-    //   cudaGetErrorString(cuda_err));
-    // } else {
-    //    printf("cudaDeviceSynchronize 成功\n");
-    // }
-    // fflush(stdout);
-
-    // printf("--- 退出 cublas_matmul_wrapper ---\n");
-    // fflush(stdout);  // 确保退出信息也打印出来
 }
-// --------------------------------------------------
-// --------------------------------------------------
+
 template <typename T>
 void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream, const Tensor<T> *bias,
             int use_) {
@@ -511,17 +456,14 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
 
     const std::vector<size_t> &A_shape = A.sizes();
     const std::vector<size_t> &B_shape = B.sizes();
-    // std::cout << A_shape[0] << " " << A_shape[1] << " " << B_shape[0] << " " << B_shape[1] << std::endl;
 
     // A: [M, K], B: [N, K]（保证 A 的第二维与 B 的第二维一致）
     size_t M = A_shape[0];
     size_t K = A_shape[1];
     size_t N = B_shape[1];
 
-    // === 特殊处理: M=1的GEMV情况 ===
     if (M == 1) {
         // printf("使用 GEMV 优化分支 (M=1)\n");
-
         // 使用优化的GEMV kernel
         constexpr int ROWS_PER_BLOCK = 4;   // 每个block处理4个输出元素
         dim3 blockDim(32, ROWS_PER_BLOCK);  // 32线程构成一个warp，4个warp处理4个输出
@@ -589,14 +531,14 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
                                                                 cutlass::arch::OpClassTensorOp>(
             M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(), stream);
     } else if (use_ == 1) {
-        // 注意：这是直接CUDA算子库的实现，与统一算子库不同，它使用自己的static cublas句柄
+        // 这是直接CUDA算子库的实现，与统一算子库不同，它使用自己的static cublas句柄
         // 这是一个独立的实现，可以直接通过Tensor的matmul函数调用
-
         static cublasHandle_t handle = nullptr;
         // 使用静态标志和互斥锁确保线程安全的单次初始化
+        // 虽然本质上不需要
+        // 这里没有多线程操作，不会出现多线程重复初始化一个句柄
         static std::once_flag init_flag;
         static std::mutex handle_mutex;  // 保护对 handle 的并发使用 (如果需要)
-
         // 确保 cublasCreate 只被调用一次，且线程安全
         std::call_once(init_flag, [&]() {
             std::lock_guard<std::mutex> lock(handle_mutex);  // 锁定以进行创建
