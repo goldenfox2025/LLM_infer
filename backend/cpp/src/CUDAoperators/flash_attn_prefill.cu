@@ -212,6 +212,7 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
         }
 
         // 写回最终结果到全局内存
+        // 我们还是要确认当前线程块负责的token
         constexpr int Q_ROWS_PER_WARP_WRITE = (B_r + WARP_NUM - 1) / WARP_NUM;
         for (int q_row_in_warp = 0; q_row_in_warp < Q_ROWS_PER_WARP_WRITE; ++q_row_in_warp) {
             int q_smem_row = warp_id * Q_ROWS_PER_WARP_WRITE + q_row_in_warp;
@@ -224,7 +225,6 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
             if (q_token_idx < current_prefill_q_length) {
                 float l_final = l_stats[q_smem_row];
                 float inv_l_final = (l_final == 0.0f) ? 0.0f : (1.0f / l_final);
-
                 T* out_global_ptr = out_global + (q_token_idx * num_q_heads_total + q_head_idx_global) * DQKV;
                 for (int d_idx = lane_id; d_idx < DQKV; d_idx += warpSize) {
                     out_global_ptr[d_idx] = static_cast<T>(static_cast<float>(o_smem[q_smem_row][d_idx]) * inv_l_final);
@@ -250,7 +250,7 @@ void flash_attention_prefill(const Tensor<T>& Q, const Tensor<T>& K, const Tenso
     constexpr int B_r = 4;
     constexpr int WARP_NUM = 2;
     constexpr int DQKV_val = 128;
-    constexpr int T_r = 8;
+    constexpr int T_r = 16;
 
     // 计算Grid维度
     int num_q_segments = (seq_len + T_r - 1) / T_r;

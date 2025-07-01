@@ -14,6 +14,8 @@
 #include "cutlass/cutlass.h"
 #include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/gemm/device/gemm.h"
+#include "cutlass/gemm/device/gemm_splitk_parallel.h"
+#include "cutlass/util/device_memory.h"
 #include "cutlass/util/host_tensor.h"
 #include "cutlass/util/reference/device/gemm.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
@@ -212,66 +214,93 @@ struct to_cutlass_type<__nv_bfloat16> {
 };
 
 // === 通用 CUTLASS GEMM 调用模板 ===
-template <typename ElementA, typename ElementB, typename ElementOutput, typename LayoutA, typename LayoutB,
-          typename LayoutOutput, typename ElementAccumulator = float,
-          typename ElementComputeEpilogue = ElementAccumulator, typename MMAOp = cutlass::arch::OpClassTensorOp,
-          typename SmArch = cutlass::arch::Sm80, typename ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>,
-          typename ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>,
-          typename ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 8>,
-          typename SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, int NumStages = 2>
-cutlass::Status run_cutlass_gemm_raw_templated(int m, int n, int k, ElementA const *d_a, ElementB const *d_b,
-                                               ElementOutput const *d_bias, ElementOutput *d_d, cudaStream_t stream = 0,
-                                               ElementComputeEpilogue alpha = ElementComputeEpilogue(1),
-                                               int split_k_slices = 1) {
-    // 1. 类型转换: 使用 to_cutlass_type 将用户类型映射为 Cutlass 支持类型
-    using ElementA_t = typename to_cutlass_type<ElementA>::type;
-    using ElementB_t = typename to_cutlass_type<ElementB>::type;
-    using ElementOutput_t = typename to_cutlass_type<ElementOutput>::type;
+template <typename T>
+cutlass::Status run_cutlass_splitk_gemm_with_bias(int m, int n, int k, const T *d_a, const T *d_b, const T *d_bias,
+                                                  T *d_d, cudaStream_t stream = 0, int split_k_slices = 2) {
+    // 先检查类型，如果是float就跳过CUTLASS
+    if constexpr (std::is_same_v<T, float>) {
+        printf("Float type not supported in CUTLASS split-K, skipping...\n");
+        return cutlass::Status::kErrorNotSupported;
+    }
 
-    // 2. 定义 Epilogue 操作: alpha * (A*B) + bias, 不启用 Beta 缩放
-    using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-        ElementOutput_t, 128 / cutlass::sizeof_bits<ElementOutput_t>::value, ElementAccumulator, ElementComputeEpilogue,
-        cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
+    using ElementType = typename to_cutlass_type<T>::type;
+    using ElementAccumulator = float;
+    using ElementComputeEpilogue = float;
 
-    // 3. 定义 GEMM 类型: 指定所有核心模板参数
-    using Gemm =
-        cutlass::gemm::device::Gemm<ElementA_t, LayoutA, ElementB_t, LayoutB, ElementOutput_t, LayoutOutput,
-                                    ElementAccumulator, MMAOp, SmArch, ShapeMMAThreadBlock, ShapeMMAWarp, ShapeMMAOp,
-                                    EpilogueOp, SwizzleThreadBlock, NumStages, 8, 8  // 可选的线程副本分区参数
-                                    >;
+    // 使用正确的Tensor Core配置，参考examples/06_splitK_gemm
+    using LayoutA = cutlass::layout::RowMajor;
+    using LayoutB = cutlass::layout::ColumnMajor;
+    using LayoutOutput = cutlass::layout::RowMajor;
 
-    // 4. 构造问题规模
+    // 使用标准的LinearCombination epilogue
+    using EpilogueOp =
+        cutlass::epilogue::thread::LinearCombination<ElementType, 128 / cutlass::sizeof_bits<ElementType>::value,
+                                                     ElementAccumulator, ElementComputeEpilogue>;
+
+    // 简化的CUTLASS split-K配置 - 基本可工作版本
+    using GemmSplitK =
+        cutlass::gemm::device::GemmSplitKParallel<ElementType, LayoutA,                   // A matrix
+                                                  ElementType, LayoutB,                   // B matrix
+                                                  ElementType, LayoutOutput,              // C/D matrix
+                                                  ElementAccumulator,                     // Accumulator
+                                                  cutlass::arch::OpClassTensorOp,         // 使用Tensor Core
+                                                  cutlass::arch::Sm75,                    // SM75架构
+                                                  cutlass::gemm::GemmShape<32, 256, 32>,  // threadblock shape
+                                                  cutlass::gemm::GemmShape<32, 64, 32>,   // warp shape
+                                                  cutlass::gemm::GemmShape<16, 8, 16>,    // instruction shape
+                                                  EpilogueOp                              // epilogue只保留基本参数
+                                                  >;
+
+    // 构造问题规模
     cutlass::gemm::GemmCoord problem_size(m, n, k);
 
-    // 5. 构造 TensorRef: 将原始指针和布局转换为 Cutlass 张量引用
-    cutlass::TensorRef<ElementA_t, LayoutA> ref_A(const_cast<ElementA_t *>(reinterpret_cast<const ElementA_t *>(d_a)),
-                                                  LayoutA(k)  // leading dimension = k
-    );
-    cutlass::TensorRef<ElementB_t, LayoutB> ref_B(const_cast<ElementB_t *>(reinterpret_cast<const ElementB_t *>(d_b)),
-                                                  LayoutB(n));
-    cutlass::TensorRef<ElementOutput_t, LayoutOutput> ref_D(reinterpret_cast<ElementOutput_t *>(d_d), LayoutOutput(n));
+    // 构造TensorRef
+    cutlass::TensorRef<ElementType const, LayoutA> tensor_a(reinterpret_cast<const ElementType *>(d_a), LayoutA(k));
+    cutlass::TensorRef<ElementType const, LayoutB> tensor_b(reinterpret_cast<const ElementType *>(d_b), LayoutB(n));
+    cutlass::TensorRef<ElementType, LayoutOutput> tensor_d(reinterpret_cast<ElementType *>(d_d), LayoutOutput(n));
 
-    // 6. 构造参数对象: 包含输入、输出、bias、alpha、split-K 切片等
-    typename Gemm::Arguments arguments{
-        problem_size,  ref_A,   ref_B, {reinterpret_cast<const ElementOutput_t *>(d_bias), 0},  // bias ptr + stride
-        ref_D,         {alpha},                                                                 // epilogue 参数
-        split_k_slices                                                                          // split-K 切片数
-    };
+    // 处理bias - 修正无bias时的tensor_c创建
+    ElementComputeEpilogue alpha = ElementComputeEpilogue(1);
+    ElementComputeEpilogue beta = ElementComputeEpilogue(0);
 
-    // 7. 分配内部 workspace
-    size_t workspace_size = Gemm::get_workspace_size(arguments);
+    cutlass::TensorRef<ElementType const, LayoutOutput> tensor_c;
+    if (d_bias != nullptr) {
+        tensor_c = cutlass::TensorRef<ElementType const, LayoutOutput>(reinterpret_cast<const ElementType *>(d_bias),
+                                                                       LayoutOutput(0));
+        beta = ElementComputeEpilogue(1);
+    } else {
+        // 无bias时，创建空的tensor reference
+        tensor_c = cutlass::TensorRef<ElementType const, LayoutOutput>(nullptr, LayoutOutput(0));
+    }
+
+    // 构造参数 - 使用正确的参数顺序
+    typename GemmSplitK::Arguments arguments{problem_size, tensor_a,      tensor_b,      tensor_c,
+                                             tensor_d,     {alpha, beta}, split_k_slices};
+
+    // 检查是否支持
+    GemmSplitK gemm_op;
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        printf("CUTLASS GemmSplitKParallel can_implement failed: %d (M=%d, N=%d, K=%d, split_k=%d)\n",
+               static_cast<int>(status), m, n, k, split_k_slices);
+        return status;
+    }
+
+    // 分配workspace
+    size_t workspace_size = GemmSplitK::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-    // 8. 实例化运算对象，并检查是否可实现
-    Gemm gemm_op;
-    cutlass::Status status = gemm_op.can_implement(arguments);
-    CUTLASS_CHECK(status);
-
-    // 9. 初始化并执行
+    // 初始化并执行 - 修正initialize调用
     status = gemm_op.initialize(arguments, workspace.get());
-    CUTLASS_CHECK(status);
-    status = gemm_op(stream);  // 在指定的 CUDA 流上执行
-    CUTLASS_CHECK(status);
+    if (status != cutlass::Status::kSuccess) {
+        printf("CUTLASS GemmSplitKParallel initialize failed: %d\n", static_cast<int>(status));
+        return status;
+    }
+
+    status = gemm_op(stream);
+    if (status != cutlass::Status::kSuccess) {
+        printf("CUTLASS GemmSplitKParallel execution failed: %d\n", static_cast<int>(status));
+    }
 
     return status;
 }
@@ -520,16 +549,9 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
     }
 
     if (use_ == 2) {
-        cutlass::Status status = run_cutlass_gemm_raw_templated<T,                             // ElementA
-                                                                T,                             // ElementB
-                                                                T,                             // ElementOutput
-                                                                cutlass::layout::RowMajor,     // LayoutA
-                                                                cutlass::layout::ColumnMajor,  // LayoutB
-                                                                cutlass::layout::RowMajor,     // LayoutOutput
-                                                                float,                         // ElementAccumulator
-                                                                float,                         // ElementComputeEpilogue
-                                                                cutlass::arch::OpClassTensorOp>(
-            M, N, K, A.data_ptr(), B.data_ptr(), bias->data_ptr(), C->data_ptr(), stream);
+        cutlass::Status status = run_cutlass_splitk_gemm_with_bias<T>(
+            static_cast<int>(M), static_cast<int>(N), static_cast<int>(K), A.data_ptr(), B.data_ptr(),
+            bias ? bias->data_ptr() : nullptr, C->data_ptr(), stream);
     } else if (use_ == 1) {
         // 这是直接CUDA算子库的实现，与统一算子库不同，它使用自己的static cublas句柄
         // 这是一个独立的实现，可以直接通过Tensor的matmul函数调用
