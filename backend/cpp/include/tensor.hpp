@@ -319,60 +319,108 @@ class Tensor {
     // 返回 strides
     const std::vector<size_t>& strides() const {
         return strides_;
+    }  // 在 Tensor class 中
+
+    // 检查张量是否连续的辅助函数
+    bool is_contiguous() const {
+        if (strides_.empty() || shape_.empty())
+            return true;
+        size_t expected_stride = 1;
+        for (int i = shape_.size() - 1; i >= 0; --i) {
+            // 尺寸为1的维度不参与连续性判断，因为它的stride可以是任意值
+            if (shape_[i] != 1) {
+                if (strides_[i] != expected_stride) {
+                    return false;
+                }
+            }
+            expected_stride *= shape_[i];
+        }
+        return true;
     }
 
-    // view：返回一个共享底层数据的新张量（不拷贝数据，仅修改元信息）// 对于非
-    // const 左值：直接修改自身
+    // 智能 view 函数 - 左值引用版本
     Tensor<T>& view(const std::vector<size_t>& new_shape) & {
+        // 1. 检查总元素数量是否匹配 (不变)
         size_t new_numel = 1;
         for (size_t dim : new_shape) {
             new_numel *= dim;
         }
         if (new_numel != length_) {
-            std::cerr << "[Tensor::view] Error: New shape's number of elements (" << new_numel
-                      << ") does not match original (" << length_ << ")" << std::endl;
-            throw std::runtime_error("view: New shape must have same number of elements");
+            throw std::runtime_error("view: New shape's number of elements must match original");
         }
-        shape_ = new_shape;
-        strides_ = compute_strides(new_shape);
-        return *this;
+
+        // 2. 快速路径：如果整个张量是连续的 (不变)
+        if (this->is_contiguous()) {
+            shape_ = new_shape;
+            strides_ = compute_strides(new_shape);
+            return *this;
+        }
+
+          // 检查是否仅在对一个连续的尾部进行变形
+        // 一个简单且有效的判断条件是：张量最内维度的 stride 必须为 1
+        if (strides_.empty() || strides_.back() != 1) {
+            throw std::runtime_error(
+                "view failed: a view can only be created for tensors that are contiguous "
+                "or have a stride of 1 for the last dimension.");
+        }
+
+        // 找到新旧 shape 开始不同的第一个维度 d
+        int d = 0;
+        while (d < shape_.size() && d < new_shape.size() && shape_[d] == new_shape[d]) {
+            d++;
+        }
+
+        // 检查从 d 开始的旧尾部元素总数是否与新尾部匹配
+        size_t old_tail_numel = 1;
+        for (size_t i = d; i < shape_.size(); ++i)
+            old_tail_numel *= shape_[i];
+
+        size_t new_tail_numel = 1;
+        for (size_t i = d; i < new_shape.size(); ++i)
+            new_tail_numel *= new_shape[i];
+
+        if (old_tail_numel == new_tail_numel) {
+            // 条件满足，可以执行智能 view
+            std::vector<size_t> final_strides(new_shape.size());
+
+            // 拷贝公共前缀部分的 stride
+            for (int i = 0; i < d; ++i) {
+                final_strides[i] = strides_[i];
+            }
+
+            // 为变形后的尾部计算新的 stride
+            // 因为我们已经确认 strides_.back() == 1，所以尾部是“C风格”连续的
+            // 我们可以从1开始，反向计算这部分的 stride
+            size_t current_stride = 1;
+            for (int i = new_shape.size() - 1; i >= d; --i) {
+                final_strides[i] = current_stride;
+                if (new_shape[i] > 0) {  // 避免乘以0
+                    current_stride *= new_shape[i];
+                }
+            }
+
+            shape_ = new_shape;
+            strides_ = final_strides;
+            return *this;
+        }
+
+        // 4. 如果所有路径都失败，说明这是一个无法安全 view 的情况
+        throw std::runtime_error(
+            "view failed: cannot view this non-contiguous tensor in this way without copying data.");
     }
 
-    // 对于非 const 右值：移动后构造一个新张量返回
-    Tensor<T> view(const std::vector<size_t>& new_shape) && {
-        size_t new_numel = 1;
-        for (size_t dim : new_shape) {
-            new_numel *= dim;
-        }
-        if (new_numel != length_) {
-            std::cerr << "[Tensor::view] Error: New shape's number of elements (" << new_numel
-                      << ") does not match original (" << length_ << ")" << std::endl;
-            throw std::runtime_error("view: New shape must have same number of elements");
-        }
-        Tensor<T> result = std::move(*this);
-        result.shape_ = new_shape;
-        result.strides_ = compute_strides(new_shape);
-        return result;
-    }
-
-    // 新增 const 左值版本：对于 const 对象返回一个新
-    // Tensor（拷贝），而不是修改原对象
+    // const 左值版本 (不变)
     Tensor<T> view(const std::vector<size_t>& new_shape) const& {
-        size_t new_numel = 1;
-        for (size_t dim : new_shape) {
-            new_numel *= dim;
-        }
-        if (new_numel != length_) {
-            std::cerr << "[Tensor::view] Error: New shape's number of elements (" << new_numel
-                      << ") does not match original (" << length_ << ")" << std::endl;
-            throw std::runtime_error("view: New shape must have same number of elements");
-        }
-        Tensor<T> result = *this;  // 拷贝当前对象
-        result.shape_ = new_shape;
-        result.strides_ = compute_strides(new_shape);
+        Tensor result = *this;   // 浅拷贝元信息
+        result.view(new_shape);  // 调用上面的左值版本进行智能修改
         return result;
     }
 
+    // 右值版本 (不变)
+    Tensor<T> view(const std::vector<size_t>& new_shape) && {
+        this->view(new_shape);  // 对将亡值自身进行修改
+        return std::move(*this);
+    }
     // transpose：交换两个维度
     Tensor<T> transpose(int dim0, int dim1) const {
         if (dim0 < 0)

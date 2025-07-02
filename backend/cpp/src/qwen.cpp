@@ -378,9 +378,6 @@ QwenModel<T>::~QwenModel() {
     }
 }
 
-// -------------------------------
-// 参数验证：检查全局与层级关键参数是否存在
-// -------------------------------
 template <typename T>
 bool QwenModel<T>::verify_params() const {
     // 禁用
@@ -388,9 +385,6 @@ bool QwenModel<T>::verify_params() const {
     return true;
 }
 
-// -------------------------------
-// 打印模型基本信息
-// -------------------------------
 template <typename T>
 void QwenModel<T>::print_model_info() const {
     std::cout << "QwenModel Info:" << std::endl;
@@ -922,12 +916,16 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
 
     // Token嵌入 (从embedding_table中获取token嵌入)
     cuda_OP::gather(&residual, input, &params_.at("token_embeddings.weight"));
-
+    std::string l = "layers." + std::to_string(0) + ".";
+    auto &attention_norm_weight = params_.at(l + "input_layernorm.weight");
+    // 使用新的算子抽象层
+    operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight, rms_norm_eps_);
     // 主循环：遍历所有Transformer层
     for (size_t i = 0; i < n_layers_; i++) {
         std::string layer_prefix = "layers." + std::to_string(i) + ".";
-        auto &attention_norm_weight = params_.at(layer_prefix + "input_layernorm.weight");
-        operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight, rms_norm_eps_);
+        // auto &attention_norm_weight = params_.at(layer_prefix + "input_layernorm.weight");
+        // operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight, rms_norm_eps_);
+
         const Tensor<T> *q_bias = nullptr;
         const Tensor<T> *k_bias = nullptr;
         const Tensor<T> *v_bias = nullptr;
@@ -940,56 +938,74 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
             k_bias = &params_.at(layer_prefix + "self_attn.k_proj.bias");
         } catch (const std::out_of_range &) {
         }
-
         try {
             v_bias = &params_.at(layer_prefix + "self_attn.v_proj.bias");
         } catch (const std::out_of_range &) {
         }
 
-        Tensor<T> q_buf({seq_len, n_heads_ * head_dim_}, Device::CUDA);
-        Tensor<T> k_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
-        Tensor<T> v_buf({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
+        Tensor<T> q_buf, k_buf, v_buf;
 
-        auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
-        auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
-        auto v_weight = get_weight(layer_prefix + "self_attn.v_proj");
+        // QKV融合优化：对于非量化模型，检查是否有合并的QKV权重
+        std::string merged_qkv_key = "merged_qkv_" + std::to_string(i);
+        if (quant_type_ == 0 && params_.find(merged_qkv_key) != params_.end()) {
+            // 使用合并的QKV权重进行单次矩阵乘法
+            auto merged_qkv_weight = params_.at(merged_qkv_key);
 
-        operators_->matmul(&q_buf, &hidden_states, q_weight, q_bias);
-        operators_->matmul(&k_buf, &hidden_states, k_weight, k_bias);
-        operators_->matmul(&v_buf, &hidden_states, v_weight, v_bias);
+            // 计算合并后的输出维度
+            size_t q_dim = n_heads_ * head_dim_;
+            size_t k_dim = n_kv_heads_ * head_dim_;
+            size_t v_dim = n_kv_heads_ * head_dim_;
+            size_t total_dim = q_dim + k_dim + v_dim;
 
-        // 同步并销毁流
-        // for (int j = 0; j < 3; j++) {
-        //   cudaStreamSynchronize(streams[j]);
-        //   cudaStreamDestroy(streams[j]);
-        // }
+            // 合并的QKV投影：一次矩阵乘法得到Q、K和V
+            Tensor<T> merged_qkv_result({seq_len, total_dim}, Device::CUDA);
 
-        // 重塑张量，准备应用RoPE
-        const size_t head_size = hidden_size_ / n_heads_;
-        const size_t kv_head_size = hidden_size_ / n_kv_heads_;
-        const size_t row_size = n_kv_heads_ * head_dim_;
+            // 处理bias（如果存在）
+            const Tensor<T> *merged_qkv_bias = nullptr;
+            try {
+                merged_qkv_bias = &params_.at("merged_qkv_bias_" + std::to_string(i));
+            } catch (const std::out_of_range &) {
+                // 如果没有bias则为空
+            }
 
+            // 执行合并的矩阵乘法
+            cuda_OP::matmul(hidden_states, merged_qkv_weight, &merged_qkv_result, nullptr, merged_qkv_bias);
+
+            // 从合并结果中拆分Q、K、V（使用slice，保持非连续stride）
+            q_buf = merged_qkv_result.slice({0, 0}, {seq_len, q_dim});
+            k_buf = merged_qkv_result.slice({0, q_dim}, {seq_len, q_dim + k_dim});
+            v_buf = merged_qkv_result.slice({0, q_dim + k_dim}, {seq_len, total_dim});
+
+        } else {
+            // 量化模式或没有合并权重：分别计算Q、K、V
+            q_buf = Tensor<T>({seq_len, n_heads_ * head_dim_}, Device::CUDA);
+            k_buf = Tensor<T>({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
+            v_buf = Tensor<T>({seq_len, n_kv_heads_ * head_dim_}, Device::CUDA);
+
+            auto wq_ptr = get_weight(layer_prefix + "self_attn.q_proj");
+            auto wk_ptr = get_weight(layer_prefix + "self_attn.k_proj");
+            auto wv_ptr = get_weight(layer_prefix + "self_attn.v_proj");
+
+            operators_->matmul(&q_buf, &hidden_states, wq_ptr, q_bias);
+            operators_->matmul(&k_buf, &hidden_states, wk_ptr, k_bias);
+            operators_->matmul(&v_buf, &hidden_states, wv_ptr, v_bias);
+        }
+
+        // 调整张量形状以进行后续操作（保持非连续stride）
         Tensor<T> q_buf_view = q_buf.view({seq_len, n_heads_, head_dim_});
         Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        size_t offset_q = offset;
-        size_t offset_k = offset;
-        operators_->rope(&q_buf_view, offset_q, rope_theta_);
-        operators_->rope(&k_buf_view, offset_k, rope_theta_);
+        // 为prefill创建临时设备端offset
+        size_t *d_offset_temp;
+        cudaMalloc(&d_offset_temp, sizeof(size_t));
+        cudaMemcpy(d_offset_temp, &offset, sizeof(size_t), cudaMemcpyHostToDevice);
 
-        // 将K,V存储到缓存中
-        // for (size_t j = 0; j < seq_len; j++) {
-        //   // 获取对应的 k 和 v slice
-        //   Tensor<T>& k_slice = kv_cache->k_cache(i, offset + j);
-        //   Tensor<T>& v_slice = kv_cache->v_cache(i, offset + j);
+        // 使用预计算缓存版本的RoPE（支持非连续张量的stride访问）
+        cuda_OP::rope_with_precomputed_cache(&q_buf_view, d_offset_temp, &rope_sin_cos_cache_);
+        cuda_OP::rope_with_precomputed_cache(&k_buf_view, d_offset_temp, &rope_sin_cos_cache_);
 
-        //   // 将数据从 k_buf_view 和 v_buf_view 拷贝到对应 slice 的内存中
-        //   cudaMemcpy(k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
-        //              row_size * sizeof(T), cudaMemcpyDeviceToDevice);
-        //   cudaMemcpy(v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
-        //              row_size * sizeof(T), cudaMemcpyDeviceToDevice);
-        // }
+        cudaFree(d_offset_temp);
 
         for (size_t j = 0; j < seq_len; j++) {
             // 获取对应的 k 和 v slice
@@ -997,10 +1013,10 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
             Tensor<T> &v_slice = kv_cache->v_cache(i, offset + j);
 
             // 异步拷贝：使用 cudaMemcpyAsync 替换同步版本
-            cudaError_t err1 = cudaMemcpyAsync(k_slice.data_ptr(), k_buf_view.data_ptr() + j * row_size,
-                                               row_size * sizeof(T), cudaMemcpyDeviceToDevice);
-            cudaError_t err2 = cudaMemcpyAsync(v_slice.data_ptr(), v_buf_view.data_ptr() + j * row_size,
-                                               row_size * sizeof(T), cudaMemcpyDeviceToDevice);
+            cudaMemcpyAsync(k_slice.data_ptr(), k_buf_view.data_ptr() + j * k_buf_view.strides()[0],
+                            n_kv_heads_ * head_dim_ * sizeof(T), cudaMemcpyDeviceToDevice);
+            cudaMemcpyAsync(v_slice.data_ptr(), v_buf_view.data_ptr() + j * v_buf_view.strides()[0],
+                            n_kv_heads_ * head_dim_ * sizeof(T), cudaMemcpyDeviceToDevice);
         }
 
         // 重新格式化Q用于注意力计算
@@ -1009,62 +1025,59 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         // 准备K和V张量用于注意力计算
         Tensor<T> total_K, total_V;
         size_t total_seq_len = 0;
-        if (offset > 0) {
-            size_t cached_len = offset;
-            total_seq_len = cached_len + seq_len;
 
-            // total_K =
-            //     Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
-            // total_V =
-            //     Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+        total_seq_len = offset + seq_len;
 
-            // // 拷贝缓存的K,V
-            // for (size_t pos = 0; pos < cached_len; pos++) {
-            //   const auto& cached_k = kv_cache->k_cache(i, pos);
-            //   const auto& cached_v = kv_cache->v_cache(i, pos);
+        // total_K =
+        //     Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
+        // total_V =
+        //     Tensor<T>({total_seq_len, n_kv_heads_, head_dim_}, Device::CUDA);
 
-            //   cudaMemcpy(total_K.data_ptr() + pos * n_kv_heads_ * head_dim_,
-            //              cached_k.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
-            //              cudaMemcpyDeviceToDevice);
+        // // 拷贝缓存的K,V
+        // for (size_t pos = 0; pos < offset; pos++) {
+        //   const auto& cached_k = kv_cache->k_cache(i, pos);
+        //   const auto& cached_v = kv_cache->v_cache(i, pos);
 
-            //   cudaMemcpy(total_V.data_ptr() + pos * n_kv_heads_ * head_dim_,
-            //              cached_v.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
-            //              cudaMemcpyDeviceToDevice);
-            // }
-            // // 拷贝当前的K, V
+        //   cudaMemcpy(total_K.data_ptr() + pos * n_kv_heads_ * head_dim_,
+        //              cached_k.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
+        //              cudaMemcpyDeviceToDevice);
 
-            // cudaMemcpy(total_K.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
-            //            k_buf_view.data_ptr(),
-            //            seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
-            //            cudaMemcpyDeviceToDevice);
+        //   cudaMemcpy(total_V.data_ptr() + pos * n_kv_heads_ * head_dim_,
+        //              cached_v.data_ptr(), n_kv_heads_ * head_dim_ * sizeof(T),
+        //              cudaMemcpyDeviceToDevice);
+        // }
+        // // 拷贝当前的K, V
 
-            // cudaMemcpy(total_V.data_ptr() + cached_len * n_kv_heads_ * head_dim_,
-            //            v_buf_view.data_ptr(),
-            //            seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
-            //            cudaMemcpyDeviceToDevice);
-            auto [total_K1, total_V1] = kv_cache->get_contiguous_tensor(i);
-            // total_KX.view({total_seq_len, n_kv_heads_, head_dim_});
-            // debugPrintTensor(total_KX, "total_KX");
-            // debugPrintTensor(total_K, "total_K");
+        // cudaMemcpy(total_K.data_ptr() + offset * n_kv_heads_ * head_dim_,
+        //            k_buf_view.data_ptr(),
+        //            seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
+        //            cudaMemcpyDeviceToDevice);
 
-            total_K = total_K1.view({total_seq_len, n_kv_heads_, head_dim_});
-            // debugPrintTensor(total_K, "total_K");
-            total_V = total_V1.view({total_seq_len, n_kv_heads_, head_dim_});
-        } else {
-            total_K = k_buf_view;
-            total_V = v_buf_view;
-            total_seq_len = seq_len;
-        }
+        // cudaMemcpy(total_V.data_ptr() + offset * n_kv_heads_ * head_dim_,
+        //            v_buf_view.data_ptr(),
+        //            seq_len * n_kv_heads_ * head_dim_ * sizeof(T),
+        //            cudaMemcpyDeviceToDevice);
+        auto [total_K1, total_V1] = kv_cache->get_contiguous_tensor(i);
+        // total_KX.view({total_seq_len, n_kv_heads_, head_dim_});
+        // debugPrintTensor(total_KX, "total_KX");
+        // debugPrintTensor(total_K, "total_K");
+
+        total_K = total_K1.view({total_seq_len, n_kv_heads_, head_dim_});
+        // debugPrintTensor(total_K, "total_K");
+        total_V = total_V1.view({total_seq_len, n_kv_heads_, head_dim_});
+
         Tensor<T> att_heads({seq_len, n_heads_, head_dim_}, Device::CUDA);
-        Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
-        cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores, head_dim_);
-        cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
 
-        cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads, n_heads_, head_dim_, total_seq_len,
-                                            n_kv_heads_);
+        cuda_OP::flash_attention_prefill(Q_3d, total_K, total_V, att_heads, n_heads_, n_kv_heads_, head_dim_, seq_len,
+                                         total_seq_len, offset, nullptr);
 
-        // operators_->flash_attention_prefill(Q_3d, total_K, total_V, att_heads, n_heads_, n_kv_heads_, head_dim_,
-        //                                     seq_len, total_seq_len, offset);
+        // debugPrintTensor(att_heads, "att_heads");
+        // 旧的实现（注释掉）
+        // Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
+        // cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores, head_dim_);
+        // cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
+        // cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads, n_heads_, head_dim_, total_seq_len,
+        //                                     n_kv_heads_);
 
         // 将注意力输出投影回原始维度
         Tensor<T> att_proj({seq_len, hidden_size_}, Device::CUDA);
@@ -1078,26 +1091,45 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         auto &ffn_norm_weight = params_.at(layer_prefix + "post_attention_layernorm.weight");
         cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight, rms_norm_eps_);
 
-          const Tensor<T> *gate_bias = nullptr;
+        const Tensor<T> *gate_bias = nullptr;
         const Tensor<T> *up_bias = nullptr;
         const Tensor<T> *down_bias = nullptr;
 
-        // 预先分配输出张量
-        size_t ffn_hidden_size = intermediate_size_;
+        try {
+            gate_bias = &params_.at(layer_prefix + "mlp.gate_proj.bias");
+        } catch (const std::out_of_range &) {
+        }
+        try {
+            up_bias = &params_.at(layer_prefix + "mlp.up_proj.bias");
+        } catch (const std::out_of_range &) {
+        }
+        try {
+            down_bias = &params_.at(layer_prefix + "mlp.down_proj.bias");
+        } catch (const std::out_of_range &) {
+        }
 
-        Tensor<T> gate_buf({seq_len, ffn_hidden_size}, Device::CUDA);
-        Tensor<T> up_buf({seq_len, ffn_hidden_size}, Device::CUDA);
+        Tensor<T> gate_buf;
+        Tensor<T> up_buf;
+        Tensor<T> merged_mlp_result({seq_len, 2 * intermediate_size_}, Device::CUDA);
 
-        // 获取权重（自动处理量化与非量化情况）
-        auto gate_weight = get_weight(layer_prefix + "mlp.gate_proj");
-        auto up_weight = get_weight(layer_prefix + "mlp.up_proj");
-
-        // 执行矩阵乘法（内部自动选择合适的实现）
-        operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
-        operators_->matmul(&up_buf, &hidden_states, up_weight, up_bias);
-
-        cuda_OP::silu(&gate_buf, &gate_buf);               // SiLU激活
-        cuda_OP::multiply(&gate_buf, &gate_buf, &up_buf);  // 逐元素相乘
+        if (quant_type_ == 1) {
+            gate_buf = Tensor<T>({seq_len, intermediate_size_}, Device::CUDA);
+            up_buf = Tensor<T>({seq_len, intermediate_size_}, Device::CUDA);
+            auto gate_weight = get_weight(layer_prefix + "mlp.gate_proj");
+            auto up_weight = get_weight(layer_prefix + "mlp.up_proj");
+            operators_->matmul(&gate_buf, &hidden_states, gate_weight, gate_bias);
+            operators_->matmul(&up_buf, &hidden_states, up_weight, up_bias);
+        } else {
+            // 实际上，0也可以走上面的封装，但这里测试mlp并行
+            // 没有bias，处理起来比较方便
+            // 当然，只支持seqlen为1
+            auto merged_mlp_weight = params_.at("merged_mlp_" + std::to_string(i));
+            cuda_OP::matmul(hidden_states, merged_mlp_weight, &merged_mlp_result, nullptr);
+            gate_buf = merged_mlp_result.slice({0, 0}, {seq_len, intermediate_size_});
+            up_buf = merged_mlp_result.slice({0, intermediate_size_}, {seq_len, 2 * intermediate_size_});
+        }
+        Tensor<T> gate_buf_silu({seq_len, intermediate_size_}, Device::CUDA);
+        cuda_OP::silu_multiply(&gate_buf_silu, &gate_buf, &up_buf, 0);
 
         // 投影回原始维度
         Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA);
@@ -1106,9 +1138,16 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         auto down_weight = get_weight(layer_prefix + "mlp.down_proj");
 
         // 执行矩阵乘法（内部自动选择合适的实现）
-        operators_->matmul(&ffn_out, &gate_buf, down_weight, down_bias);
+        operators_->matmul(&ffn_out, &gate_buf_silu, down_weight, down_bias);
 
-        operators_->add(&residual, &residual, &ffn_out);
+        if (i == n_layers_ - 1) {
+            // 最后一层的残差连接
+            cuda_OP::add(&residual, &residual, &ffn_out);
+        } else {
+            std::string lx = "layers." + std::to_string(i + 1) + ".";
+            auto &attention_norm_weight = params_.at(lx + "input_layernorm.weight");
+            cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &attention_norm_weight, rms_norm_eps_);
+        }
     }
 
     auto &norm_weight = params_.at("norm.weight");
@@ -1358,11 +1397,6 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             operators_->matmul(&v_buf, &hidden_states, v_weight, v_bias, stream);
         }
 
-        // 关键修复：确保K和V的计算结果写入到固定缓冲区
-        // 这样图执行后可以正确复制到KV cache
-        // 注意：这里不能直接写入KV cache，因为地址会变化，但必须写入固定缓冲区
-        // 重塑为3D张量
-
         Tensor<T> q_3d = q_buf.view({seq_len, n_heads_, head_dim_});
         Tensor<T> k_3d = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_3d = v_buf.view({seq_len, n_kv_heads_, head_dim_});
@@ -1450,21 +1484,21 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             operators_->matmul(&gate_buf, &hidden_states, gate_weight, nullptr, stream);
             operators_->matmul(&up_buf, &hidden_states, up_weight, nullptr, stream);
         } else {
-            // 实际上，0也可以走上面的封装，但这里测试mlp并行
-            // 没有bias，处理起来比较方便
-            // 当然，只支持seqlen为1
+            // 实际上，0也可以走上面的封装
+            // 但以后再说
+
             auto merged_mlp_weight = params_.at("merged_mlp_" + std::to_string(i));
             cuda_OP::matmul(hidden_states, merged_mlp_weight, &merged_mlp_result, stream);
             gate_buf = merged_mlp_result.slice({0, 0}, {1, intermediate_size_});
             up_buf = merged_mlp_result.slice({0, intermediate_size_}, {1, 2 * intermediate_size_});
         }
 
-        operators_->silu(&gate_buf, &gate_buf, stream);
-        operators_->multiply(&gate_buf, &gate_buf, &up_buf, stream);
+        Tensor<T> gate_buf_silu({seq_len, intermediate_size_}, Device::CUDA);
+        cuda_OP::silu_multiply(&gate_buf_silu, &gate_buf, &up_buf, stream);
 
         Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA, false, ffn_tag);
         auto down_weight = get_weight(layer_prefix + "mlp.down_proj");
-        operators_->matmul(&ffn_out, &gate_buf, down_weight, nullptr, stream);
+        operators_->matmul(&ffn_out, &gate_buf_silu, down_weight, nullptr, stream);
 
         if (i == n_layers_ - 1) {
             // 最后一层只做残差连接

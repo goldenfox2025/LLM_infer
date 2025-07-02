@@ -510,39 +510,6 @@ void rope(Tensor<T> *x, size_t offset, float theta, cudaStream_t stream) {
     }
 }
 
-// --------------------------------------------------
-// SiLU 内核与包装函数（模板化）
-// --------------------------------------------------
-template <typename T>
-__global__ void silu_kernel(T *data, int total) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < total) {
-        float x = static_cast<float>(data[idx]);
-        data[idx] = static_cast<T>(x / (1.0f + expf(-x)));
-    }
-}
-
-template <typename T>
-void silu(Tensor<T> *output, const Tensor<T> *input, cudaStream_t stream) {
-    size_t total = 1;
-    for (auto s : input->sizes())
-        total *= s;
-    if (output->data_ptr() != input->data_ptr()) {
-        checkCudaError(cudaMemcpy(output->data_ptr(), input->data_ptr(), total * sizeof(T), cudaMemcpyDeviceToDevice));
-    }
-    int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    silu_kernel<<<blocks, threads, 0, stream>>>(output->data_ptr(), total);
-    checkCudaError(cudaGetLastError());
-    // if (stream == nullptr) {
-    //   checkCudaError(cudaDeviceSynchronize());
-    // }
-}
-
-// --------------------------------------------------
-// 注意力计算：decode 版本 — 计算注意力分数（模板化）
-// --------------------------------------------------
-
 template <typename T>
 __global__ void attention_scores_kernel(const T *__restrict__ Q,  // Q 指针，假定布局为 [n_q_h, dqkv] 或等效
                                         const int n_q_h, const int dqkv,
@@ -983,7 +950,6 @@ void init_curand(curandState *d_states, unsigned long long seed, int offset, cud
 
 template void rope<float>(Tensor<float> *, size_t, float, cudaStream_t);
 template void rms_norm<float>(Tensor<float> *, const Tensor<float> *, const Tensor<float> *, float, cudaStream_t);
-template void silu<float>(Tensor<float> *, const Tensor<float> *, cudaStream_t);
 
 template void compute_attention_scores<float>(const Tensor<float> &, const Tensor<float> &, size_t, size_t,
                                               Tensor<float> &, size_t, cudaStream_t);
@@ -998,7 +964,6 @@ template void compute_att_output_prefill<float>(const Tensor<float> &, const Ten
 
 template void rope<nvbf16>(Tensor<nvbf16> *, size_t, float, cudaStream_t);
 template void rms_norm<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *, const Tensor<nvbf16> *, float, cudaStream_t);
-template void silu<nvbf16>(Tensor<nvbf16> *, const Tensor<nvbf16> *, cudaStream_t);
 
 template void compute_attention_scores<nvbf16>(const Tensor<nvbf16> &, const Tensor<nvbf16> &, size_t, size_t,
                                                Tensor<nvbf16> &, size_t, cudaStream_t);

@@ -107,10 +107,21 @@ void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = tru
 // silu 激活函数算子
 template <typename T>
 void silu(Tensor<T> *output, const Tensor<T> *input, cudaStream_t stream = nullptr);
+template <typename T>
+void silu_multiply(Tensor<T> *output, const Tensor<T> *input, const Tensor<T> *input2, cudaStream_t stream = nullptr);
+// 支持步长访问的silu激活函数算子
+// input可以是非连续张量，output必须是连续张量
+template <typename T>
+void silu_strided(Tensor<T> *output, const Tensor<T> *input, cudaStream_t stream = nullptr);
 
 // 逐元素乘法算子
 template <typename T>
 void multiply(Tensor<T> *output, const Tensor<T> *A, const Tensor<T> *B, cudaStream_t stream = nullptr);
+
+// 支持步长访问的逐元素乘法算子
+// A和B可以是非连续张量，output必须是连续张量
+template <typename T>
+void multiply_strided(Tensor<T> *output, const Tensor<T> *A, const Tensor<T> *B, cudaStream_t stream = nullptr);
 
 // 逐元素加法算子
 template <typename T>

@@ -35,7 +35,7 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
                                           const T* __restrict__ v_global, T* __restrict__ out_global,
                                           int num_q_heads_total, int num_kv_heads_total, int GQA_n_group,
                                           int current_prefill_q_length, int current_kv_cache_total_len,
-                                          int q_offset_in_kv_timeline) {
+                                          int q_offset_in_kv_timeline, int q_stride) {
     // 找到当前线程块负责的Q段和Q头
     const int q_segment_idx = blockIdx.x;
     const int q_head_idx_global = blockIdx.y;
@@ -75,7 +75,7 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
             int q_token_idx = q_segment_start_idx + q_block_offset + q_smem_row;
 
             bool is_valid_q = (q_token_idx < current_prefill_q_length);
-            const T* q_global_ptr = q_global + (q_token_idx * num_q_heads_total + q_head_idx_global) * DQKV;
+            const T* q_global_ptr = q_global + q_token_idx * q_stride + q_head_idx_global * DQKV;
             for (int dim_idx = tid; dim_idx < DQKV; dim_idx += blockDim.x) {
                 if (is_valid_q) {
                     q_smem[q_smem_row][dim_idx] = q_global_ptr[dim_idx];
@@ -170,12 +170,11 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
                     m_block = max(m_block, scores_smem[q_smem_row][col_idx]);
                 }
                 m_block = warpReduceMax(m_block);
+
+                // 计算新的全局最大值
                 float m_new = max(m_prev, m_block);
 
-                float scale = expf(m_prev - m_new);
-                if (lane_id == 0) {
-                    l_stats[q_smem_row] = l_prev * scale;
-                }
+                // 首先更新注意力分数并计算概率
                 // 写入本次迭代的结果
                 // online softmax
                 // m_new = max(m_old, m_block)
@@ -183,35 +182,51 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
                 // l_new = new_scale * l_old + l_block_sum
 
                 // 计算本次迭代中，当前warp负责的token的l_block_sum
-                float l_block_sum = 0.0f;
+                float l_block = 0.0f;
                 for (int col_idx = lane_id; col_idx < B_c; col_idx += warpSize) {
                     float s = scores_smem[q_smem_row][col_idx];
                     float p = (s == -FLT_MAX) ? 0.0f : expf(s - m_new);
                     scores_smem[q_smem_row][col_idx] = p;
-                    l_block_sum += p;
+                    l_block += p;
                 }
-                l_block_sum = warpReduceSum(l_block_sum);
+                l_block = warpReduceSum(l_block);
 
-                if (lane_id == 0) {
-                    l_stats[q_smem_row] += l_block_sum;
-                    m_stats[q_smem_row] = m_new;
+                // 处理数值稳定性：避免极端情况
+                float scale_prev;
+                if (m_prev == -FLT_MAX) {
+                    scale_prev = 0.0f;
+                } else if (m_prev == m_new) {
+                    scale_prev = 1.0f;
+                } else {
+                    scale_prev = expf(m_prev - m_new);
                 }
-                __syncthreads();
 
-                // 计算本次迭代中，当前warp负责的token的输出
+                // 更新全局统计量，确保数值稳定性
+                float l_new = l_prev * scale_prev + l_block;
+
+                // 先计算当前block的P*V贡献，使用更稳定的计算方式
                 for (int d_idx = lane_id; d_idx < DQKV; d_idx += warpSize) {
                     float pv_sum = 0.0f;
                     for (int k_smem_row = 0; k_smem_row < B_c; ++k_smem_row) {
                         pv_sum += scores_smem[q_smem_row][k_smem_row] * static_cast<float>(v_smem[k_smem_row][d_idx]);
                     }
-                    o_smem[q_smem_row][d_idx] =
-                        static_cast<T>(static_cast<float>(o_smem[q_smem_row][d_idx]) * scale + pv_sum);
+
+                    // 更稳定的输出更新：O_new = scale_prev * O_old + P_block * V_block
+                    float o_old = static_cast<float>(o_smem[q_smem_row][d_idx]);
+                    float o_new = o_old * scale_prev + pv_sum;
+                    o_smem[q_smem_row][d_idx] = static_cast<T>(o_new);
+                }
+
+                // 更新统计量
+                if (lane_id == 0) {
+                    m_stats[q_smem_row] = m_new;
+                    l_stats[q_smem_row] = l_new;
                 }
             }
             __syncthreads();
         }
 
-        // 写回最终结果到全局内存
+        // 写回最终结果到全局内存 - 确保最终归一化的数值稳定性
         // 我们还是要确认当前线程块负责的token
         constexpr int Q_ROWS_PER_WARP_WRITE = (B_r + WARP_NUM - 1) / WARP_NUM;
         for (int q_row_in_warp = 0; q_row_in_warp < Q_ROWS_PER_WARP_WRITE; ++q_row_in_warp) {
@@ -224,10 +239,12 @@ __global__ void flash_attn_prefill_kernel(const T* __restrict__ q_global, const 
 
             if (q_token_idx < current_prefill_q_length) {
                 float l_final = l_stats[q_smem_row];
-                float inv_l_final = (l_final == 0.0f) ? 0.0f : (1.0f / l_final);
+                // 确保l_final不为0，避免除零错误
+                float inv_l_final = (l_final > 1e-6f) ? (1.0f / l_final) : 0.0f;
                 T* out_global_ptr = out_global + (q_token_idx * num_q_heads_total + q_head_idx_global) * DQKV;
                 for (int d_idx = lane_id; d_idx < DQKV; d_idx += warpSize) {
-                    out_global_ptr[d_idx] = static_cast<T>(static_cast<float>(o_smem[q_smem_row][d_idx]) * inv_l_final);
+                    float final_output = static_cast<float>(o_smem[q_smem_row][d_idx]) * inv_l_final;
+                    out_global_ptr[d_idx] = static_cast<T>(final_output);
                 }
             }
         }
@@ -250,16 +267,17 @@ void flash_attention_prefill(const Tensor<T>& Q, const Tensor<T>& K, const Tenso
     constexpr int B_r = 4;
     constexpr int WARP_NUM = 2;
     constexpr int DQKV_val = 128;
-    constexpr int T_r = 16;
+    constexpr int T_r = 8;
 
     // 计算Grid维度
     int num_q_segments = (seq_len + T_r - 1) / T_r;
     dim3 grid(num_q_segments, n_heads);
     dim3 block(WARP_NUM * 32);
+    int q_stride = Q.strides()[0];
 
     flash_attn_prefill_kernel<T, B_c, B_r, T_r, WARP_NUM, DQKV_val>
         <<<grid, block, 0, stream>>>(Q.data_ptr(), K.data_ptr(), V.data_ptr(), output.data_ptr(), n_heads, n_kv_heads,
-                                     n_groups, seq_len, total_seq_len, offset);
+                                     n_groups, seq_len, total_seq_len, offset, q_stride);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

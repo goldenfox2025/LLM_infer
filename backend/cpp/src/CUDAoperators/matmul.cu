@@ -361,8 +361,8 @@ cutlass::Status run_cutlass_splitk_gemm_with_bias(int m, int n, int k, const T *
 
     using GemmSplitK = cutlass::gemm::device::GemmSplitKParallel<
         ElementType, LayoutA, ElementType, LayoutB, ElementType, LayoutOutput, ElementAccumulator,
-        cutlass::arch::OpClassTensorOp, cutlass::arch::Sm75, cutlass::gemm::GemmShape<32, 256, 32>,
-        cutlass::gemm::GemmShape<32, 64, 32>, cutlass::gemm::GemmShape<16, 8, 16>, EpilogueOp>;
+        cutlass::arch::OpClassTensorOp, cutlass::arch::Sm75, cutlass::gemm::GemmShape<16, 128, 64>,
+        cutlass::gemm::GemmShape<16, 64, 32>, cutlass::gemm::GemmShape<16, 8, 16>, EpilogueOp>;
 
     cutlass::gemm::GemmCoord problem_size(m, n, k);
 
