@@ -14,7 +14,7 @@ __global__ void rope_kernel_device_offset(T *tensor, size_t batch_size, size_t s
     size_t offset = *d_offset;
 
     // 确认当前线程的位置
-    size_t b_idx = blockIdx.x;
+    // size_t b_idx = blockIdx.x;
     size_t head_idx = blockIdx.y;
     size_t seq_idx_in_batch = blockIdx.z;
 
