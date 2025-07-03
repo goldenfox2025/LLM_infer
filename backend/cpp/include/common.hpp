@@ -252,7 +252,7 @@ inline void debugPrintTensor<__nv_bfloat16>(const Tensor<__nv_bfloat16>& tensor,
     std::cout << "\n";
 
     // 4) Print elements starting from offset 0
-    size_t offset = 1535;
+    size_t offset = 0;
     size_t total_elements = tensor.numel();
     size_t n_print = std::min(num_to_print, total_elements - offset);
 

@@ -128,10 +128,12 @@ void rope_with_device_offset(Tensor<T> *tensor, const size_t *d_offset, float th
 template <typename T, int actual_pairs_per_thread = 2>
 __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size_t seq_len, size_t n_heads,
                                               size_t head_dim, const size_t *d_offset, const float *sin_cos_cache,
-                                              size_t cache_stride, int stride) {
+                                              size_t cache_stride, int stride, int *dst_off) {
     // 从设备内存读取offset
     size_t offset = *d_offset;
-
+    int t_off = 0;
+    if (dst_off != nullptr)
+        t_off = *dst_off;
     // 确认当前线程的位置
     size_t b_idx = blockIdx.x;
     size_t head_idx = blockIdx.y;
@@ -144,10 +146,11 @@ __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size
     size_t group_idx = threadIdx.x;
     // Token在原始完整序列中的绝对位置
     size_t absolute_seq_pos = seq_idx_in_batch + offset;
-
+    T *current_head_ptr;
     // 输入的顺序是 seqlen, n_heads, head_dim
-    T *current_head_ptr = tensor + seq_idx_in_batch * stride +  // 序列位置偏移（使用stride）
-                          head_idx * head_dim;                  // 头偏移
+
+    current_head_ptr = tensor + t_off + seq_idx_in_batch * stride +  // 序列位置偏移（使用stride）
+                       head_idx * head_dim;                          // 头偏移
 
     // 执行旋转
     for (int i = 0; i < actual_pairs_per_thread; ++i) {
@@ -170,7 +173,7 @@ __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size
 // 使用预计算sin/cos缓存的RoPE版本
 template <typename T>
 void rope_with_precomputed_cache(Tensor<T> *tensor, const size_t *d_offset, const Tensor<float> *sin_cos_cache,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, int *dst_off) {
     if (tensor->device() != Device::CUDA) {
         throw std::runtime_error("RoPE: Input tensor must be on CUDA device.");
     }
@@ -206,6 +209,7 @@ void rope_with_precomputed_cache(Tensor<T> *tensor, const size_t *d_offset, cons
     size_t cache_max_seq_len = cache_sizes[0];
     size_t cache_head_dim = cache_sizes[1];
     const int stride = tensor->strides()[0];
+
     if (cache_head_dim != head_dim) {
         throw std::runtime_error("RoPE: sin_cos_cache head_dim mismatch.");
     }
@@ -237,7 +241,7 @@ void rope_with_precomputed_cache(Tensor<T> *tensor, const size_t *d_offset, cons
     // 启动Kernel
     rope_kernel_precomputed_cache<T, actual_pairs_per_thread>
         <<<grid_dim, block_dim, 0, stream>>>(tensor->data_ptr(), batch_size, seq_len, n_heads, head_dim, d_offset,
-                                             sin_cos_cache->data_ptr(), cache_head_dim, stride);
+                                             sin_cos_cache->data_ptr(), cache_head_dim, stride, dst_off);
 
     // 错误检查
     cudaError_t err = cudaGetLastError();
@@ -252,7 +256,8 @@ template void rope_with_device_offset<float>(Tensor<float> *tensor, const size_t
 template void rope_with_device_offset<__nv_bfloat16>(Tensor<__nv_bfloat16> *tensor, const size_t *d_offset, float theta,
                                                      cudaStream_t stream);
 template void rope_with_precomputed_cache<float>(Tensor<float> *tensor, const size_t *d_offset,
-                                                 const Tensor<float> *sin_cos_cache, cudaStream_t stream);
+                                                 const Tensor<float> *sin_cos_cache, cudaStream_t stream, int *);
 template void rope_with_precomputed_cache<__nv_bfloat16>(Tensor<__nv_bfloat16> *tensor, const size_t *d_offset,
-                                                         const Tensor<float> *sin_cos_cache, cudaStream_t stream);
+                                                         const Tensor<float> *sin_cos_cache, cudaStream_t stream,
+                                                         int *);
 }  // namespace cuda_OP

@@ -335,7 +335,7 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             // 执行prefill操作
             uint32_t* warmup_token =
                 model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k, temperature, top_p, d_states);
-
+            GlobalCudaMemoryPool::set_prefill_phase(false);
             // 如果是QwenModel且支持CUDA图，在预热阶段调用一次forward来初始化CUDA图
             // 这样可以使用真实的KV cache
             std::cout << "检查是否需要初始化CUDA图..." << std::endl;
@@ -353,6 +353,7 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
                     // 创建单token输入用于图初始化
                     std::vector<uint32_t> graph_init_input = {9707};  // 包含token 9707的向量
                     Tensor<uint32_t> graph_input_tensor_(std::move(graph_init_input), {1}, device_);
+
                     // 调用forward来触发CUDA图初始化
                     uint32_t* graph_warmup_token = model_->forward(&graph_input_tensor_, thread_pool_, &kv_cache_,
                                                                    top_k, temperature, top_p, d_states);
@@ -365,9 +366,6 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             }
             // 停止计时
             warmup_timer.stop();
-
-            // 关闭prefill阶段标志
-            GlobalCudaMemoryPool::set_prefill_phase(false);
 
             // 重置KV缓存
             kv_cache_.clear();

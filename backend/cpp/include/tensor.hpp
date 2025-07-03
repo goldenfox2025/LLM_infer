@@ -356,7 +356,7 @@ class Tensor {
             return *this;
         }
 
-          // 检查是否仅在对一个连续的尾部进行变形
+        // 检查是否仅在对一个连续的尾部进行变形
         // 一个简单且有效的判断条件是：张量最内维度的 stride 必须为 1
         if (strides_.empty() || strides_.back() != 1) {
             throw std::runtime_error(

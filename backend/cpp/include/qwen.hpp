@@ -285,11 +285,8 @@ class QwenModel : public BaseModel {
     Tensor<float> rope_sin_cos_cache_;  // 存储预计算的sin/cos值，形状为[max_seq_len, head_dim]
 
     size_t* d_rope_offset_;  // 设备端固定内存存储offset
+    std::vector<int*> out_offset_ptr_;
 
-    // 当前KV写入offset（用于图执行）
-    size_t current_kv_offset_;
-
-    // 问题2解决方案：matmul固定中间缓冲区
     std::vector<Tensor<T>> fixed_k_buffers_;  // 每层的K投影固定缓冲区
     std::vector<Tensor<T>> fixed_v_buffers_;  // 每层的V投影固定缓冲区
 
