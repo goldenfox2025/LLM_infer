@@ -1373,16 +1373,16 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
 
             // 初版路径
 
-            Tensor<T> merged_qkv_result({seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_}, Device::CUDA,
-                                        false, "merged_qkv_result_" + std::to_string(i));
-            cuda_OP::matmul(hidden_states, merged_qkv_weight, &merged_qkv_result, stream, merged_qkv_bias);
-            Tensor<T> q_slice = merged_qkv_result.slice({0, 0}, {seq_len, n_heads_ * head_dim_});
-            Tensor<T> k_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_},
-                                                        {seq_len, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_});
-            Tensor<T> v_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_},
-                                                        {seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_});
+            // Tensor<T> merged_qkv_result({seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_}, Device::CUDA,
+            //                             false, "merged_qkv_result_" + std::to_string(i));
+            // cuda_OP::matmul(hidden_states, merged_qkv_weight, &merged_qkv_result, stream, merged_qkv_bias);
+            // Tensor<T> q_slice = merged_qkv_result.slice({0, 0}, {seq_len, n_heads_ * head_dim_});
+            // Tensor<T> k_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_},
+            //                                             {seq_len, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_});
+            // Tensor<T> v_slice = merged_qkv_result.slice({0, n_heads_ * head_dim_ + n_kv_heads_ * head_dim_},
+            //                                             {seq_len, n_heads_ * head_dim_ + 2 * n_kv_heads_ * head_dim_});
 
-            Tensor<T> &k = kv_cache->k_cache(i, kv_cache->size());
+            // Tensor<T> &k = kv_cache->k_cache(i, kv_cache->size());
             // debugPrintTensor(k, "k");
             // debugPrintTensor(k_buf, "k_buf");
             // debugPrintTensor(k_slice, "k_slice");
@@ -1872,7 +1872,7 @@ void QwenModel<T>::prepare_next_graph_execution_async(size_t next_rope_offset, s
 
     // 1. 异步更新RoPE offset
     if (d_rope_offset_) {
-        cudaMemcpyAsync(d_rope_offset_, &next_rope_offset, sizeof(size_t), cudaMemcpyHostToDevice, prep_stream_);
+        cudaMemcpyAsync(d_rope_offset_, &next_rope_offset, sizeof(size_t), cudaMemcpyHostToDevice, graph_stream_);
     }
 
     // 2. 异步更新flash attention分段信息
@@ -1884,7 +1884,7 @@ void QwenModel<T>::prepare_next_graph_execution_async(size_t next_rope_offset, s
         };
 
         cudaMemcpyAsync(d_segment_info_, h_segment_info.data(), h_segment_info.size() * sizeof(int),
-                        cudaMemcpyHostToDevice, prep_stream_);
+                        cudaMemcpyHostToDevice, graph_stream_);
     }
 
     for (int i = 0; i < n_layers_; i++) {

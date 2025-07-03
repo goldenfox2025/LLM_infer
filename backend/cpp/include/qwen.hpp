@@ -77,12 +77,12 @@ class QwenModel : public BaseModel {
                 throw std::runtime_error("Failed to launch CUDA graph: " + std::string(cudaGetErrorString(result)));
             }
 
-            cudaEventCreate(&fa_done_events_[0]);
-            cudaEventRecord(fa_done_events_[0], graph_stream_);
-            cudaStreamWaitEvent(0, fa_done_events_[0], 0);
+            // cudaEventCreate(&fa_done_events_[0]);
+            // cudaEventRecord(fa_done_events_[0], graph_stream_);
+            // cudaStreamWaitEvent(0, fa_done_events_[0], 0);
 
             size_t next_rope_offset = typed_cache->size();
-            update_graph_kv_addresses_async_for_next(typed_cache, next_rope_offset);
+            // update_graph_kv_addresses_async_for_next(typed_cache, next_rope_offset);
             size_t next_total_seq_len = typed_cache->size() + 1;  // 下一次的序列长度
             prepare_next_graph_execution_async(next_rope_offset, next_total_seq_len, 0, typed_cache);
 

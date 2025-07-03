@@ -301,6 +301,8 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool, uint3
 // }
 
 namespace py = pybind11;
+#include <numeric> // 用于 std::accumulate
+#include <vector>  // 用于 std::vector
 
 template <typename T>
 void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& input_ids, size_t max_length,
@@ -460,6 +462,10 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             size_t current_total_length = input_size + 1;
             uint32_t* last_token_gpu_ptr = next_token_gpu_ptr;  // 下一轮的输入是 GPU 指针
 
+            // ==================== 新增代码段：初始化解码计时器 ====================
+            std::vector<float> decode_times;
+            // ===============================================================
+
             while (current_total_length < max_length) {
                 // 创建GPU计时器用于整个token生成和处理过程
                 GpuTimer full_token_timer;
@@ -470,21 +476,18 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
                     this->generate_next_token(this->thread_pool_, last_token_gpu_ptr, temperature, top_p, top_k);
 
                 // --- 异步拷贝结果回 CPU ---
-                GpuTimer copy_timer;
-                copy_timer.start();
                 checkCudaErrors(
                     cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-                copy_timer.stop();
+                
+                // 等待GPU计算和数据传输完成，以确保计时准确
+                checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
 
                 // 停止整体计时
                 full_token_timer.stop();
-
-                // 可选：输出计时信息
-                // std::cout << "Token #" << current_total_length << " 总耗时: "
-                //           << std::fixed << std::setprecision(2)
-                //           << full_token_timer.milliseconds() << " 毫秒 (拷贝: "
-                //           << copy_timer.milliseconds() << " 毫秒)" << std::endl;
+                
+                // ==================== 新增代码段：记录本次解码时间 ====================
+                decode_times.push_back(full_token_timer.milliseconds());
+                // =================================================================
 
                 // --- CPU 逻辑和 Push ---
                 last_token_gpu_ptr = next_token_gpu_ptr;  // 更新下一轮的输入指针
@@ -501,11 +504,30 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
 
             result_queue.push(Signal::EndOfStream);
 
+            // ==================== 新增代码段：计算并打印解码性能统计 ====================
+            if (!decode_times.empty()) {
+                float total_decode_time = std::accumulate(decode_times.begin(), decode_times.end(), 0.0f);
+                float average_decode_time = total_decode_time / decode_times.size();
+                
+                std::cout << "\n-------------------- 解码性能统计 --------------------" << std::endl;
+                std::cout << "解码Token数量: " << decode_times.size() << " 个" << std::endl;
+                std::cout << std::fixed << std::setprecision(2) 
+                          << "总解码时间: " << total_decode_time << " 毫秒" << std::endl;
+                std::cout << std::fixed << std::setprecision(2) 
+                          << "平均解码时间: " << average_decode_time << " 毫秒/Token" << std::endl;
+                std::cout << std::fixed << std::setprecision(2)
+                          << "平均解码速率: " << (1000.0f / average_decode_time) << " Token/秒" << std::endl;
+                std::cout << "--------------------------------------------------------" << std::endl << std::flush;
+            }
+            // ========================================================================
+
+
         } catch (...) {
             // 如果发生异常，把异常推入队列
             result_queue.push(std::current_exception());
         }
     });
+
     try {
         while (true) {
             GenerationResult result = result_queue.pop();
