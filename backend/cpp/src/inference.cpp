@@ -301,8 +301,8 @@ uint32_t* InferenceEngine<T>::generate_next_token(ThreadPool& thread_pool, uint3
 // }
 
 namespace py = pybind11;
-#include <numeric> // 用于 std::accumulate
-#include <vector>  // 用于 std::vector
+#include <numeric>  // 用于 std::accumulate
+#include <vector>   // 用于 std::vector
 
 template <typename T>
 void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& input_ids, size_t max_length,
@@ -313,7 +313,7 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
         std::cout << "执行CUDA预热..." << std::endl << std::flush;
 
         // 创建一个小的输入序列用于预热
-        std::vector<uint32_t> warmup_input(3, 1);
+        std::vector<uint32_t> warmup_input(64, 1);
 
         // 保存当前KV缓存状态
         size_t original_kv_size = kv_cache_.size();
@@ -478,13 +478,13 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
                 // --- 异步拷贝结果回 CPU ---
                 checkCudaErrors(
                     cudaMemcpyAsync(&next_token_host, next_token_gpu_ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-                
+
                 // 等待GPU计算和数据传输完成，以确保计时准确
                 checkCudaErrors(cudaStreamSynchronize(cudaStreamDefault));
 
                 // 停止整体计时
                 full_token_timer.stop();
-                
+
                 // ==================== 新增代码段：记录本次解码时间 ====================
                 decode_times.push_back(full_token_timer.milliseconds());
                 // =================================================================
@@ -508,19 +508,18 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             if (!decode_times.empty()) {
                 float total_decode_time = std::accumulate(decode_times.begin(), decode_times.end(), 0.0f);
                 float average_decode_time = total_decode_time / decode_times.size();
-                
+
                 std::cout << "\n-------------------- 解码性能统计 --------------------" << std::endl;
                 std::cout << "解码Token数量: " << decode_times.size() << " 个" << std::endl;
-                std::cout << std::fixed << std::setprecision(2) 
-                          << "总解码时间: " << total_decode_time << " 毫秒" << std::endl;
-                std::cout << std::fixed << std::setprecision(2) 
-                          << "平均解码时间: " << average_decode_time << " 毫秒/Token" << std::endl;
-                std::cout << std::fixed << std::setprecision(2)
-                          << "平均解码速率: " << (1000.0f / average_decode_time) << " Token/秒" << std::endl;
+                std::cout << std::fixed << std::setprecision(2) << "总解码时间: " << total_decode_time << " 毫秒"
+                          << std::endl;
+                std::cout << std::fixed << std::setprecision(2) << "平均解码时间: " << average_decode_time
+                          << " 毫秒/Token" << std::endl;
+                std::cout << std::fixed << std::setprecision(2) << "平均解码速率: " << (1000.0f / average_decode_time)
+                          << " Token/秒" << std::endl;
                 std::cout << "--------------------------------------------------------" << std::endl << std::flush;
             }
             // ========================================================================
-
 
         } catch (...) {
             // 如果发生异常，把异常推入队列

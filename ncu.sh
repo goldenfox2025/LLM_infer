@@ -75,7 +75,7 @@ if [ -d "frontend" ]; then
     --set full
     --target-processes all
     --replay-mode kernel
-    --kernel-name 'matmul_awq_gemv_bf16_vectorized_kernel'
+    --kernel-name 'flash_attn_prefill_kernel_v0'
     python3 frontend/chat.py
     # ... chat.py 的参数 ...
     )

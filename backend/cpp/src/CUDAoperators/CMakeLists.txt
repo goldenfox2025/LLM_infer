@@ -65,7 +65,7 @@ target_compile_options(operators PRIVATE
     # -flto: 启用链接时优化 (Link Time Optimization)。
     # -mavx2, -mfma: 同样启用 AVX2/FMA。
     # -DNDEBUG: 定义 NDEBUG 宏，通常用于禁用 assert() 等调试代码。
-    $<$<CONFIG:Release>:-O3;-march=native;-funroll-loops;-mavx2;-mfma;-DNDEBUG>
+    $<$<CONFIG:Release>:-O3;-march=native;-funroll-loops;-mavx2;-mfma;-DNDEBUG;-lineinfo>
 
     # --- CUDA 编译器选项 (nvcc) ---
     # 使用 $<COMPILE_LANGUAGE:CUDA> 来确保这些选项只传递给 nvcc。

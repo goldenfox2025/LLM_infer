@@ -289,21 +289,20 @@ __global__ void flash_attn_prefill_kernel_v1(const T* __restrict__ q_global, con
     // 外循环：遍历当前线程块负责的Q段
     for (int q_block_offset = 0; q_block_offset < T_r; q_block_offset += B_r) {
         // 初始化输出累加器和统计量
-        for (int row_idx = tid; row_idx < B_r; row_idx += blockDim.x) {
+        for (int row_idx = 0; row_idx < B_r; ++row_idx) {
             m_stats[row_idx] = -FLT_MAX;
             l_stats[row_idx] = 0.0f;
-            for (int dim_idx = 0; dim_idx < DQKV; ++dim_idx) {
+            for (int dim_idx = tid; dim_idx < DQKV; dim_idx += blockDim.x) {
                 o_smem[row_idx][dim_idx] = static_cast<T>(0.0f);
             }
         }
-        __syncthreads();
 
         // 从全局内存加载Q块到共享内存
-        for (int q_smem_row = tid; q_smem_row < B_r; q_smem_row += blockDim.x) {
+        for (int q_smem_row = 0; q_smem_row < B_r; ++q_smem_row) {
             int q_token_idx = q_segment_start_idx + q_block_offset + q_smem_row;
             bool is_valid_q = (q_token_idx < current_prefill_q_length);
             const T* q_global_ptr = q_global + q_token_idx * q_stride + q_head_idx_global * DQKV;
-            for (int dim_idx = 0; dim_idx < DQKV; ++dim_idx) {
+            for (int dim_idx = tid; dim_idx < DQKV; dim_idx += blockDim.x) {
                 if (is_valid_q) {
                     q_smem[q_smem_row][dim_idx] = q_global_ptr[dim_idx];
                 } else {
@@ -311,17 +310,16 @@ __global__ void flash_attn_prefill_kernel_v1(const T* __restrict__ q_global, con
                 }
             }
         }
-        __syncthreads();
 
         // 内循环：遍历所有K/V块
         for (int kv_block_offset = 0; kv_block_offset < current_kv_cache_total_len; kv_block_offset += B_c) {
             // 加载K, V块到共享内存
-            for (int smem_row = tid; smem_row < B_c; smem_row += blockDim.x) {
+            for (int smem_row = 0; smem_row < B_c; ++smem_row) {
                 int k_token_idx = kv_block_offset + smem_row;
                 bool is_valid_kv = (k_token_idx < current_kv_cache_total_len);
                 const T* k_global_ptr = k_global + (k_token_idx * num_kv_heads_total + kv_head_idx_global) * DQKV;
                 const T* v_global_ptr = v_global + (k_token_idx * num_kv_heads_total + kv_head_idx_global) * DQKV;
-                for (int dim_idx = 0; dim_idx < DQKV; ++dim_idx) {
+                for (int dim_idx = tid; dim_idx < DQKV; dim_idx += blockDim.x) {
                     if (is_valid_kv) {
                         k_smem[smem_row][dim_idx] = k_global_ptr[dim_idx];
                         v_smem[smem_row][dim_idx] = v_global_ptr[dim_idx];
@@ -440,14 +438,14 @@ __global__ void flash_attn_prefill_kernel_v1(const T* __restrict__ q_global, con
         }
 
         // 写回最终结果到全局内存
-        for (int q_smem_row = tid; q_smem_row < B_r; q_smem_row += blockDim.x) {
+        for (int q_smem_row = 0; q_smem_row < B_r; ++q_smem_row) {
             int q_token_idx = q_segment_start_idx + q_block_offset + q_smem_row;
 
             if (q_token_idx < current_prefill_q_length) {
                 float l_final = l_stats[q_smem_row];
                 float inv_l_final = (l_final > 1e-6f) ? (1.0f / l_final) : 0.0f;
                 T* out_global_ptr = out_global + (q_token_idx * num_q_heads_total + q_head_idx_global) * DQKV;
-                for (int d_idx = 0; d_idx < DQKV; ++d_idx) {
+                for (int d_idx = tid; d_idx < DQKV; d_idx += blockDim.x) {
                     float final_output = static_cast<float>(o_smem[q_smem_row][d_idx]) * inv_l_final;
                     out_global_ptr[d_idx] = static_cast<T>(final_output);
                 }
@@ -481,7 +479,7 @@ void flash_attention_prefill(const Tensor<T>& Q, const Tensor<T>& K, const Tenso
     dim3 block(WARP_NUM * 32);
     int q_stride = Q.strides()[0];
 
-    flash_attn_prefill_kernel_v1<T, B_c, B_r, T_r, WARP_NUM, DQKV_val>
+    flash_attn_prefill_kernel_v0<T, B_c, B_r, T_r, WARP_NUM, DQKV_val>
         <<<grid, block, 0, stream>>>(Q.data_ptr(), K.data_ptr(), V.data_ptr(), output.data_ptr(), n_heads, n_kv_heads,
                                      n_groups, seq_len, total_seq_len, offset, q_stride);
 

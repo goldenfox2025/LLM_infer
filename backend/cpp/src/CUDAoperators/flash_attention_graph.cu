@@ -130,7 +130,6 @@ __global__ void flash_attention_kernel_graph_fixed(T *q,
         __syncthreads();
 
         // Warp 内归约 QK Score
-        // 关键修复：需要同时检查分支内有效性和绝对索引有效性
         int absolute_token_idx = start_idx + token_index;
         bool absolutely_valid = valid && (absolute_token_idx < total_seq_len);
 
@@ -249,7 +248,6 @@ __global__ void flash_attention_kernel_graph_fixed(T *q,
 }
 
 // CUDA图优化版本：使用固定内存地址和分段信息的flash attention
-// 仿照dynamic_flash_attention_wrapper的模式，直接接受连续的KV缓存
 template <typename T>
 void flash_attention_graph_fixed(Tensor<T> &Q, const Tensor<T> &total_K, const Tensor<T> &total_V, T **d_output_ptrs,
                                  int *d_segment_info, int n_kv_heads, cudaStream_t stream) {
