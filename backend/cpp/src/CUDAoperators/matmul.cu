@@ -21,6 +21,7 @@
 #include "cutlass/util/reference/host/tensor_compare.h"
 #include "cutlass/util/reference/host/tensor_fill.h"
 #include "cutlass/util/tensor_view_io.h"
+#include "cutlass_c_api.h"
 
 #define WARP_SIZE 32
 
@@ -732,15 +733,34 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
             // GEMM 调用参数：
             //    m = N, n = M, k = K
             // 同时对 A 和 B 使用转置操作：
-            cublas_matmul_wrapper<T>(handle, CUBLAS_OP_T, CUBLAS_OP_N, int(N), int(M), int(K), &alpha,
-                                     B.data_ptr(),  // 原始 B
-                                     ldb,           // ldb = K
-                                     A.data_ptr(),  // 原始 A
-                                     lda,           // lda = K
-                                     &beta,
-                                     C->data_ptr(),  // 输出 C
-                                     ldc);           // ldc = N
-                                                     // cudaStreamSynchronize(stream);
+            // cublas_matmul_wrapper<T>(handle, CUBLAS_OP_T, CUBLAS_OP_N, int(N), int(M), int(K), &alpha,
+            //                          B.data_ptr(),  // 原始 B
+            //                          ldb,           // ldb = K
+            //                          A.data_ptr(),  // 原始 A
+            //                          lda,           // lda = K
+            //                          &beta,
+            //                          C->data_ptr(),  // 输出 C
+            //                          ldc);           // ldc = N
+            // cudaStreamSynchronize(stream);
+
+            const int m = A.sizes()[0];  // !!! 请使用您 Tensor 的实际接口
+            const int k = A.sizes()[1];
+            const int n = B.sizes()[1];
+
+            const void *ptr_a = A.data_ptr();  // !!! 请使用您 Tensor 的实际接口
+            const void *ptr_b = B.data_ptr();
+            void *ptr_d = C->data_ptr();
+            const void *ptr_bias = (bias ? bias->data_ptr() : nullptr);
+
+            my_cutlass_dtype_t dtype;
+            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                dtype = my_cutlass_dtype_t::MY_CUTLASS_DTYPE_BF16;
+            } else {
+                throw std::runtime_error("Unsupported template type T for cuda_OP::matmul -> cutlass bridge.");
+            }
+
+            // 2. 直接调用简单、干净的 C 接口
+            cutlass_gemm_c_api(m, n, k, dtype, ptr_a, ptr_b, ptr_bias, ptr_d, stream);
         }
         // std::cout << "cublas_matmul_wrapper<T> 调用成功" << std::endl;
         if (bias != nullptr) {
