@@ -48,8 +48,6 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
     return val;
 }
 
-// === 高效的 GEMV kernel (M=1, 支持bias) ===
-// 计算 C = A * B^T + bias，其中 A: [1, K], B: [N, K], C: [1, N]
 template <typename T>
 __global__ void gemv_with_bias_kernel(const T *A, const T *B, const T *bias, T *C, int M, int K, int N) {
     // A: [1, K] (行主序), B: [N, K] (列主序存储！), C: [1, N]
@@ -87,8 +85,6 @@ __global__ void gemv_with_bias_kernel(const T *A, const T *B, const T *bias, T *
     }
 }
 
-// === 高效的 GEMV kernel (M=1, 无bias) ===
-// 计算 C = A * B^T，其中 A: [1, K], B: [N, K], C: [1, N]
 template <typename T>
 __global__ void gemv_kernel(const T *A, const T *B, T *C, int M, int K, int N) {
     // A: [1, K] (行主序), B: [N, K] (列主序存储！), C: [1, N]
@@ -169,7 +165,6 @@ __global__ void gemv_with_bias_vectorized_kernel(const T *A, const T *B, const T
 // 计算 C = A * B^T，其中 A: [1, K], B: [N, K], C: [1, N]
 template <typename T>
 __global__ void gemv_vectorized_kernel(const T *A, const T *B, T *C, int M, int K, int N) {
-    // 每个线程处理4个K元素来提高内存带宽利用率
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     int bx = blockIdx.x;
@@ -178,19 +173,17 @@ __global__ void gemv_vectorized_kernel(const T *A, const T *B, T *C, int M, int 
 
     if (n < N) {
         float sum = 0.f;
-
+        constexpr int VEC_UNIT = sizeof(float4) / sizeof(T);
         // 每个warp处理 4*WARP_SIZE 个K元素
-        int NUM_WARPS = (((K + WARP_SIZE - 1) / WARP_SIZE) + 4 - 1) / 4;
-
+        int NUM_WARPS = (((K + WARP_SIZE - 1) / WARP_SIZE) + VEC_UNIT - 1) / VEC_UNIT;
 #pragma unroll
         for (int w = 0; w < NUM_WARPS; ++w) {
-            int k_base = (w * WARP_SIZE + lane) * 4;
+            int k_base = (w * WARP_SIZE + lane) * VEC_UNIT;
             // 实际就是4
-            constexpr int VEC_UNIT = sizeof(float2) / sizeof(T);
-            Vec_2<T, VEC_UNIT> va, vb;
+            Vec<T, VEC_UNIT> va, vb;
 
-            va.f2 = *reinterpret_cast<const float2 *>(&A[k_base]);
-            vb.f2 = *reinterpret_cast<const float2 *>(&B[n * K + k_base]);
+            va.f4 = *reinterpret_cast<const float4 *>(&A[k_base]);
+            vb.f4 = *reinterpret_cast<const float4 *>(&B[n * K + k_base]);
             // 向量化加载和计算
             for (int i = 0; i < VEC_UNIT; ++i) {
                 sum += static_cast<float>(va.t[i]) * static_cast<float>(vb.t[i]);

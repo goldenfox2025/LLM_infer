@@ -152,27 +152,3 @@ extern "C" const char* cutlass_status_to_string(my_cutlass_status_t st) {
             return "Internal Error";
     }
 }
-
-/*****************************************************************************************************
- * 为什么现在可以编译通过：
- *
- * 1. **参数格式正确**：使用了CUTLASS期望的16参数构造函数格式，而不是之前错误的12参数格式
- *
- * 2. **完全隔离**：此文件只包含CUTLASS头文件，不包含用户的Tensor.h，因此没有命名冲突
- *
- * 3. **C接口防火墙**：通过extern "C"接口，将CUTLASS的C++类型完全隔离在此文件内
- *
- * 4. **验证过的配置**：通过独立测试文件验证了GemmUniversal的正确用法
- *
- * 参数完整性检查：
- * ================
- * ✅ GemmUniversalMode - 指定了kGemm模式
- * ✅ Problem size - M, N, K维度
- * ✅ Batch count - 单批次设为1
- * ✅ Epilogue params - alpha, beta参数
- * ✅ Matrix pointers - A, B, C, D指针
- * ✅ Batch strides - 虽然单批次用不到，但必须提供
- * ✅ Leading dimensions - 每个矩阵的内存布局步长
- *
- * 没有遗漏的参数，这是CUTLASS GemmUniversal的完整16参数格式。
- *****************************************************************************************************/
