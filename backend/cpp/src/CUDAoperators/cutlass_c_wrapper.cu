@@ -44,8 +44,8 @@ using GemmKernel = cutlass::gemm::device::GemmUniversal<
     ElementAccumulator,                                            // 累加器类型
     cutlass::arch::OpClassTensorOp,                                // 使用Tensor Core操作
     cutlass::arch::Sm80,                                           // 目标架构：Ampere SM80
-    cutlass::gemm::GemmShape<64, 64, 32>,                          // Threadblock tile形状：M=128, N=128, K=32
-    cutlass::gemm::GemmShape<32, 32, 16>,                          // Warp tile形状：M=64, N=64, K=32
+    cutlass::gemm::GemmShape<128, 128, 32>,                        // Threadblock tile形状：M=128, N=128, K=32
+    cutlass::gemm::GemmShape<64, 64, 32>,                          // Warp tile形状：M=64, N=64, K=32
     cutlass::gemm::GemmShape<16, 8, 16>,                           // Instruction形状：M=16, N=8, K=16 (Tensor Core)
     EpilogueOp,                                                    // Epilogue操作
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,  // 线程块调度策略
@@ -71,10 +71,10 @@ static cutlass::Status run_bf16_gemm(int m, int n, int k, void const* d_A, void 
      ***********************************************************/
     typename GemmKernel::Arguments arguments{
         // === 必需参数（前4个）===
-        cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel,  // 1. 运行模式
-        problem_size,                                           // 2. 问题规模：M x N x K
-        1,                                                      // 3. 批次数量：1（单批次）
-        {alpha, beta},                                          // 4. Epilogue参数：{α, β}
+        cutlass::gemm::GemmUniversalMode::kGemm,  // 1. 运行模式
+        problem_size,                             // 2. 问题规模：M x N x K
+        1,                                        // 3. 批次数量：1（单批次）
+        {alpha, beta},                            // 4. Epilogue参数：{α, β}
 
         // === 数据指针（4个）===
         static_cast<ElementA const*>(d_A),  // 5. 矩阵A指针
