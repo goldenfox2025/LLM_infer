@@ -135,7 +135,7 @@ __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size
     if (dst_off != nullptr)
         t_off = *dst_off;
     // 确认当前线程的位置
-    size_t b_idx = blockIdx.x;
+    // size_t b_idx = blockIdx.x;
     size_t head_idx = blockIdx.y;
     size_t seq_idx_in_batch = blockIdx.z;
 
