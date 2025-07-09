@@ -12,6 +12,7 @@
 
 namespace cuda_OP {
 
+
 // --------------------------------------------------
 // 工具函数：检查 CUDA 错误
 // --------------------------------------------------
@@ -879,58 +880,135 @@ void compute_attention_scores_prefill(const Tensor<T> &Q, const Tensor<T> &K, Te
     cuda_OP::launch_gqa_gemm(Q, K, att_scores, stream);
 }
 
-// --------------------------------------------------
-// 注意力计算：prefill 版本 — 计算注意力输出（模板化）
-// --------------------------------------------------
-template <typename T>
-__global__ void att_output_prefill_kernel(const T *att_probs, const T *V, T *att_output, int n_q, int cache_length,
-                                          int dqkv, int n_kv_h, int n_q_h) {
-    int q = blockIdx.x;   // 查询索引
-    int d = threadIdx.x;  // 维度索引
-    if (q < n_q && d < dqkv) {
-        int s = q / n_q_h;   // 序列索引 (批次索引)
-        int qh = q % n_q_h;  // 查询头索引
-        int n_groups = n_q_h / n_kv_h;
-        int kv_head = qh / n_groups;
+
+
+/**
+ * @brief 修正后的高效注意力输出计算内核。
+ *
+ * 此内核严格遵循原始计算逻辑，采用分块方法优化内存访问。
+ * 网格划分: 1个线程块 -> 1个查询头(q)的输出向量。
+ * 线程协同: 块内线程协同计算完整的dqkv维输出向量。
+ * 共享内存: 对内层循环(cache_length)和外层循环(dqkv)进行分块，
+ * 将V和att_probs的切片加载到共享内存中以实现数据重用。
+ *
+ * @tparam T 数据类型 (e.g., float, half)。
+ * @tparam BLOCK_THREADS 每个块的线程数，推荐为128或256。
+ * @tparam TILE_J_DIM J维度（cache_length）的分块大小，推荐为8或16。
+ */
+template <typename T, int BLOCK_THREADS, int TILE_J_DIM>
+__global__ void att_output_prefill_revised_kernel(const T *__restrict__ att_probs, const T *__restrict__ V, T *att_output,
+                                                  int n_q, int cache_length, int dqkv, int n_kv_h, int n_q_h) {
+    // 共享内存，用于缓存V和att_probs的切片
+    __shared__ T v_tile[TILE_J_DIM][BLOCK_THREADS];
+    __shared__ T prob_tile[TILE_J_DIM];
+
+    // --- 1. 索引和常量计算 ---
+    // 每个线程块处理一个查询头
+    const int q = blockIdx.x;
+    const int tx = threadIdx.x;
+
+    // 计算此查询块共享的索引
+    const int s = q / n_q_h;
+    const int qh = q % n_q_h;
+    const int n_groups = n_q_h / n_kv_h;
+    const int kv_head = qh / n_groups;
+
+    // --- 2. 主计算循环 ---
+    // 块内线程协同处理dqkv维度，每次处理一个大小为BLOCK_THREADS的块
+    for (int d_base = 0; d_base < dqkv; d_base += BLOCK_THREADS) {
+        const int d = d_base + tx;
         float sum = 0.0f;
-        for (int j = 0; j < cache_length; j++) {
-            int att_idx = s * (n_q_h * cache_length) + qh * cache_length + j;
-            float prob = static_cast<float>(att_probs[att_idx]);
-            float val = static_cast<float>(V[(j * n_kv_h + kv_head) * dqkv + d]);
-            sum += prob * val;
+
+        // J维度(cache_length)的分块循环
+        for (int j_base = 0; j_base < cache_length; j_base += TILE_J_DIM) {
+            
+            // --- 2a. 从全局内存协同加载数据到共享内存 ---
+            // 使用块内线程加载V的二维切片 v_tile[TILE_J_DIM][BLOCK_THREADS]
+            #pragma unroll
+            for (int j_offset = 0; j_offset < TILE_J_DIM; ++j_offset) {
+                const int j = j_base + j_offset;
+                if (j < cache_length && d < dqkv) {
+                    const int v_idx = (j * n_kv_h + kv_head) * dqkv + d;
+                    v_tile[j_offset][tx] = V[v_idx];
+                } else {
+                    v_tile[j_offset][tx] = static_cast<T>(0.0f);
+                }
+            }
+
+            // 使用每个warp的第一个线程加载att_probs切片 (避免冗余读取)
+            if (tx < TILE_J_DIM) {
+                const int j = j_base + tx;
+                if (j < cache_length) {
+                    const int att_idx = s * (n_q_h * cache_length) + qh * cache_length + j;
+                    prob_tile[tx] = att_probs[att_idx];
+                } else {
+                    prob_tile[tx] = static_cast<T>(0.0f);
+                }
+            }
+            __syncthreads(); // 确保所有数据加载完毕
+
+            // --- 2b. 在共享内存中进行计算 ---
+            #pragma unroll
+            for (int j_offset = 0; j_offset < TILE_J_DIM; ++j_offset) {
+                float prob = static_cast<float>(prob_tile[j_offset]);
+                float val = static_cast<float>(v_tile[j_offset][tx]);
+                sum += prob * val;
+            }
+            __syncthreads(); // 确保计算完成，准备加载下一块
         }
-        int out_idx = (s * n_q_h + qh) * dqkv + d;
-        att_output[out_idx] = static_cast<T>(sum);
+
+        // --- 2c. 将结果写回全局内存 ---
+        if (d < dqkv) {
+            const int out_idx = q * dqkv + d;
+            att_output[out_idx] = static_cast<T>(sum);
+        }
     }
 }
 
+
+/**
+ * @brief 主机端启动函数 (接口保持不变)
+ *
+ * 调用修正后的、高效的 `att_output_prefill_revised_kernel` 内核。
+ */
 template <typename T>
 void compute_att_output_prefill(const Tensor<T> &att_probs, const Tensor<T> &V, Tensor<T> &att_output, size_t n_q_h,
                                 size_t dqkv, size_t total_seq_len, size_t n_kv_h, cudaStream_t stream) {
-    // att_probs: [batch_size, n_q_h, cache_length]
-    // V: [cache_length, n_kv_h, dqkv]
-    // att_output: [batch_size, n_q_h, dqkv]
+    // Tensor维度检查
     size_t batch_size = att_probs.sizes()[0];
-    size_t n_q_h_int = n_q_h;
     size_t cache_length = att_probs.sizes()[2];
 
-    if (att_probs.sizes()[1] != n_q_h_int) {
+    if (att_probs.sizes()[1] != n_q_h) {
         throw std::runtime_error("attention probabilities head dimension mismatch");
     }
     if (V.sizes()[0] != cache_length || V.sizes()[1] != n_kv_h || V.sizes()[2] != dqkv) {
         throw std::runtime_error("V tensor dimension mismatch");
     }
-    if (att_output.sizes()[0] != batch_size || att_output.sizes()[1] != n_q_h_int || att_output.sizes()[2] != dqkv) {
+    if (att_output.sizes()[0] != batch_size || att_output.sizes()[1] != n_q_h || att_output.sizes()[2] != dqkv) {
         throw std::runtime_error("attention output tensor shape mismatch");
     }
-    size_t total_q = batch_size * n_q_h_int;
-    int threads = std::min(static_cast<int>(dqkv), 1024);
-    int blocks = static_cast<int>(total_q);
-    att_output_prefill_kernel<<<blocks, threads, 0, stream>>>(
-        att_probs.data_ptr(), V.data_ptr(), att_output.data_ptr(), static_cast<int>(total_q),
-        static_cast<int>(cache_length), static_cast<int>(dqkv), static_cast<int>(n_kv_h), static_cast<int>(n_q_h_int));
+    
+    // 总查询数 (等效于输出矩阵的行数或批次数)
+    const size_t total_q = batch_size * n_q_h;
+
+    // 定义内核启动参数
+    // 每个块的线程数
+    const int BLOCK_THREADS = 256; 
+    // J维度(cache_length)的平铺大小。这会影响共享内存使用量和循环展开效果。
+    const int TILE_J_DIM = 8; 
+
+    // 网格维度：每个查询头启动一个线程块
+    const dim3 grid_dim(static_cast<unsigned int>(total_q));
+    // 块维度：固定的线程数
+    const dim3 block_dim(BLOCK_THREADS);
+
+    // 启动修正后的优化内核
+    att_output_prefill_revised_kernel<T, BLOCK_THREADS, TILE_J_DIM><<<grid_dim, block_dim, 0, stream>>>(
+        att_probs.data_ptr(), V.data_ptr(), att_output.data_ptr(),
+        static_cast<int>(total_q), static_cast<int>(cache_length),
+        static_cast<int>(dqkv), static_cast<int>(n_kv_h), static_cast<int>(n_q_h));
+    
     checkCudaError(cudaGetLastError());
-    // checkCudaError(cudaDeviceSynchronize());
 }
 
 __global__ void init_curand_state_kernel(curandState *states, unsigned long long seed, unsigned long long offset) {

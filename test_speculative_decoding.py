@@ -200,32 +200,54 @@ def main():
     print("设置设备为: cuda")
     set_default_device("cuda")
 
+    # 检查初始GPU内存状态
+    try:
+        import subprocess
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'], 
+                              capture_output=True, text=True)
+        if result.returncode == 0:
+            memory_info = result.stdout.strip().split(', ')
+            total_mem, used_mem, free_mem = map(int, memory_info)
+            print(f"【GPU内存】总计: {total_mem} MB, 已用: {used_mem} MB, 空闲: {free_mem} MB")
+            if free_mem < 3000:  # 如果空闲内存少于3GB
+                print("警告: GPU空闲内存可能不足，建议释放其他CUDA程序")
+    except:
+        print("无法获取GPU内存信息")
+
     # 加载tokenizer
+    print("【调试】开始加载tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(target_model_path)
+    print("【调试】tokenizer加载完成")
 
     # 加载目标模型
-    print(f"加载目标模型: {target_model_path}")
+    print(f"【调试】开始加载目标模型: {target_model_path}")
     target_config, target_weights = load_qwen3_model(target_model_path)
+    print("【调试】目标模型权重加载完成，开始初始化...")
 
     # 初始化目标模型
     model_type = "qwen3_awq"  # 假设使用AWQ量化模型
+    print(f"【调试】开始初始化目标模型，类型: {model_type}")
     if not init_model(target_config, target_weights, model_type):
         print("目标模型初始化失败")
         return
+    print("【调试】目标模型初始化成功")
 
     # 加载草稿模型
-    print(f"加载草稿模型: {draft_model_path}")
+    print(f"【调试】开始加载草稿模型: {draft_model_path}")
     draft_config, draft_weights = load_qwen3_model(draft_model_path)
+    print("【调试】草稿模型权重加载完成，开始初始化投机解码器...")
     model_type = "qwen3_awq"  
     # 初始化投机解码器
     spec_length = 8
+    print(f"【调试】开始初始化投机解码器，投机长度: {spec_length}")
     if not init_speculative_decoder(draft_config, draft_weights, model_type, spec_length):
         print("投机解码器初始化失败")
         return
+    print("【调试】投机解码器初始化成功")
 
     # 设置系统提示和用户输入 - 使用简短的提示便于观察
     system_prompt = "你是一个有用的AI助手。"
-    user_input = "1+1等于几？"  # 使用简单的问题，便于观察和分析
+    user_input = "给我讲述一个有趣的黑暗之魂故事。"  # 使用简单的问题，便于观察和分析
 
     # 使用chat.py中的方式构建对话模板
     messages = [
@@ -260,10 +282,10 @@ def main():
             generate_text_stream(
                 input_ids,
                 callback,
-                max_length=50,  # 减少生成长度，便于观察和分析
-                temperature=1,  
+                max_length=60,  # 减少生成长度，便于观察和分析
+                temperature=0.8,  
                 top_p=0.9,
-                top_k=1
+                top_k=50
             )
         except Exception as e:
             print(f"标准解码出错: {e}")
@@ -318,10 +340,10 @@ def main():
             generate_text_stream_speculative(
                 input_ids,
                 callback,
-                max_length=50,  # 减少生成长度，便于观察和分析
-                temperature=1,
+                max_length=60,  # 减少生成长度，便于观察和分析
+                temperature=0.8,
                 top_p=0.9,
-                top_k=1
+                top_k=50
             )
         except Exception as e:
             print(f"投机解码出错: {e}")

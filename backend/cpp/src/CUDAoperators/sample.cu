@@ -343,18 +343,254 @@ uint32_t* sample(Tensor<T>&& logits, float temperature,
     return d_sampled_index;
 }
 
-// 采样函数的变体，将结果写入指定的GPU内存位置
+// 高效的top-k采样函数 - 避免全量排序
 template <typename T>
-void sample_to_fixed(Tensor<T>&& input, uint32_t* output_ptr, float temperature, float top_p, size_t top_k,
-                     curandState* d_states, cudaStream_t stream) {
-    // 使用原始sample函数获取采样结果
-    uint32_t* sampled_ptr = sample(std::move(input), temperature, top_p, top_k, d_states, stream);
-    // 将结果复制到指定的输出位置
-    cudaMemcpyAsync(output_ptr, sampled_ptr, sizeof(uint32_t), cudaMemcpyDeviceToDevice, stream);
-    // 释放原始sample函数分配的内存
-    cudaFree(sampled_ptr);
+__global__ void fast_topk_sample_kernel(
+    const T* __restrict__ logits,
+    uint32_t* output,
+    float* prob_output,
+    size_t vocab_size,
+    float temperature,
+    size_t top_k,
+    curandState* states
+) {
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    
+    // 共享内存用于存储top-k候选
+    extern __shared__ float shared_mem[];
+    float* s_values = shared_mem;
+    int* s_indices = (int*)(s_values + top_k);
+    
+    // 初始化共享内存
+    if (tid < top_k) {
+        s_values[tid] = -FLT_MAX;
+        s_indices[tid] = 0;
+    }
+    __syncthreads();
+    
+    // 找到最大值用于数值稳定性
+    float max_logit = -FLT_MAX;
+    for (int i = tid; i < vocab_size; i += block_size) {
+        float logit_val;
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+            logit_val = __bfloat162float(logits[i]);
+        } else {
+            logit_val = static_cast<float>(logits[i]);
+        }
+        logit_val /= temperature;
+        max_logit = fmaxf(max_logit, logit_val);
+    }
+    
+    // 块内归约找全局最大值
+    for (int stride = block_size / 2; stride > 0; stride /= 2) {
+        max_logit = fmaxf(max_logit, __shfl_down_sync(0xFFFFFFFF, max_logit, stride));
+    }
+    
+    __shared__ float s_max_logit;
+    if (tid == 0) {
+        s_max_logit = max_logit;
+    }
+    __syncthreads();
+    
+    // 使用简化的top-k选择算法
+    for (int i = tid; i < vocab_size; i += block_size) {
+        float logit_val;
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+            logit_val = __bfloat162float(logits[i]);
+        } else {
+            logit_val = static_cast<float>(logits[i]);
+        }
+        logit_val = logit_val / temperature - s_max_logit;
+        
+        // 检查是否应该插入到top-k中
+        for (int k = 0; k < top_k; k++) {
+            if (logit_val > s_values[k]) {
+                // 找到插入位置，移动现有元素
+                for (int j = top_k - 1; j > k; j--) {
+                    s_values[j] = s_values[j - 1];
+                    s_indices[j] = s_indices[j - 1];
+                }
+                s_values[k] = logit_val;
+                s_indices[k] = i;
+                break;
+            }
+        }
+    }
+    __syncthreads();
+    
+    // 线程0进行采样
+    if (tid == 0) {
+        // 计算exp值和累积概率
+        float exp_sum = 0.0f;
+        for (int i = 0; i < top_k; i++) {
+            s_values[i] = expf(s_values[i]);
+            exp_sum += s_values[i];
+        }
+        
+        // 归一化
+        for (int i = 0; i < top_k; i++) {
+            s_values[i] /= exp_sum;
+        }
+        
+        // 生成随机数并采样
+        curandState local_state = states[0];
+        float r = curand_uniform(&local_state);
+        
+        float cumulative = 0.0f;
+        int selected_idx = 0;
+        for (int i = 0; i < top_k; i++) {
+            cumulative += s_values[i];
+            if (cumulative >= r) {
+                selected_idx = i;
+                break;
+            }
+        }
+        
+        *output = s_indices[selected_idx];
+        if (prob_output) {
+            *prob_output = s_values[selected_idx];
+        }
+        
+        states[0] = local_state;
+    }
 }
-// 批量采样函数的变体，将结果写入指定的GPU内存位置数组
+
+// 高效采样函数的包装
+template <typename T>
+void fast_sample_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float* prob_ptr, 
+                         float temperature, float top_p, size_t top_k,
+                         curandState* d_states, cudaStream_t stream) {
+    if (logits.device() != Device::CUDA) {
+        throw std::runtime_error("输入张量必须在 CUDA 设备上");
+    }
+    
+    const auto& shape = logits.sizes();
+    if (shape.size() != 2 || shape[0] != 1) {
+        throw std::runtime_error("输入张量必须是 [1, vocab_size] 形状");
+    }
+    
+    const size_t vocab_size = shape[1];
+    top_k = std::min(top_k, vocab_size);
+    
+    // 限制top_k大小以适应共享内存
+    if (top_k > 512) {
+        top_k = 512;
+    }
+    
+    const T* logits_ptr = logits.data_ptr();
+    
+    // 计算共享内存大小
+    size_t shared_mem_size = top_k * (sizeof(float) + sizeof(int));
+    
+    // 启动高效采样核函数
+    fast_topk_sample_kernel<T><<<1, 256, shared_mem_size, stream>>>(
+        logits_ptr, output_ptr, prob_ptr, vocab_size, temperature, top_k, d_states
+    );
+    
+    CUDA_CHECK(cudaGetLastError());
+}
+// 并行批量采样核函数 - 避免for循环瓶颈
+template <typename T>
+__global__ void sample_batch_parallel_kernel(
+    const T* __restrict__ logits_data,    // 输入: 批量logits数据 [seq_len, vocab_size]
+    uint32_t* output_ptr,                 // 输出: 采样结果数组 [seq_len]
+    size_t seq_len,                       // 序列长度
+    size_t vocab_size,                    // 词汇表大小
+    float temperature,                    // 温度参数
+    size_t top_k,                        // Top-K采样参数
+    curandState* d_states                 // 随机数状态
+) {
+    // 每个线程块处理一个序列位置
+    int seq_idx = blockIdx.x;
+    if (seq_idx >= seq_len) return;
+    
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    
+    // 共享内存用于存储处理结果
+    extern __shared__ float shared_mem[];
+    float* s_scaled_logits = shared_mem;                        // 缩放后的logits
+    float* s_exp_vals = s_scaled_logits + vocab_size;          // exp值
+    int* s_indices = (int*)(s_exp_vals + top_k);               // 索引数组
+    
+    // 获取当前序列位置的logits指针
+    const T* seq_logits = logits_data + seq_idx * vocab_size;
+    
+    // 第一步：缩放logits并找到最大值
+    float max_val = -FLT_MAX;
+    
+    // 并行处理所有词汇，找到最大值
+    for (int i = tid; i < vocab_size; i += block_size) {
+        float logit_f;
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+            logit_f = __bfloat162float(seq_logits[i]);
+        } else {
+            logit_f = static_cast<float>(seq_logits[i]);
+        }
+        s_scaled_logits[i] = logit_f / temperature;
+        max_val = fmaxf(max_val, s_scaled_logits[i]);
+    }
+    
+    // 块内归约找到全局最大值
+    __shared__ float s_max_val;
+    __syncthreads();
+    
+    // 简单的归约操作
+    for (int stride = block_size / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            max_val = fmaxf(max_val, __shfl_down_sync(0xFFFFFFFF, max_val, stride));
+        }
+    }
+    if (tid == 0) {
+        s_max_val = max_val;
+    }
+    __syncthreads();
+    
+    // 第二步：计算exp值并构建top-k
+    float exp_sum = 0.0f;
+    
+    // 并行计算exp值
+    for (int i = tid; i < vocab_size; i += block_size) {
+        float exp_val = expf(s_scaled_logits[i] - s_max_val);
+        s_scaled_logits[i] = exp_val;  // 复用shared memory存储exp值
+        exp_sum += exp_val;
+    }
+    
+    // 归约求和
+    for (int stride = block_size / 2; stride > 0; stride /= 2) {
+        exp_sum += __shfl_down_sync(0xFFFFFFFF, exp_sum, stride);
+    }
+    
+    __shared__ float s_exp_sum;
+    if (tid == 0) {
+        s_exp_sum = exp_sum;
+    }
+    __syncthreads();
+    
+    // 第三步：简化的top-k采样（使用简单的线性搜索代替完整排序）
+    if (tid == 0) {
+        curandState local_state = d_states[seq_idx % 1];  // 简化：复用状态
+        
+        float r = curand_uniform(&local_state) * s_exp_sum;
+        float cumulative = 0.0f;
+        uint32_t selected_idx = 0;
+        
+        // 线性扫描找到采样位置
+        for (int i = 0; i < vocab_size; ++i) {
+            cumulative += s_scaled_logits[i];
+            if (cumulative >= r) {
+                selected_idx = i;
+                break;
+            }
+        }
+        
+        output_ptr[seq_idx] = selected_idx;
+        d_states[seq_idx % 1] = local_state;
+    }
+}
+
+// 批量采样函数的变体，将结果写入指定的GPU内存位置数组 - 优化版本
 template <typename T>
 void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float temperature, float top_p, size_t top_k,
                            curandState* d_states, cudaStream_t stream) {
@@ -373,7 +609,38 @@ void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float tempe
 
     const size_t seq_len = shape[0];
     const size_t vocab_size = shape[1];
-    // 为每个序列位置创建一个视图并调用sample_to_fixed函数
+    
+    // 优化：如果只有单个序列，使用原始优化的单序列采样
+    if (seq_len == 1) {
+        sample_to_fixed(std::move(logits), output_ptr, temperature, top_p, top_k, d_states, stream);
+        return;
+    }
+    
+    // 优化：使用并行核函数避免for循环
+    if (seq_len > 1) {
+        // 计算所需的共享内存大小
+        size_t min_shared_mem = vocab_size * sizeof(float) * 2 + top_k * sizeof(int);
+        
+        // 检查共享内存限制
+        int device;
+        cudaGetDevice(&device);
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device);
+        
+        if (min_shared_mem <= prop.sharedMemPerBlock) {
+            // 使用并行核函数
+            int block_size = min(256, static_cast<int>(vocab_size));
+            int grid_size = seq_len;
+            
+            sample_batch_parallel_kernel<T><<<grid_size, block_size, min_shared_mem, stream>>>(
+                logits.data_ptr(), output_ptr, seq_len, vocab_size, temperature, top_k, d_states
+            );
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+    }
+    
+    // 回退到原始实现（如果共享内存不足）
     for (size_t i = 0; i < seq_len; i++) {
         // 创建当前位置logits的视图
         std::vector<size_t> start = {i, 0};
@@ -383,6 +650,14 @@ void sample_batch_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float tempe
         // 调用单个token的sample_to_fixed函数，将结果写入output_ptr[i]
         sample_to_fixed(std::move(logit_view), output_ptr + i, temperature, top_p, top_k, d_states, stream);
     }
+}
+
+// 采样函数的变体，将结果写入指定的GPU内存位置
+template <typename T>
+void sample_to_fixed(Tensor<T>&& logits, uint32_t* output_ptr, float temperature, float top_p, size_t top_k,
+                     curandState* d_states, cudaStream_t stream) {
+    // 使用优化后的fast_sample_to_fixed函数
+    fast_sample_to_fixed(std::move(logits), output_ptr, nullptr, temperature, top_p, top_k, d_states, stream);
 }
 
 template uint32_t* sample<float>(Tensor<float>&&, float, float, size_t, curandState*, cudaStream_t);
@@ -396,6 +671,11 @@ template void sample_batch_to_fixed<float>(Tensor<float>&&, uint32_t*, float, fl
                                            cudaStream_t);
 template void sample_batch_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, uint32_t*, float, float, size_t,
                                                    curandState*, cudaStream_t);
+
+template void fast_sample_to_fixed<float>(Tensor<float>&&, uint32_t*, float*, float, float, size_t, curandState*,
+                                          cudaStream_t);
+template void fast_sample_to_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16>&&, uint32_t*, float*, float, float, size_t,
+                                                  curandState*, cudaStream_t);
 
 }  // namespace cuda_OP
 

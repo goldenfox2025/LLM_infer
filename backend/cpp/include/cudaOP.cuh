@@ -48,6 +48,7 @@ union Vec_2 {
 
 namespace cuda_OP {
 
+
 // 定义支持的数据类型别名
 template <typename T, typename ScaleType = float>
 void matmul_quantized_gemv(           // Renamed wrapper
@@ -84,7 +85,7 @@ void launch_gemv_scores(const T *x, const T *y, AccT *dst, const int channel_siz
 
 template <typename T>
 void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream = nullptr,
-            const Tensor<T> *bias = nullptr, int use_ = 2);
+            const Tensor<T> *bias = nullptr, int use_ = 1);
 
 // rope 算子，用于位置编码
 template <typename T>
@@ -139,6 +140,11 @@ uint32_t *sample(Tensor<T> &&input, float temperature, float top_p, size_t top_k
 template <typename T>
 void sample_to_fixed(Tensor<T> &&input, uint32_t *output_ptr, float temperature, float top_p, size_t top_k,
                      curandState *d_states, cudaStream_t stream = nullptr);
+
+// 高效采样函数的变体，避免全量排序，将token和概率写入指定的GPU内存位置
+template <typename T>
+void fast_sample_to_fixed(Tensor<T> &&input, uint32_t *output_ptr, float *prob_ptr, float temperature, float top_p,
+                          size_t top_k, curandState *d_states, cudaStream_t stream = nullptr);
 
 // 批量采样函数的变体，将结果写入指定的GPU内存位置数组
 template <typename T>

@@ -920,6 +920,13 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
     auto &attention_norm_weight = params_.at(l + "input_layernorm.weight");
     // 使用新的算子抽象层
     operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight, rms_norm_eps_);
+
+    // 提前准备RoPE offset，复用forward_for_graph的机制
+    if (d_rope_offset_ == nullptr) {
+        cudaMalloc(&d_rope_offset_, sizeof(size_t));
+    }
+    cudaMemcpy(d_rope_offset_, &offset, sizeof(size_t), cudaMemcpyHostToDevice);
+
     // 主循环：遍历所有Transformer层
     for (size_t i = 0; i < n_layers_; i++) {
         std::string layer_prefix = "layers." + std::to_string(i) + ".";
@@ -947,7 +954,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
 
         // QKV融合优化：对于非量化模型，检查是否有合并的QKV权重
         std::string merged_qkv_key = "merged_qkv_" + std::to_string(i);
-        if (quant_type_ == 0 && params_.find(merged_qkv_key) != params_.end()) {
+        if (quant_type_ == 0&& params_.find(merged_qkv_key) != params_.end()) {
             // 使用合并的QKV权重进行单次矩阵乘法
             auto merged_qkv_weight = params_.at(merged_qkv_key);
 
@@ -996,16 +1003,15 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        // 为prefill创建临时设备端offset
-        size_t *d_offset_temp;
-        cudaMalloc(&d_offset_temp, sizeof(size_t));
-        cudaMemcpy(d_offset_temp, &offset, sizeof(size_t), cudaMemcpyHostToDevice);
-
-        // 使用预计算缓存版本的RoPE（支持非连续张量的stride访问）
-        cuda_OP::rope_with_precomputed_cache(&q_buf_view, d_offset_temp, &rope_sin_cos_cache_);
-        cuda_OP::rope_with_precomputed_cache(&k_buf_view, d_offset_temp, &rope_sin_cos_cache_);
-
-        cudaFree(d_offset_temp);
+        // 使用预计算缓存版本的RoPE，复用forward_for_graph的机制
+        if (has_rope_cache()) {
+            cuda_OP::rope_with_precomputed_cache(&q_buf_view, d_rope_offset_, &rope_sin_cos_cache_);
+            cuda_OP::rope_with_precomputed_cache(&k_buf_view, d_rope_offset_, &rope_sin_cos_cache_);
+        } else {
+            // 回退到原来的动态计算版本
+            cuda_OP::rope_with_device_offset(&q_buf_view, d_rope_offset_, rope_theta_);
+            cuda_OP::rope_with_device_offset(&k_buf_view, d_rope_offset_, rope_theta_);
+        }
 
         for (size_t j = 0; j < seq_len; j++) {
             // 获取对应的 k 和 v slice
@@ -1323,7 +1329,6 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
     cuda_OP::gather(&residual, &graph_input_tensor_, &params_.at("token_embeddings.weight"), stream);
     std::string l = "layers." + std::to_string(0) + ".";
     auto &attention_norm_weight = params_.at(l + "input_layernorm.weight");
-    // 使用新的算子抽象层
     operators_->rms_norm(&hidden_states, &residual, &attention_norm_weight, rms_norm_eps_, stream);
 
     for (size_t i = 0; i < n_layers_; i++) {
@@ -1339,7 +1344,6 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         // 第二版路径
         Tensor<T> &k_buf = kv_cache->k_cache(0, 0);
         Tensor<T> &v_buf = kv_cache->v_cache(0, 0);
-        // std::cout << "k_buf地址: " << k_buf.data_ptr() << std::endl;
         const Tensor<T> *q_bias = nullptr;
         const Tensor<T> *k_bias = nullptr;
         const Tensor<T> *v_bias = nullptr;
@@ -1391,7 +1395,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             // k_buf = k_slice;
             // v_buf = v_slice;
         } else {
-            // 开发方便起见，qwen的awq路径先不能用
+            // AWQ量化路径，需要分别处理QKV投影
             auto q_weight = get_weight(layer_prefix + "self_attn.q_proj");
             auto k_weight = get_weight(layer_prefix + "self_attn.k_proj");
             auto v_weight = get_weight(layer_prefix + "self_attn.v_proj");

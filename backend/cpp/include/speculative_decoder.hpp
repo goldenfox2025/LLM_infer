@@ -61,6 +61,25 @@ class SpeculativeDecoder {
     bool get_use_probability_ratio() const {
         return use_probability_ratio_;
     }
+    
+    // 获取当前自适应投机长度
+    size_t get_adaptive_spec_length() const {
+        return adaptive_spec_length_;
+    }
+    
+    // 更新自适应投机长度
+    void update_adaptive_spec_length(float acceptance_rate) {
+        // 使用指数移动平均更新最近接受率
+        recent_acceptance_rate_ = 0.7f * recent_acceptance_rate_ + 0.3f * acceptance_rate;
+        
+        if (recent_acceptance_rate_ > ACCEPTANCE_THRESHOLD_HIGH) {
+            // 高接受率，增加投机长度
+            adaptive_spec_length_ = std::min(adaptive_spec_length_ + 1, MAX_SPEC_LENGTH);
+        } else if (recent_acceptance_rate_ < ACCEPTANCE_THRESHOLD_LOW) {
+            // 低接受率，减少投机长度
+            adaptive_spec_length_ = std::max(adaptive_spec_length_ - 1, MIN_SPEC_LENGTH);
+        }
+    }
 
    private:
     // 目标模型（大模型）
@@ -83,12 +102,21 @@ class SpeculativeDecoder {
     float* d_draft_probs;
     // 用于存储随机数的GPU内存
     float* d_random_values;
+    
     // 设备类型
     Device device_;
     // 投机长度（一次生成多少个token）
     size_t spec_length_;
     // 是否使用基于概率比值的投机采样
-    bool use_probability_ratio_ = true;
+    bool use_probability_ratio_ = true;  
+    
+    // 自适应投机长度相关参数
+    float recent_acceptance_rate_ = 0.5f;  // 最近的接受率
+    size_t adaptive_spec_length_;          // 自适应投机长度
+    static constexpr size_t MIN_SPEC_LENGTH = 6;   // 最小投机长度
+    static constexpr size_t MAX_SPEC_LENGTH = 8;   // 最大投机长度
+    static constexpr float ACCEPTANCE_THRESHOLD_HIGH = 0.7f;  // 高接受率阈值
+    static constexpr float ACCEPTANCE_THRESHOLD_LOW = 0.4f;   // 低接受率阈值
 
     // CUDA流，用于异步操作
     cudaStream_t main_stream_;    // 主流，用于主要操作
