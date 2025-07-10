@@ -105,6 +105,14 @@ template <typename T>
 void gemv_qkv(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v, const Tensor<T> *bias,
               int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len,
               cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
+
+// Fused GEMV QKV + RoPE operation: compute Q,K,V and apply RoPE to Q,K in a single kernel
+template <typename T>
+void gemv_qkv_rope(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v, 
+                   const Tensor<T> *bias, const size_t *d_offset, const Tensor<float> *sin_cos_cache,
+                   int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len,
+                   size_t n_heads, size_t n_kv_heads, size_t head_dim,
+                   cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = true, int offset = 0,

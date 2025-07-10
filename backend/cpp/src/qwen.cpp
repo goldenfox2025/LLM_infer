@@ -1386,9 +1386,16 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
             } catch (const std::out_of_range &) {
             }
 
-            cuda_OP::gemv_qkv(&hidden_states, &merged_qkv_weight, &q_buf, &k_buf, &v_buf, merged_qkv_bias,
-                              d_offset_array_, i, n_heads_ * head_dim_, n_kv_heads_ * head_dim_,
-                              n_kv_heads_ * head_dim_, stream, n_layers_, pingpong);
+            // Original separate GEMV QKV + RoPE calls - commented out
+            // cuda_OP::gemv_qkv(&hidden_states, &merged_qkv_weight, &q_buf, &k_buf, &v_buf, merged_qkv_bias,
+            //                   d_offset_array_, i, n_heads_ * head_dim_, n_kv_heads_ * head_dim_,
+            //                   n_kv_heads_ * head_dim_, stream, n_layers_, pingpong);
+            
+            // Fused GEMV QKV + RoPE operation
+            cuda_OP::gemv_qkv_rope(&hidden_states, &merged_qkv_weight, &q_buf, &k_buf, &v_buf, merged_qkv_bias,
+                                   d_rope_offset_, &rope_sin_cos_cache_, d_offset_array_, i, 
+                                   n_heads_ * head_dim_, n_kv_heads_ * head_dim_, n_kv_heads_ * head_dim_,
+                                   n_heads_, n_kv_heads_, head_dim_, stream, n_layers_, pingpong);
 
             // 初版路径
 
@@ -1425,18 +1432,18 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         Tensor<T> k_3d = k_buf.view({1, n_kv_heads_, head_dim_});
         Tensor<T> v_3d = v_buf.view({1, n_kv_heads_, head_dim_});
 
-        // 使用预计算的sin/cos缓存进行RoPE，如果缓存可用
-        if (has_rope_cache()) {
-            std::cout << "TEST." << std::endl;
-            cuda_OP::rope_with_precomputed_cache(&q_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, nullptr, 0, 28,
-                                                 pingpong);
-            cuda_OP::rope_with_precomputed_cache(&k_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, d_offset_array_,
-                                                 i, n_layers_, pingpong);
-        } else {
-            // 回退到原来的动态计算版本
-            cuda_OP::rope_with_device_offset(&q_3d, d_rope_offset_, rope_theta_, stream);
-            cuda_OP::rope_with_device_offset(&k_3d, d_rope_offset_, rope_theta_, stream);
-        }
+        // Original RoPE calls - commented out since now handled in fused kernel
+        // if (has_rope_cache()) {
+        //     std::cout << "TEST." << std::endl;
+        //     cuda_OP::rope_with_precomputed_cache(&q_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, nullptr, 0, 28,
+        //                                          pingpong);
+        //     cuda_OP::rope_with_precomputed_cache(&k_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, d_offset_array_,
+        //                                          i, n_layers_, pingpong);
+        // } else {
+        //     // 回退到原来的动态计算版本
+        //     cuda_OP::rope_with_device_offset(&q_3d, d_rope_offset_, rope_theta_, stream);
+        //     cuda_OP::rope_with_device_offset(&k_3d, d_rope_offset_, rope_theta_, stream);
+        // }
 
         // 在图中直接写入KV cache，然后通过图节点更新来改变目标地址
         // 获取当前token在KV cache中的位置（图捕获时使用默认位置）
