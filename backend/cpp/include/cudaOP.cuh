@@ -99,12 +99,12 @@ void rope_with_device_offset(Tensor<T> *tensor, const size_t *d_offset, float th
 template <typename T>
 void rope_with_precomputed_cache(Tensor<T> *tensor, const size_t *d_offset, const Tensor<float> *sin_cos_cache,
                                  cudaStream_t stream = nullptr, int *offset_array = nullptr, int layer_index = 0,
-                                 int n_layers = 28, int pingpong_index = 0);
+                                 int n_layers = 28, int *pingpong_index = nullptr);
 
 template <typename T>
 void gemv_qkv(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v, const Tensor<T> *bias,
               int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len,
-              cudaStream_t stream = nullptr, int n_layers = 28, int pingpong_index = 0);
+              cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = true, int offset = 0,
@@ -264,7 +264,7 @@ void dynamic_flash_attention_wrapper(Tensor<T> &Q, const Tensor<T> &total_K, con
 template <typename T>
 void flash_attention_graph_fixed(Tensor<T> &Q, const Tensor<T> &total_K, const Tensor<T> &total_V, T **d_output_ptrs,
                                  int *d_segment_info, int n_kv_heads, cudaStream_t stream = nullptr,
-                                 int pingpong_index = 0);
+                                 int *pingpong_index = nullptr);
 
 // CUDA图优化版本：使用固定内存地址的gather_fa
 template <typename T>

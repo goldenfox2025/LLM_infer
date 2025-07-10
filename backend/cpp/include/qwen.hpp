@@ -194,18 +194,18 @@ class QwenModel : public BaseModel {
     }
 
     // CUDA图优化相关方法
-    void initialize_graph_fixed_memory();    // 初始化图执行所需的固定内存
-    void cleanup_graph_fixed_memory();       // 清理图执行的固定内存
-    void update_rope_offset(size_t offset);  // 更新RoPE offset到固定内存
-    void update_segment_info(size_t total_seq_len,
-                             int layer_idx);  // 更新flash attention分段信息
-    void extract_updateable_nodes();          // 从图中提取可更新的节点
+    void initialize_graph_fixed_memory();                                             // 初始化图执行所需的固定内存
+    void cleanup_graph_fixed_memory();                                                // 清理图执行的固定内存
+    void update_rope_offset(size_t offset, cudaStream_t stream, int pongpong_index);  // 更新RoPE offset到固定内存
+    void update_segment_info(size_t total_seq_len, int layer_idx, cudaStream_t stream,
+                             int pongpong_index);  // 更新flash attention分段信息
+    void extract_updateable_nodes();               // 从图中提取可更新的节点
     void update_graph_kv_addresses(KVCache<T>* kv_cache,
                                    size_t offset);  // 更新图中的KV复制目标地址
     void update_graph_kv_addresses_async_for_next(KVCache<T>* kv_cache,
                                                   size_t next_offset);  // 异步更新图节点参数为下一次执行准备
-    void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx, KVCache<T>* kv_cache,
-                                 cudaStream_t stream, int pingpong_index = 0);  // 在图执行前准备所有动态数据
+    void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, cudaStream_t stream,
+                                 int pingpong_index = 0);  // 在图执行前准备所有动态数据
 
     void initialize_cuda_graph_with_kv_cache(KVCache<T>* kv_cache);  // 使用真实KV cache初始化CUDA图
 
@@ -298,7 +298,7 @@ class QwenModel : public BaseModel {
                                                // branch_lengths...]
     T** d_output_ptrs_;                        // 设备端输出指针数组
     std::vector<Tensor<T>> fixed_fa_outputs_;  // 每层的flash attention输出固定内存
-
+    int* pingpong;
     // 异步预准备优化相关成员
     bool next_execution_prepared_;  // 标记下一次执行是否已经预准备完成
     cudaStream_t prep_stream_;      // 专用于预准备操作的CUDA流

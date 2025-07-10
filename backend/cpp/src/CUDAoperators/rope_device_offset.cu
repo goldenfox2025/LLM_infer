@@ -129,12 +129,19 @@ template <typename T, int actual_pairs_per_thread = 2>
 __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size_t seq_len, size_t n_heads,
                                               size_t head_dim, const size_t *d_offset, const float *sin_cos_cache,
                                               size_t cache_stride, int stride, int *offset_array, int layer_index,
-                                              int n_layers, int pingpong_index) {
+                                              int n_layers, int *pingpong_index) {
+    size_t offset;
+
     // 从设备内存读取offset
-    size_t offset = *d_offset;
+    if (pingpong_index != nullptr) {
+        offset = d_offset[*pingpong_index];
+    } else {
+        offset = d_offset[0];
+    }
+
     int t_off = 0;
     if (offset_array != nullptr) {
-        t_off = offset_array[layer_index];
+        t_off = offset_array[layer_index + n_layers * (*pingpong_index)];
     }
     // 确认当前线程的位置
     // size_t b_idx = blockIdx.x;
@@ -176,7 +183,7 @@ __global__ void rope_kernel_precomputed_cache(T *tensor, size_t batch_size, size
 template <typename T>
 void rope_with_precomputed_cache(Tensor<T> *tensor, const size_t *d_offset, const Tensor<float> *sin_cos_cache,
                                  cudaStream_t stream, int *offset_array, int layer_index, int n_layers,
-                                 int pingpong_index) {
+                                 int *pingpong_index) {
     if (tensor->device() != Device::CUDA) {
         throw std::runtime_error("RoPE: Input tensor must be on CUDA device.");
     }
@@ -260,8 +267,8 @@ template void rope_with_device_offset<__nv_bfloat16>(Tensor<__nv_bfloat16> *tens
                                                      cudaStream_t stream);
 template void rope_with_precomputed_cache<float>(Tensor<float> *tensor, const size_t *d_offset,
                                                  const Tensor<float> *sin_cos_cache, cudaStream_t stream, int *, int,
-                                                 int, int);
+                                                 int, int *);
 template void rope_with_precomputed_cache<__nv_bfloat16>(Tensor<__nv_bfloat16> *tensor, const size_t *d_offset,
                                                          const Tensor<float> *sin_cos_cache, cudaStream_t stream, int *,
-                                                         int, int, int);
+                                                         int, int, int *);
 }  // namespace cuda_OP

@@ -934,7 +934,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
 
     // 提前准备RoPE offset，复用forward_for_graph的机制
     if (d_rope_offset_ == nullptr) {
-        cudaMalloc(&d_rope_offset_, sizeof(size_t));
+        cudaMalloc(&d_rope_offset_, sizeof(size_t) * 2);
     }
     cudaMemcpy(d_rope_offset_, &offset, sizeof(size_t), cudaMemcpyHostToDevice);
 
@@ -1386,7 +1386,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
 
             cuda_OP::gemv_qkv(&hidden_states, &merged_qkv_weight, &q_buf, &k_buf, &v_buf, merged_qkv_bias,
                               d_offset_array_, i, n_heads_ * head_dim_, n_kv_heads_ * head_dim_,
-                              n_kv_heads_ * head_dim_, stream);
+                              n_kv_heads_ * head_dim_, stream, n_layers_, pingpong);
 
             // 初版路径
 
@@ -1426,9 +1426,10 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         // 使用预计算的sin/cos缓存进行RoPE，如果缓存可用
         if (has_rope_cache()) {
             std::cout << "TEST." << std::endl;
-            cuda_OP::rope_with_precomputed_cache(&q_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, nullptr, 0);
+            cuda_OP::rope_with_precomputed_cache(&q_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, nullptr, 0, 28,
+                                                 pingpong);
             cuda_OP::rope_with_precomputed_cache(&k_3d, d_rope_offset_, &rope_sin_cos_cache_, stream, d_offset_array_,
-                                                 i);
+                                                 i, n_layers_, pingpong);
         } else {
             // 回退到原来的动态计算版本
             cuda_OP::rope_with_device_offset(&q_3d, d_rope_offset_, rope_theta_, stream);
@@ -1457,7 +1458,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         Tensor<T> total_V = total_V_flat.view({total_seq_len, n_kv_heads_, head_dim_});
 
         cuda_OP::flash_attention_graph_fixed(q_3d, total_K, total_V, d_output_ptrs_, d_segment_info_, n_kv_heads_,
-                                             stream, pingpong_index_);
+                                             stream, pingpong);
 
         // 使用图优化的gather_fa（固定内存版本）
         cuda_OP::gather_fa_graph_fixed(d_output_ptrs_, att_heads, d_segment_info_, stream);
@@ -1532,7 +1533,7 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
 // 初始化固定内存
 template <typename T>
 void QwenModel<T>::initialize_graph_fixed_memory() {
-    cudaError_t err = cudaMalloc(&d_rope_offset_, sizeof(size_t));
+    cudaError_t err = cudaMalloc(&d_rope_offset_, sizeof(size_t) * 2);
     if (err != cudaSuccess) {
         throw std::runtime_error("Failed to allocate device memory for RoPE offset: " +
                                  std::string(cudaGetErrorString(err)));
@@ -1559,7 +1560,7 @@ void QwenModel<T>::initialize_graph_fixed_memory() {
 
     kv_copy_nodes_.clear();
     const int max_branches = 3;
-    Tensor<int> segment_info_tensor({5}, Device::CUDA, false, "graph_segment_info");
+    Tensor<int> segment_info_tensor({2}, Device::CUDA, false, "graph_segment_info");
     d_segment_info_ = segment_info_tensor.data_ptr();
 
     Tensor<T *> output_ptrs_tensor({max_branches}, Device::CUDA, false, "graph_output_ptrs");
@@ -1612,11 +1613,10 @@ void QwenModel<T>::cleanup_graph_fixed_memory() {
 }
 
 template <typename T>
-void QwenModel<T>::update_rope_offset(size_t offset) {
+void QwenModel<T>::update_rope_offset(size_t offset, cudaStream_t stream, int pingpong_idx) {
     if (d_rope_offset_) {
-        // 关键修复：使用异步内存复制，避免在图执行前产生同步
         cudaError_t err =
-            cudaMemcpyAsync(d_rope_offset_, &offset, sizeof(size_t), cudaMemcpyHostToDevice, graph_stream_);
+            cudaMemcpyAsync(d_rope_offset_ + pingpong_idx, &offset, sizeof(size_t), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
             throw std::runtime_error("Failed to update RoPE offset: " + std::string(cudaGetErrorString(err)));
         }
@@ -1649,7 +1649,7 @@ void QwenModel<T>::extract_updateable_nodes() {
             cudaGraphMemcpyNodeGetParams(nodes[i], &params);
 
             // 检查是否是我们的KV复制节点（通过源地址判断）
-            // 关键修复：现在源地址是k_3d和v_3d，不再是fixed_k_buffers_
+            // 现在源地址是k_3d和v_3d，不再是fixed_k_buffers_
             // 我们需要检查源地址是否指向我们的K/V缓冲区
             for (size_t layer = 0; layer < n_layers_; layer++) {
                 // 获取当前层的K和V缓冲区地址（这些是图中实际使用的源地址）
@@ -1687,11 +1687,6 @@ void QwenModel<T>::update_graph_kv_addresses(KVCache<T> *kv_cache, size_t offset
         // 更新K复制节点
         if (node_idx < kv_copy_nodes_.size()) {
             cudaMemcpy3DParms k_params;
-            // It's generally safer to get params from the original graph node if
-            // that's what kv_copy_nodes_ stores. If kv_copy_nodes_ could somehow
-            // store references to nodes within graph_exec_, then getting params from
-            // graph_exec_ would be an option, but typically you identify based on
-            // original graph.
             cudaError_t get_param_err = cudaGraphMemcpyNodeGetParams(kv_copy_nodes_[node_idx], &k_params);
             if (get_param_err != cudaSuccess) {
                 std::cerr << "获取K节点参数失败 for layer " << layer << ": " << cudaGetErrorString(get_param_err)
@@ -1810,55 +1805,26 @@ void QwenModel<T>::update_graph_kv_addresses_async_for_next(KVCache<T> *kv_cache
 }
 
 template <typename T>
-void QwenModel<T>::update_segment_info(size_t total_seq_len, int layer_idx) {
+void QwenModel<T>::update_segment_info(size_t total_seq_len, int layer_idx, cudaStream_t stream, int pp_idx) {
     if (!d_segment_info_)
         return;
 
-    // 计算分段信息 - 强制使用3分支模式，类似flash_attention.cu
-    const int max_branches = 3;
-    const int FIXED_BRANCHES = 3;  // 强制使用3分支
-
-    // 简化分段逻辑：始终使用3分支，让kernel内部处理分段细节
-    int branches_needed = FIXED_BRANCHES;
-
-    // 准备主机端数据
-    std::vector<int> h_segment_info(2 + max_branches);
-    h_segment_info[0] = static_cast<int>(total_seq_len);
-    h_segment_info[1] = branches_needed;
-
-    // 简化分段逻辑：让kernel内部处理分段，这里只传递基本信息
-    // 不再预先计算分支长度，因为kernel会根据total_seq_len和FIXED_BRANCHES自动计算
-    for (int i = 0; i < max_branches; i++) {
-        h_segment_info[2 + i] = 0;  // 设为0，让kernel自己计算
-    }
-
-    // // 调试输出分段信息
-    // std::cout << "更新分段信息: total_seq_len=" << total_seq_len
-    //           << ", branches_needed=" << branches_needed << std::endl;
-    // for (int i = 0; i < max_branches; i++) {
-    //     std::cout << "  分支" << i << ": 长度=" << h_segment_info[2 + i] <<
-    //     std::endl;
-    // }
-
-    // 关键修复：使用异步内存复制，避免在图执行前产生同步
-    cudaMemcpyAsync(d_segment_info_, h_segment_info.data(), (2 + max_branches) * sizeof(int), cudaMemcpyHostToDevice,
-                    graph_stream_);
+    int segment_info = total_seq_len;
+    cudaMemcpyAsync(d_segment_info_ + pp_idx, &segment_info, sizeof(int), cudaMemcpyHostToDevice, stream);
 }
 
 template <typename T>
-void QwenModel<T>::prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx,
-                                           KVCache<T> *kv_cache, cudaStream_t stream, int pongpong_index) {
+void QwenModel<T>::prepare_graph_execution(size_t rope_offset, size_t total_seq_len, cudaStream_t stream, int pp_idx) {
     static thread_local std::vector<int> batch_offsets(n_layers_);
     size_t base_offset = rope_offset * head_dim_ * n_kv_heads_;
     size_t layer_stride = max_position_embeddings_ * head_dim_ * n_kv_heads_;
-
     for (int i = 0; i < n_layers_; i++) {
         batch_offsets[i] = base_offset + i * layer_stride;
     }
-    cudaMemcpyAsync(d_offset_array_, batch_offsets.data(), n_layers_ * sizeof(int), cudaMemcpyHostToDevice, stream);
-    update_rope_offset(rope_offset);
-    update_segment_info(total_seq_len, layer_idx);
-    cudaStreamSynchronize(stream);
+    cudaMemcpyAsync(d_offset_array_ + pp_idx * n_layers_, batch_offsets.data(), n_layers_ * sizeof(int),
+                    cudaMemcpyHostToDevice, stream);
+    update_rope_offset(rope_offset, stream, pp_idx);
+    cudaMemcpyAsync(d_segment_info_ + pp_idx, &total_seq_len, sizeof(int), cudaMemcpyHostToDevice, stream);
 }
 
 template <typename T>
@@ -1890,8 +1856,8 @@ void QwenModel<T>::initialize_cuda_graph_with_kv_cache(KVCache<T> *kv_cache) {
         size_t default_offset = kv_cache->size() - 1;     // 与图执行时保持一致
         size_t default_total_seq_len = kv_cache->size();  // 与图执行时保持一致
 
-        update_rope_offset(default_offset);
-        update_segment_info(default_total_seq_len, 0);
+        update_rope_offset(default_offset, nullptr, pingpong_index_);
+        update_segment_info(default_total_seq_len, 0, nullptr, pingpong_index_);
         cudaDeviceSynchronize();  // 确保所有更新完成
 
         // 使用默认流进行预热运行
@@ -2061,20 +2027,25 @@ Tensor<T> QwenModel<T>::forward_for_graph_logits_only(const Tensor<uint32_t> *in
     size_t rope_offset = kv_cache->size() - 1;  // 当前token的位置索引
     size_t total_seq_len = kv_cache->size();    // flash attention应该看到包含当前token的完整数据
     if (kv_cache->size() > last_kv_cache_size_ + 1) {
-        std::cout << "检测到新轮对话开始，KV cache从 " << last_kv_cache_size_ << " 跳跃到 " << kv_cache->size()
+        std::cout << "检测到新轮对话开始，KV cache从 " << last_kv_cache_size_ - 1 << " 跳跃到 " << kv_cache->size()
                   << std::endl;
-        prepare_graph_execution(rope_offset, total_seq_len, 0, kv_cache, graph_stream_);
+        prepare_graph_execution(rope_offset, total_seq_len, graph_stream_, pingpong_index_);
+    } else {
+        cudaStreamSynchronize(graph_stream_);
     }
     last_kv_cache_size_ = kv_cache->size();
+    cudaMemcpyAsync(pingpong, &pingpong_index_, sizeof(int), cudaMemcpyHostToDevice, graph_stream_);
+    cudaStreamSynchronize(graph_stream_);
     cudaError_t result = cudaGraphLaunch(graph_exec_, graph_stream_);
+
+    pingpong_index_ = 1 - pingpong_index_;
 
     if (result != cudaSuccess) {
         throw std::runtime_error("Failed to launch CUDA graph: " + std::string(cudaGetErrorString(result)));
     }
+    // compute_next_offsets_async(total_seq_len);
 
-    compute_next_offsets_async(total_seq_len);
-    prepare_graph_execution(rope_offset + 1, total_seq_len + 1, 0, kv_cache, graph_stream_);
-    // cudaStreamSynchronize(graph_stream_);
+    prepare_graph_execution(rope_offset + 1, total_seq_len + 1, graph_stream_, pingpong_index_);
 
     return graph_output_tensor_;
 }
@@ -2119,20 +2090,21 @@ uint32_t *QwenModel<T>::allocate_gpu_result(uint32_t result) {
 template <typename T>
 void QwenModel<T>::initialize_offset_cache() {
     // 分配连续的offset数组，所有层共享，通过索引访问
-    cudaError_t err = cudaMalloc(&d_offset_array_, n_layers_ * sizeof(int));
+    cudaError_t err = cudaMalloc(&d_offset_array_, n_layers_ * sizeof(int) * 2);
     if (err != cudaSuccess) {
         throw std::runtime_error("Failed to allocate device memory for offset array: " +
                                  std::string(cudaGetErrorString(err)));
     }
 
     // 初始化为0
-    err = cudaMemset(d_offset_array_, 0, n_layers_ * sizeof(int));
+    err = cudaMemset(d_offset_array_, 0, n_layers_ * sizeof(int) * 2);
     if (err != cudaSuccess) {
         cudaFree(d_offset_array_);
         d_offset_array_ = nullptr;
         throw std::runtime_error("Failed to initialize offset array: " + std::string(cudaGetErrorString(err)));
     }
-
+    cudaMalloc(&pingpong, sizeof(int));
+    cudaMemset(pingpong, 0, sizeof(int));
     std::cout << "Offset cache initialized with " << n_layers_ << " layers" << std::endl;
 }
 

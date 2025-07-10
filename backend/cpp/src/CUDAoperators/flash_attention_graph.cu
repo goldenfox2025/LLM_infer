@@ -29,9 +29,9 @@ __global__ void flash_attention_kernel_graph_fixed(T *q,
                                                    const T *total_v,  // 连续的V缓存 [total_seq_len, n_kv_h, dqkv]
                                                    T **output_ptrs,   // 固定的输出指针数组
                                                    int *segment_info, int n_q_h, int n_kv_h, int dqkv, int B_c, int B_r,
-                                                   int n_groups, int T_r, T softmax_scale, int pingpong_index) {
+                                                   int n_groups, int T_r, T softmax_scale, int *pingpong_index) {
     // 从设备内存读取分段信息
-    int total_seq_len = segment_info[0];
+    int total_seq_len = segment_info[*pingpong_index];
     // segment_info[1] (active_branches) 已经无用，始终使用固定3分支
 
     // 固定使用3分支模式，blockIdx.y就是分支索引(0,1,2)
@@ -250,7 +250,7 @@ __global__ void flash_attention_kernel_graph_fixed(T *q,
 // CUDA图优化版本：使用固定内存地址和分段信息的flash attention
 template <typename T>
 void flash_attention_graph_fixed(Tensor<T> &Q, const Tensor<T> &total_K, const Tensor<T> &total_V, T **d_output_ptrs,
-                                 int *d_segment_info, int n_kv_heads, cudaStream_t stream, int pingpong_index) {
+                                 int *d_segment_info, int n_kv_heads, cudaStream_t stream, int *pingpong_index) {
     int dqkv = Q.sizes()[2];
     if (dqkv != DQKV_VALUE) {
         throw std::runtime_error("dqkv 不匹配预定义的值");
@@ -284,11 +284,11 @@ void flash_attention_graph_fixed(Tensor<T> &Q, const Tensor<T> &total_K, const T
 template void flash_attention_graph_fixed<float>(Tensor<float> &Q, const Tensor<float> &total_K,
                                                  const Tensor<float> &total_V, float **d_output_ptrs,
                                                  int *d_segment_info, int n_kv_heads, cudaStream_t stream,
-                                                 int pingpong_index);
+                                                 int *pingpong_index);
 
 template void flash_attention_graph_fixed<__nv_bfloat16>(Tensor<__nv_bfloat16> &Q, const Tensor<__nv_bfloat16> &total_K,
                                                          const Tensor<__nv_bfloat16> &total_V,
                                                          __nv_bfloat16 **d_output_ptrs, int *d_segment_info,
-                                                         int n_kv_heads, cudaStream_t stream, int pingpong_index);
+                                                         int n_kv_heads, cudaStream_t stream, int *pingpong_index);
 
 }  // namespace cuda_OP
