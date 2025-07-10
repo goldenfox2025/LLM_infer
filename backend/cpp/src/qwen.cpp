@@ -2069,19 +2069,11 @@ uint32_t QwenModel<T>::sample_cpu(const Tensor<T> &gpu_logits, float temperature
 // 分配GPU内存并返回结果指针
 template <typename T>
 uint32_t *QwenModel<T>::allocate_gpu_result(uint32_t result) {
-    uint32_t *d_result;
-    cudaError_t err = cudaMalloc(&d_result, sizeof(uint32_t));
-    if (err != cudaSuccess) {
-        throw std::runtime_error("Failed to allocate GPU memory for result: " + std::string(cudaGetErrorString(err)));
-    }
 
-    err = cudaMemcpy(d_result, &result, sizeof(uint32_t), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-        cudaFree(d_result);
-        throw std::runtime_error("Failed to copy result to GPU: " + std::string(cudaGetErrorString(err)));
-    }
 
-    return d_result;
+    err = cudaMemcpy(graph_input_tensor_->data_ptr(), &result, sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    return graph_input_tensor_->data_ptr(),;
 }
 
 // -------------------------------
