@@ -598,12 +598,6 @@ void InferenceEngine<T>::reset() {
     // 尝试转换为QwenModel并调用重置方法
     auto qwen_model_bf16 = dynamic_cast<QwenModel<__nv_bfloat16>*>(model_.get());
     auto qwen_model_float = dynamic_cast<QwenModel<float>*>(model_.get());
-
-    if (qwen_model_bf16) {
-        qwen_model_bf16->reset_async_preparation_state();
-    } else if (qwen_model_float) {
-        qwen_model_float->reset_async_preparation_state();
-    }
 }
 template <typename T>
 InferenceEngine<T>& InferenceEngine<T>::cuda() {

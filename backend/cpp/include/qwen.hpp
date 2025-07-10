@@ -15,9 +15,9 @@
 
 // Sample模式枚举
 enum class SampleMode {
-    GPU,                     // 纯GPU sample（默认，性能最佳）
-    CPU,                     // 纯CPU sample（保留用于测试）
-    GPU_WITH_ASYNC_PREPARE   // GPU sample + 异步prepare_next（推荐用于EOS重叠）
+    GPU,                    // 纯GPU sample（默认，性能最佳）
+    CPU,                    // 纯CPU sample（保留用于测试）
+    GPU_WITH_ASYNC_PREPARE  // GPU sample + 异步prepare_next（推荐用于EOS重叠）
 };
 
 template <typename T>
@@ -36,9 +36,6 @@ class QwenModel : public BaseModel {
 
     bool verify_params() const override;
     void print_model_info() const override;
-    void reset_async_preparation_state();  // 重置异步预准备状态（在新对话开始时调用）
-    // Implementation of BaseModel interface:
-    // 直接调用 CUDA 版本，并将 KVCacheBase* 动态转换为 KVCache<T>*
     uint32_t* forward(const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCacheBase* kv_cache, size_t top_k,
                       float temperature, float top_p, curandState* d_states = nullptr) override {
         KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
@@ -48,19 +45,20 @@ class QwenModel : public BaseModel {
         if (use_cuda_graph_) {
             // CUDA图路径的logits获取
             logits = forward_for_graph_logits_only(input, typed_cache);
-            
-            // 图推理启动后立即在CPU计算下一轮的offset（与GPU推理并行）
-            compute_next_offsets_async(typed_cache);
-            
+
             // 图推理结束后批量应用预计算的offset
             apply_prepared_offsets();
         } else {
-            // 常规CUDA路径的logits获取  
+            // 常规CUDA路径的logits获取
             logits = forward_logits_only(input, typed_cache);
         }
-        
+
         // 2. 使用新的统一sample接口
-        return sample_unified(logits, temperature, top_p, top_k, typed_cache, d_states);
+        if (use_cuda_graph_) {
+            return sample_unified(logits, temperature, top_p, top_k, typed_cache, d_states, graph_stream_);
+        } else {
+            return sample_unified(logits, temperature, top_p, top_k, typed_cache, d_states);
+        }
     }
     uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCacheBase* kv_cache, size_t top_k,
                       float temperature, float top_p, curandState* d_states = nullptr) override {
@@ -132,21 +130,23 @@ class QwenModel : public BaseModel {
     Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
     Tensor<T> forward_for_graph(const Tensor<uint32_t>* input, KVCache<T>* kv_cache, cudaStream_t stream = nullptr);
-    
+
     // CPU sample相关方法
     Tensor<T> forward_logits_only(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
     Tensor<T> forward_for_graph_logits_only(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
     uint32_t sample_cpu(const Tensor<T>& gpu_logits, float temperature, float top_p, size_t top_k);
-    uint32_t* sample_with_metadata_update(const Tensor<T>& logits, float temperature, float top_p, size_t top_k, KVCache<T>* kv_cache);
+    uint32_t* sample_with_metadata_update(const Tensor<T>& logits, float temperature, float top_p, size_t top_k,
+                                          KVCache<T>* kv_cache);
     uint32_t* allocate_gpu_result(uint32_t result);
-    
+
     // 新的sample架构方法
     void set_sample_mode(SampleMode mode);
-    uint32_t* sample_unified(const Tensor<T>& logits, float temperature, float top_p, size_t top_k, KVCache<T>* kv_cache, curandState* d_states = nullptr, cudaStream_t stream = nullptr);
+    uint32_t* sample_unified(const Tensor<T>& logits, float temperature, float top_p, size_t top_k,
+                             KVCache<T>* kv_cache, curandState* d_states = nullptr, cudaStream_t stream = nullptr);
     uint32_t* sample_with_cpu_only(const Tensor<T>& logits, float temperature, float top_p, size_t top_k);
-    
+
     // 新的offset优化方法
-    void compute_next_offsets_async(KVCache<T>* kv_cache);
+    void compute_next_offsets_async(int offset);
     void apply_prepared_offsets();
     void initialize_offset_cache();
 
@@ -204,8 +204,8 @@ class QwenModel : public BaseModel {
                                    size_t offset);  // 更新图中的KV复制目标地址
     void update_graph_kv_addresses_async_for_next(KVCache<T>* kv_cache,
                                                   size_t next_offset);  // 异步更新图节点参数为下一次执行准备
-    void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx,
-                                 KVCache<T>* kv_cache);  // 在图执行前准备所有动态数据
+    void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx, KVCache<T>* kv_cache,
+                                 cudaStream_t stream, int pingpong_index = 0);  // 在图执行前准备所有动态数据
 
     void initialize_cuda_graph_with_kv_cache(KVCache<T>* kv_cache);  // 使用真实KV cache初始化CUDA图
 
@@ -225,6 +225,7 @@ class QwenModel : public BaseModel {
     }  // 检查是否已初始化RoPE缓存
 
    private:
+    int pingpong_index_ = 0;
     std::array<cudaEvent_t, 3> fa_done_events_;
     size_t vocab_size_;
     size_t n_layers_;
@@ -251,13 +252,13 @@ class QwenModel : public BaseModel {
 
     // 统一算子接口
     std::unique_ptr<op::UnifiedOperators<T>> operators_;
-    
+
     // CPU算子接口（用于sample操作）
     std::unique_ptr<op::UnifiedOperators<T>> cpu_operators_;
-    
+
     // Sample模式选择
     SampleMode sample_mode_ = SampleMode::GPU;  // 默认使用GPU sample，性能最佳
-    
+
     // 批量offset优化：预计算并缓存下一轮的offset值
     std::vector<int> next_batch_offsets_;
     bool offsets_prepared_ = false;

@@ -713,50 +713,37 @@ void flash_attention_prefill(const Tensor<T>& Q, const Tensor<T>& K, const Tenso
 
     int n_groups = n_heads / n_kv_heads;
 
-    // --- Kernel Configuration ---
     constexpr int B_c = 16;
     constexpr int B_r = 16;
     constexpr int DQKV_val = 128;
-    // Number of warps needed to tile the larger P*V matrix multiplication (Br x DQKV)
-    constexpr int WARP_NUM = (B_r / 16) * (DQKV_val / 16);  // (16/16) * (128/16) = 8 warps
+
+    constexpr int WARP_NUM = (B_r / 16) * (DQKV_val / 16);
     constexpr int T_r = B_r;
 
-    // --- Grid and Block Dimensions ---
     int num_q_segments = (seq_len + T_r - 1) / T_r;
     dim3 grid(num_q_segments, n_heads);
-    dim3 block(WARP_NUM * 32);  // 8 warps * 32 threads/warp = 256 threads
+    dim3 block(WARP_NUM * 32);
     int q_stride = Q.strides()[0];
 
-    // --- Dynamic Shared Memory Calculation ---
-    // The optimized kernel uses a single 1D buffer, so we must calculate its total size.
     constexpr auto align_size = [](size_t size) {
         constexpr size_t alignment = 16;
         return ((size + alignment - 1) / alignment) * alignment;
     };
 
-    // Calculate the size of each persistent and reused buffer region
     const size_t q_smem_size = align_size(B_r * DQKV_val * sizeof(T));
     const size_t v_smem_size = align_size(B_c * DQKV_val * sizeof(T));
     const size_t o_smem_size = align_size(B_r * DQKV_val * sizeof(float));
-    const size_t stats_size = align_size(B_r * 2 * sizeof(float));  // For m_stats and l_stats
-
-    // Size for the region aliasing K and PV. It must be large enough for either.
+    const size_t stats_size = align_size(B_r * 2 * sizeof(float));
     const size_t k_pv_smem_size = align_size(std::max(sizeof(T) * B_c * DQKV_val, sizeof(float) * B_r * DQKV_val));
-
-    // Size for the region aliasing Scores and P. float is larger than T (e.g. half).
     const size_t scores_p_smem_size = align_size(sizeof(float) * B_r * B_c);
 
-    // Sum of all regions gives the total dynamic shared memory required
     const size_t total_smem_size =
         q_smem_size + v_smem_size + o_smem_size + stats_size + k_pv_smem_size + scores_p_smem_size;
 
-    // --- Kernel Launch ---
-    // Launch the optimized kernel, passing total_smem_size as the 3rd launch parameter.
     flash_attn_prefill_kernel_v2<T, B_c, B_r, T_r, WARP_NUM, DQKV_val>
         <<<grid, block, total_smem_size, stream>>>(Q.data_ptr(), K.data_ptr(), V.data_ptr(), output.data_ptr(), n_heads,
                                                    n_kv_heads, n_groups, seq_len, total_seq_len, offset, q_stride);
 
-    // --- Error Checking ---
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error("CUDA error in flash_attention_prefill: " + std::string(cudaGetErrorString(err)));

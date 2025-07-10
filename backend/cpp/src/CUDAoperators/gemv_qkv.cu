@@ -2,8 +2,8 @@
 
 namespace cuda_OP {
 template <typename T, int WARP_SIZE = 32>
-__global__ void gemv_qkv_kernel(const T *A, const T *B, T *q, T *k, T *v, const T *bias, int *offset_array, int layer_index,
-                                int N, int K, int Q_len, int K_len, int V_len) {
+__global__ void gemv_qkv_kernel(const T *A, const T *B, T *q, T *k, T *v, const T *bias, int *offset_array,
+                                int layer_index, int N, int K, int Q_len, int K_len, int V_len) {
     // 从offset数组中获取当前层的偏移值
     int out_off = 0;
     if (offset_array != nullptr) {
@@ -70,10 +70,11 @@ __global__ void gemv_qkv_kernel(const T *A, const T *B, T *q, T *k, T *v, const 
 
 template <typename T>
 void gemv_qkv(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v, const Tensor<T> *bias,
-              int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len, cudaStream_t stream) {
+              int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len, cudaStream_t stream,
+              int n_layers, int pingpong_index) {
     const int N = B->sizes()[1];
     const int K = B->sizes()[0];
-    
+
     const T *d_A = A->data_ptr();
     const T *d_B = B->data_ptr();
     T *d_q = q->data_ptr();
@@ -86,17 +87,19 @@ void gemv_qkv(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k
     dim3 gridDim((N + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, 1);
 
     // 启动内核
-    gemv_qkv_kernel<T>
-        <<<gridDim, blockDim, 0, stream>>>(d_A, d_B, d_q, d_k, d_v, d_bias, offset_array, layer_index, N, K, Q_len, K_len, V_len);
+    gemv_qkv_kernel<T><<<gridDim, blockDim, 0, stream>>>(d_A, d_B, d_q, d_k, d_v, d_bias, offset_array, layer_index, N,
+                                                         K, Q_len, K_len, V_len);
 }
 
 // 显式模板实例化
 // 告诉编译器为下面这两种具体类型生成代码
 template void gemv_qkv<nv_bfloat16>(const Tensor<nv_bfloat16> *A, const Tensor<nv_bfloat16> *B, Tensor<nv_bfloat16> *q,
                                     Tensor<nv_bfloat16> *k, Tensor<nv_bfloat16> *v, const Tensor<nv_bfloat16> *bias,
-                                    int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len, cudaStream_t stream);
+                                    int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len,
+                                    cudaStream_t stream, int n_layers, int pingpong_index);
 template void gemv_qkv<float>(const Tensor<float> *A, const Tensor<float> *B, Tensor<float> *q, Tensor<float> *k,
-                              Tensor<float> *v, const Tensor<float> *bias, int *offset_array, int layer_index, size_t Q_len, size_t K_len,
-                              size_t V_len, cudaStream_t stream);
+                              Tensor<float> *v, const Tensor<float> *bias, int *offset_array, int layer_index,
+                              size_t Q_len, size_t K_len, size_t V_len, cudaStream_t stream, int n_layers,
+                              int pingpong_index);
 
 }  // namespace cuda_OP

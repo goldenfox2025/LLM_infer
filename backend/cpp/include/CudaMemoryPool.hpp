@@ -118,9 +118,9 @@ class CudaMemoryPool {
         }
 
         bool actual_is_prefill_request = is_prefill_request;
-        if (!actual_is_prefill_request && is_prefill_phase_) {
-            actual_is_prefill_request = true;
-        }
+        // if (!actual_is_prefill_request && is_prefill_phase_) {
+        //     actual_is_prefill_request = true;
+        // }
 
         void* ptr = nullptr;
 
