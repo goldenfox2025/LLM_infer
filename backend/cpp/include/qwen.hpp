@@ -13,6 +13,13 @@
 #include "thread_pool.hpp"
 #include "weight_tensor.hpp"
 
+// Sample模式枚举
+enum class SampleMode {
+    GPU,                     // 纯GPU sample（默认，性能最佳）
+    CPU,                     // 纯CPU sample（保留用于测试）
+    GPU_WITH_ASYNC_PREPARE   // GPU sample + 异步prepare_next（推荐用于EOS重叠）
+};
+
 template <typename T>
 class QwenModel : public BaseModel {
    public:
@@ -36,62 +43,24 @@ class QwenModel : public BaseModel {
                       float temperature, float top_p, curandState* d_states = nullptr) override {
         KVCache<T>* typed_cache = dynamic_cast<KVCache<T>*>(kv_cache);
 
+        // 1. 执行GPU forward，获得logits
+        Tensor<T> logits;
         if (use_cuda_graph_) {
-            // 使用 CUDA 图执行
-            // 延迟初始化CUDA图，使用真实的KV cache
-            if (!graph_initialized_) {
-                initialize_cuda_graph_with_kv_cache(typed_cache);
-            }
-
-            // 计算当前执行的参数
-            size_t rope_offset = typed_cache->size() - 1;  // 当前token的位置索引
-            size_t total_seq_len = typed_cache->size();    // flash attention应该看到包含当前token的完整数据
-
-            if (last_kv_cache_size_ == 0 || (typed_cache->size() > last_kv_cache_size_ + 1)) {
-                // 新轮对话开始，重置异步预准备状态
-                reset_async_preparation_state();
-                std::cout << "检测到新轮对话开始，KV cache从 " << last_kv_cache_size_ << " 跳跃到 "
-                          << typed_cache->size() << std::endl;
-            }
-
-            // 将输入数据拷贝到图的固定输入张量
-            cudaMemcpyAsync(graph_input_tensor_.data_ptr(), input->data_ptr(), input->numel() * sizeof(uint32_t),
-                            cudaMemcpyDeviceToDevice, graph_stream_);
-            // 更新记录的KV cache大小
-            last_kv_cache_size_ = typed_cache->size();
-
-            // 优化：检查是否已经预准备了当前执行
-            if (!next_execution_prepared_) {
-                // 如果没有预准备，则同步准备
-                prepare_graph_execution(rope_offset, total_seq_len, 0, typed_cache);
-            } else {
-                // 如果已经预准备，等待预准备完成
-                // 注意：KV地址已经在上次图执行后异步更新了，这里不需要再更新
-                cudaEventSynchronize(prep_done_event_);
-                next_execution_prepared_ = false;  // 重置标记
-            }
-
-            // 执行 CUDA 图
-            cudaError_t result = cudaGraphLaunch(graph_exec_, graph_stream_);
-            if (result != cudaSuccess) {
-                throw std::runtime_error("Failed to launch CUDA graph: " + std::string(cudaGetErrorString(result)));
-            }
-
-            // cudaEventCreate(&fa_done_events_[0]);
-            // cudaEventRecord(fa_done_events_[0], graph_stream_);
-            // cudaStreamWaitEvent(0, fa_done_events_[0], 0);
-
-            size_t next_rope_offset = typed_cache->size();
-            // update_graph_kv_addresses_async_for_next(typed_cache, next_rope_offset);
-            size_t next_total_seq_len = typed_cache->size() + 1;  // 下一次的序列长度
-            prepare_next_graph_execution_async(next_rope_offset, next_total_seq_len, 0, typed_cache);
-
-            // 修复：不传递stream参数给sample，避免重复词汇问题
-            return cuda_OP::sample(std::move(graph_output_tensor_), temperature, top_p, top_k, d_states);
+            // CUDA图路径的logits获取
+            logits = forward_for_graph_logits_only(input, typed_cache);
+            
+            // 图推理启动后立即在CPU计算下一轮的offset（与GPU推理并行）
+            compute_next_offsets_async(typed_cache);
+            
+            // 图推理结束后批量应用预计算的offset
+            apply_prepared_offsets();
         } else {
-            // 使用常规CUDA推理
-            return cuda_OP::sample(forward_cuda(input, typed_cache), temperature, top_p, top_k, d_states);
+            // 常规CUDA路径的logits获取  
+            logits = forward_logits_only(input, typed_cache);
         }
+        
+        // 2. 使用新的统一sample接口
+        return sample_unified(logits, temperature, top_p, top_k, typed_cache, d_states);
     }
     uint32_t* prefill(const Tensor<uint32_t>* input, ThreadPool& thread_pool, KVCacheBase* kv_cache, size_t top_k,
                       float temperature, float top_p, curandState* d_states = nullptr) override {
@@ -163,6 +132,23 @@ class QwenModel : public BaseModel {
     Tensor<T> prefill_cuda(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
 
     Tensor<T> forward_for_graph(const Tensor<uint32_t>* input, KVCache<T>* kv_cache, cudaStream_t stream = nullptr);
+    
+    // CPU sample相关方法
+    Tensor<T> forward_logits_only(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+    Tensor<T> forward_for_graph_logits_only(const Tensor<uint32_t>* input, KVCache<T>* kv_cache);
+    uint32_t sample_cpu(const Tensor<T>& gpu_logits, float temperature, float top_p, size_t top_k);
+    uint32_t* sample_with_metadata_update(const Tensor<T>& logits, float temperature, float top_p, size_t top_k, KVCache<T>* kv_cache);
+    uint32_t* allocate_gpu_result(uint32_t result);
+    
+    // 新的sample架构方法
+    void set_sample_mode(SampleMode mode);
+    uint32_t* sample_unified(const Tensor<T>& logits, float temperature, float top_p, size_t top_k, KVCache<T>* kv_cache, curandState* d_states = nullptr, cudaStream_t stream = nullptr);
+    uint32_t* sample_with_cpu_only(const Tensor<T>& logits, float temperature, float top_p, size_t top_k);
+    
+    // 新的offset优化方法
+    void compute_next_offsets_async(KVCache<T>* kv_cache);
+    void apply_prepared_offsets();
+    void initialize_offset_cache();
 
     // 获取权重（普通或量化）
     op::WeightTensor<T> get_weight(const std::string& key) {
@@ -220,8 +206,6 @@ class QwenModel : public BaseModel {
                                                   size_t next_offset);  // 异步更新图节点参数为下一次执行准备
     void prepare_graph_execution(size_t rope_offset, size_t total_seq_len, int layer_idx,
                                  KVCache<T>* kv_cache);  // 在图执行前准备所有动态数据
-    void prepare_next_graph_execution_async(size_t next_rope_offset, size_t next_total_seq_len, int layer_idx,
-                                            KVCache<T>* kv_cache);  // 异步准备下一次图执行的动态数据
 
     void initialize_cuda_graph_with_kv_cache(KVCache<T>* kv_cache);  // 使用真实KV cache初始化CUDA图
 
@@ -267,6 +251,16 @@ class QwenModel : public BaseModel {
 
     // 统一算子接口
     std::unique_ptr<op::UnifiedOperators<T>> operators_;
+    
+    // CPU算子接口（用于sample操作）
+    std::unique_ptr<op::UnifiedOperators<T>> cpu_operators_;
+    
+    // Sample模式选择
+    SampleMode sample_mode_ = SampleMode::GPU;  // 默认使用GPU sample，性能最佳
+    
+    // 批量offset优化：预计算并缓存下一轮的offset值
+    std::vector<int> next_batch_offsets_;
+    bool offsets_prepared_ = false;
 
     // 推理模式控制 - 默认使用常规CUDA推理，手动修改此值来测试CUDA图
     bool use_cuda_graph_ = true;  // 改为true来启用CUDA图推理
@@ -285,7 +279,7 @@ class QwenModel : public BaseModel {
     Tensor<float> rope_sin_cos_cache_;  // 存储预计算的sin/cos值，形状为[max_seq_len, head_dim]
 
     size_t* d_rope_offset_;  // 设备端固定内存存储offset
-    std::vector<int*> out_offset_ptr_;
+    int* d_offset_array_;    // 设备端连续offset数组，所有层共享，通过索引访问
 
     std::vector<Tensor<T>> fixed_k_buffers_;  // 每层的K投影固定缓冲区
     std::vector<Tensor<T>> fixed_v_buffers_;  // 每层的V投影固定缓冲区

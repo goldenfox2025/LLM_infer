@@ -7,6 +7,7 @@
 #include "operators/cpu/multiply_cpu.hpp"
 #include "operators/cpu/rms_norm_cpu.hpp"
 #include "operators/cpu/rope_cpu.hpp"
+#include "operators/cpu/sample_cpu.hpp"
 #include "operators/cpu/silu_cpu.hpp"
 #include "operators/cuda/add_cuda.cuh"
 #include "operators/cuda/matmul/matmul_cuda.cuh"
@@ -58,6 +59,11 @@ class OperatorFactory {
     auto matmul_cpu = std::make_shared<MatmulCPUOperator<T>>();
     registry.registerOperator(OperatorType::MATMUL, OperatorPlatform::CPU,
                               matmul_cpu);
+
+    // 注册Sample CPU算子
+    auto sample_cpu = std::make_shared<SampleCPUOperator<T>>();
+    registry.registerOperator(OperatorType::SAMPLE, OperatorPlatform::CPU,
+                              sample_cpu);
 
     // 注册其他CPU算子...
   }

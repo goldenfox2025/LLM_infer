@@ -99,11 +99,11 @@ void rope_with_device_offset(Tensor<T> *tensor, const size_t *d_offset, float th
 
 template <typename T>
 void rope_with_precomputed_cache(Tensor<T> *tensor, const size_t *d_offset, const Tensor<float> *sin_cos_cache,
-                                 cudaStream_t stream = nullptr, int *dst_off = nullptr);
+                                 cudaStream_t stream = nullptr, int *offset_array = nullptr, int layer_index = 0);
 
 template <typename T>
 void gemv_qkv(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v, const Tensor<T> *bias,
-              int *out_offset, size_t Q_len, size_t K_len, size_t V_len, cudaStream_t stream = nullptr);
+              int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len, cudaStream_t stream = nullptr);
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = true, int offset = 0,

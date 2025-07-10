@@ -276,6 +276,20 @@ class UnifiedOperators {
                            d_states, stream);
   }
 
+  // CPU版本的sample方法
+  uint32_t sample_cpu(Tensor<T>&& logits, float temperature, float top_p, size_t top_k) {
+    auto op = OperatorFactory<T>::getSampleOperator(OperatorPlatform::CPU);
+    if (!op) {
+      throw std::runtime_error("CPU Sample operator not registered");
+    }
+    
+    // 调用CPU sample算子，返回指针，需要解引用
+    uint32_t* result_ptr = (*op)(std::move(logits), temperature, top_p, top_k, nullptr);
+    uint32_t result = *result_ptr;
+    delete result_ptr;  // 释放内存
+    return result;
+  }
+
   // 动态Flash Attention包装函数
   void dynamic_flash_attention(Tensor<T>& Q, const Tensor<T>& K,
                                const Tensor<T>& V, Tensor<T>& output,
