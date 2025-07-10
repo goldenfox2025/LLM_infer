@@ -2031,11 +2031,11 @@ Tensor<T> QwenModel<T>::forward_for_graph_logits_only(const Tensor<uint32_t> *in
                   << std::endl;
         prepare_graph_execution(rope_offset, total_seq_len, graph_stream_, pingpong_index_);
     } else {
-        cudaStreamSynchronize(graph_stream_);
+        cudaStreamSynchronize(prep_stream_);
     }
     last_kv_cache_size_ = kv_cache->size();
-    cudaMemcpyAsync(pingpong, &pingpong_index_, sizeof(int), cudaMemcpyHostToDevice, graph_stream_);
-    cudaStreamSynchronize(graph_stream_);
+    
+    // cudaStreamSynchronize(graph_stream_);
     cudaError_t result = cudaGraphLaunch(graph_exec_, graph_stream_);
 
     pingpong_index_ = 1 - pingpong_index_;
@@ -2045,8 +2045,8 @@ Tensor<T> QwenModel<T>::forward_for_graph_logits_only(const Tensor<uint32_t> *in
     }
     // compute_next_offsets_async(total_seq_len);
 
-    prepare_graph_execution(rope_offset + 1, total_seq_len + 1, graph_stream_, pingpong_index_);
-
+    prepare_graph_execution(rope_offset + 1, total_seq_len + 1, prep_stream_, pingpong_index_);
+cudaMemcpyAsync(pingpong, &pingpong_index_, sizeof(int), cudaMemcpyHostToDevice, graph_stream_);
     return graph_output_tensor_;
 }
 
