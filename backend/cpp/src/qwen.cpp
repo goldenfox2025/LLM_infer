@@ -965,7 +965,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
 
         // QKV融合优化：对于非量化模型，检查是否有合并的QKV权重
         std::string merged_qkv_key = "merged_qkv_" + std::to_string(i);
-        if (quant_type_ == 0 && params_.find(merged_qkv_key) != params_.end()) {
+        if (quant_type_ == -1 && params_.find(merged_qkv_key) != params_.end()) {
             // 使用合并的QKV权重进行单次矩阵乘法
             auto merged_qkv_weight = params_.at(merged_qkv_key);
 
@@ -1087,16 +1087,16 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
 
         Tensor<T> att_heads({seq_len, n_heads_, head_dim_}, Device::CUDA);
 
-        cuda_OP::flash_attention_prefill(Q_3d, total_K, total_V, att_heads, n_heads_, n_kv_heads_, head_dim_, seq_len,
-                                         total_seq_len, offset, nullptr);
+        // cuda_OP::flash_attention_prefill(Q_3d, total_K, total_V, att_heads, n_heads_, n_kv_heads_, head_dim_, seq_len,
+        //                                  total_seq_len, offset, nullptr);
 
         // debugPrintTensor(att_heads, "att_heads");
         // 旧的实现（注释掉）
-        // Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
-        // cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores, head_dim_);
-        // cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
-        // cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads, n_heads_, head_dim_, total_seq_len,
-        //                                     n_kv_heads_);
+        Tensor<T> att_scores({seq_len, n_heads_, total_seq_len}, Device::CUDA);
+        cuda_OP::compute_attention_scores_prefill(Q_3d, total_K, att_scores, head_dim_);
+        cuda_OP::softmax(&att_scores, &att_scores, /*dim=*/2, true, offset);
+        cuda_OP::compute_att_output_prefill(att_scores, total_V, att_heads, n_heads_, head_dim_, total_seq_len,
+                                            n_kv_heads_);
 
         // 将注意力输出投影回原始维度
         Tensor<T> att_proj({seq_len, hidden_size_}, Device::CUDA);
@@ -2071,9 +2071,9 @@ template <typename T>
 uint32_t *QwenModel<T>::allocate_gpu_result(uint32_t result) {
 
 
-    err = cudaMemcpy(graph_input_tensor_->data_ptr(), &result, sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(graph_input_tensor_.data_ptr(), &result, sizeof(uint32_t), cudaMemcpyHostToDevice);
 
-    return graph_input_tensor_->data_ptr(),;
+    return graph_input_tensor_.data_ptr();
 }
 
 // -------------------------------
