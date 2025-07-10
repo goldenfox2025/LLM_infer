@@ -1014,28 +1014,43 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        // 使用预计算缓存版本的RoPE，复用forward_for_graph的机制
+        // 对Q执行RoPE（原地操作）
         if (has_rope_cache()) {
             cuda_OP::rope_with_precomputed_cache(&q_buf_view, d_rope_offset_, &rope_sin_cos_cache_, nullptr, nullptr,
-                                                 0);
-            cuda_OP::rope_with_precomputed_cache(&k_buf_view, d_rope_offset_, &rope_sin_cos_cache_, nullptr, nullptr,
                                                  0);
         } else {
             // 回退到原来的动态计算版本
             cuda_OP::rope_with_device_offset(&q_buf_view, d_rope_offset_, rope_theta_);
-            cuda_OP::rope_with_device_offset(&k_buf_view, d_rope_offset_, rope_theta_);
         }
 
-        for (size_t j = 0; j < seq_len; j++) {
-            // 获取对应的 k 和 v slice
-            Tensor<T> &k_slice = kv_cache->k_cache(i, offset + j);
-            Tensor<T> &v_slice = kv_cache->v_cache(i, offset + j);
+        // 对K执行RoPE并同时写入KV cache，对V直接写入KV cache
+        if (has_rope_cache()) {
+            // 准备KV cache切片指针数组
+            std::vector<Tensor<T>*> k_cache_slices(seq_len);
+            std::vector<Tensor<T>*> v_cache_slices(seq_len);
+            
+            for (size_t j = 0; j < seq_len; j++) {
+                k_cache_slices[j] = &kv_cache->k_cache(i, offset + j);
+                v_cache_slices[j] = &kv_cache->v_cache(i, offset + j);
+            }
+            
+            cuda_OP::rope_k_precompute_with_write_kv(k_buf_view, v_buf_view, k_cache_slices, v_cache_slices,
+                                                     d_rope_offset_, &rope_sin_cos_cache_);
+        } else {
+            // 回退版本：先对K执行RoPE，再分别写入KV cache
+            cuda_OP::rope_with_device_offset(&k_buf_view, d_rope_offset_, rope_theta_);
+            
+            for (size_t j = 0; j < seq_len; j++) {
+                // 获取对应的 k 和 v slice
+                Tensor<T> &k_slice = kv_cache->k_cache(i, offset + j);
+                Tensor<T> &v_slice = kv_cache->v_cache(i, offset + j);
 
-            // 异步拷贝：使用 cudaMemcpyAsync 替换同步版本
-            cudaMemcpyAsync(k_slice.data_ptr(), k_buf_view.data_ptr() + j * k_buf_view.strides()[0],
-                            n_kv_heads_ * head_dim_ * sizeof(T), cudaMemcpyDeviceToDevice);
-            cudaMemcpyAsync(v_slice.data_ptr(), v_buf_view.data_ptr() + j * v_buf_view.strides()[0],
-                            n_kv_heads_ * head_dim_ * sizeof(T), cudaMemcpyDeviceToDevice);
+                // 异步拷贝：使用 cudaMemcpyAsync 替换同步版本
+                cudaMemcpyAsync(k_slice.data_ptr(), k_buf_view.data_ptr() + j * k_buf_view.strides()[0],
+                                n_kv_heads_ * head_dim_ * sizeof(T), cudaMemcpyDeviceToDevice);
+                cudaMemcpyAsync(v_slice.data_ptr(), v_buf_view.data_ptr() + j * v_buf_view.strides()[0],
+                                n_kv_heads_ * head_dim_ * sizeof(T), cudaMemcpyDeviceToDevice);
+            }
         }
 
         // 重新格式化Q用于注意力计算

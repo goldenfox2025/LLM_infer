@@ -113,6 +113,18 @@ void gemv_qkv_rope(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<
                    int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len,
                    size_t n_heads, size_t n_kv_heads, size_t head_dim,
                    cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
+
+// RoPE + KV Cache写入融合算子：对K执行RoPE并直接写入KV cache，对V直接写入KV cache
+template <typename T>
+void rope_k_precompute_with_write_kv(
+    const Tensor<T> &k_input,           // 输入的K张量 [seq_len, n_kv_heads, head_dim]
+    const Tensor<T> &v_input,           // 输入的V张量 [seq_len, n_kv_heads, head_dim]
+    const std::vector<Tensor<T>*> &k_cache_slices,  // K cache切片数组
+    const std::vector<Tensor<T>*> &v_cache_slices,  // V cache切片数组
+    const size_t *d_offset,             // RoPE offset
+    const Tensor<float> *sin_cos_cache, // 预计算的sin/cos缓存
+    cudaStream_t stream = nullptr       // CUDA stream
+);
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
 void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = true, int offset = 0,
