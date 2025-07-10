@@ -312,4 +312,35 @@ void flash_attention_prefill(const Tensor<T> &Q,  // Query张量 [seq_len, n_hea
                              int offset,          // Q在整个序列中的起始偏移量
                              cudaStream_t stream = nullptr);
 
+// WMMA-optimized attention score computation (Q @ K^T)
+template <typename T>
+void compute_attention_scores_prefill_wmma(const Tensor<T> &Q, const Tensor<T> &K, Tensor<T> &att_scores, 
+                                           size_t head_dim, cudaStream_t stream = nullptr);
+
+// WMMA-optimized attention output computation (attention_scores @ V)
+template <typename T>
+void compute_att_output_prefill_wmma(const Tensor<T> &att_probs, const Tensor<T> &V, Tensor<T> &att_output,
+                                     size_t n_q_heads, size_t head_dim, size_t total_seq_len, size_t n_kv_heads,
+                                     cudaStream_t stream = nullptr);
+
+// cuBLAS-based GQA optimization for large-scale attention computation
+template <typename T>
+void compute_attention_scores_prefill_cublas(const Tensor<T> &Q, const Tensor<T> &K, Tensor<T> &att_scores,
+                                             size_t head_dim, cudaStream_t stream = nullptr);
+
+template <typename T>
+void compute_att_output_prefill_cublas(const Tensor<T> &att_probs, const Tensor<T> &V, Tensor<T> &att_output,
+                                       size_t n_q_heads, size_t head_dim, size_t total_seq_len, size_t n_kv_heads,
+                                       cudaStream_t stream = nullptr);
+
+// Adaptive functions that automatically choose the best implementation
+template <typename T>
+void compute_attention_scores_prefill_adaptive(const Tensor<T> &Q, const Tensor<T> &K, Tensor<T> &att_scores,
+                                               size_t head_dim, cudaStream_t stream = nullptr);
+
+template <typename T>
+void compute_att_output_prefill_adaptive(const Tensor<T> &att_probs, const Tensor<T> &V, Tensor<T> &att_output,
+                                         size_t n_q_heads, size_t head_dim, size_t total_seq_len, size_t n_kv_heads,
+                                         cudaStream_t stream = nullptr);
+
 }  // namespace cuda_OP

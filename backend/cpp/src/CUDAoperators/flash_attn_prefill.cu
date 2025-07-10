@@ -481,43 +481,42 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
     // --- Shared Memory Optimization ---
     // All shared memory is allocated as a single 1D buffer. Pointers are then
     // used to access different sections of this buffer.
-    // Memory for k_smem is reused for pv_smem.
-    // Memory for scores_smem is reused for p_smem.
+    // Fixed memory aliasing issues: separate k_smem and pv_smem, scores_smem and p_smem
 
     // Define alignment helper
     constexpr auto align_size = [](size_t size) { return ((size + 15) / 16) * 16; };
 
     // Calculate offsets for each buffer in the unified shared memory array
     const size_t q_smem_size = align_size(B_r * DQKV * sizeof(T));
+    const size_t k_smem_size = align_size(B_c * DQKV * sizeof(T));
     const size_t v_smem_size = align_size(B_c * DQKV * sizeof(T));
     const size_t o_smem_size = align_size(B_r * DQKV * sizeof(float));
     const size_t stats_size = align_size(B_r * 2 * sizeof(float));  // For m_stats and l_stats
+    const size_t scores_smem_size = align_size(B_r * B_c * sizeof(float));
+    const size_t p_smem_size = align_size(B_r * B_c * sizeof(T));
+    const size_t pv_smem_size = align_size(B_r * DQKV * sizeof(float));
 
-    // Union-like scratch space for buffers that are reused
-    const size_t k_pv_smem_size = align_size(max(sizeof(T) * B_c * DQKV, sizeof(float) * B_r * DQKV));
-    const size_t scores_p_smem_size = align_size(sizeof(float) * B_r * B_c);  // float is larger than T
-
-    const size_t v_smem_offset = q_smem_size;
+    const size_t k_smem_offset = q_smem_size;
+    const size_t v_smem_offset = k_smem_offset + k_smem_size;
     const size_t o_smem_offset = v_smem_offset + v_smem_size;
     const size_t stats_offset = o_smem_offset + o_smem_size;
-    const size_t k_pv_smem_offset = stats_offset + stats_size;
-    const size_t scores_p_smem_offset = k_pv_smem_offset + k_pv_smem_size;
+    const size_t scores_smem_offset = stats_offset + stats_size;
+    const size_t p_smem_offset = scores_smem_offset + scores_smem_size;
+    const size_t pv_smem_offset = p_smem_offset + p_smem_size;
 
     // Declare the single shared memory buffer
     extern __shared__ unsigned char smem_buffer[];
 
     // Create typed pointers to the different sections of the buffer
     T* q_smem = reinterpret_cast<T*>(smem_buffer);
+    T* k_smem = reinterpret_cast<T*>(smem_buffer + k_smem_offset);
     T* v_smem = reinterpret_cast<T*>(smem_buffer + v_smem_offset);
     float* o_smem = reinterpret_cast<float*>(smem_buffer + o_smem_offset);
     float* m_stats = reinterpret_cast<float*>(smem_buffer + stats_offset);
     float* l_stats = reinterpret_cast<float*>(smem_buffer + stats_offset + B_r * sizeof(float));
-
-    // Pointers for reused memory regions
-    T* k_smem = reinterpret_cast<T*>(smem_buffer + k_pv_smem_offset);
-    float* pv_smem = reinterpret_cast<float*>(smem_buffer + k_pv_smem_offset);
-    float* scores_smem = reinterpret_cast<float*>(smem_buffer + scores_p_smem_offset);
-    T* p_smem = reinterpret_cast<T*>(smem_buffer + scores_p_smem_offset);
+    float* scores_smem = reinterpret_cast<float*>(smem_buffer + scores_smem_offset);
+    T* p_smem = reinterpret_cast<T*>(smem_buffer + p_smem_offset);
+    float* pv_smem = reinterpret_cast<float*>(smem_buffer + pv_smem_offset);
 
     // 外循环：遍历当前线程块负责的Q段
     for (int q_block_offset = 0; q_block_offset < T_r; q_block_offset += B_r) {
@@ -577,7 +576,7 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
                 for (int k_step = 0; k_step < DQKV; k_step += 16) {
                     FragmentA fragA_load;
                     FragmentB fragB_load;
-                    // Note the 1D indexing for smem pointers
+                    // Fixed: Correct 1D indexing and stride for Q@K^T computation
                     const T* smemA_ptr = &q_smem[warp_m_id * 16 * DQKV + k_step];
                     const T* smemB_ptr = &k_smem[warp_n_id * 16 * DQKV + k_step];
 
@@ -588,7 +587,9 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
 
                 const int out_m_base = warp_m_id * 16;
                 const int out_n_base = warp_n_id * 16;
-                wmma::store_matrix_sync(&scores_smem[out_m_base * B_c + out_n_base], fragC, B_c, wmma::mem_row_major);
+                // Fixed: Store with correct 1D indexing
+                float* scores_ptr = &scores_smem[out_m_base * B_c + out_n_base];
+                wmma::store_matrix_sync(scores_ptr, fragC, B_c, wmma::mem_row_major);
             }
             __syncthreads();
 
@@ -628,7 +629,7 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
                 float m_new = max(m_prev, m_block);
 
                 float l_block = 0.0f;
-                // Note: p_smem is aliased with scores_smem.
+                // Fixed: Use separate p_smem (no longer aliased with scores_smem)
                 for (int col_idx = lane_id; col_idx < B_c; col_idx += warpSize) {
                     float s = scores_smem[q_smem_row * B_c + col_idx];
                     float p = expf(s - m_new);
@@ -649,7 +650,7 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
             }
             __syncthreads();
 
-            // P×V矩阵乘法. Note: pv_smem is aliased with k_smem
+            // P×V矩阵乘法. Fixed: pv_smem is now separate from k_smem
             constexpr int cur_WARP_M = B_r / 16;
             constexpr int cur_WARP_N = DQKV / 16;
             const int cur_warp_m_id = warp_id / cur_WARP_N;
@@ -662,7 +663,9 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
                 for (int k_base = 0; k_base < B_c; k_base += 16) {
                     FragmentA fragA_load;
                     FragmentB_t fragB_load;
+                    // Fixed: Correct 1D indexing for P matrix (B_r x B_c)
                     const T* smemA_ptr = &p_smem[cur_warp_m_id * 16 * B_c + k_base];
+                    // Fixed: Correct 1D indexing for V matrix (B_c x DQKV)
                     const T* smemB_ptr = &v_smem[k_base * DQKV + cur_warp_n_id * 16];
 
                     wmma::load_matrix_sync(fragA_load, smemA_ptr, B_c);
@@ -672,7 +675,9 @@ __global__ void flash_attn_prefill_kernel_v2(const T* __restrict__ q_global, con
 
                 const int out_m_base = cur_warp_m_id * 16;
                 const int out_n_base = cur_warp_n_id * 16;
-                wmma::store_matrix_sync(&pv_smem[out_m_base * DQKV + out_n_base], fragC, DQKV, wmma::mem_row_major);
+                // Fixed: Store with correct 1D indexing
+                float* pv_ptr = &pv_smem[out_m_base * DQKV + out_n_base];
+                wmma::store_matrix_sync(pv_ptr, fragC, DQKV, wmma::mem_row_major);
             }
             __syncthreads();
 
@@ -730,15 +735,18 @@ void flash_attention_prefill(const Tensor<T>& Q, const Tensor<T>& K, const Tenso
         return ((size + alignment - 1) / alignment) * alignment;
     };
 
+    // Fixed: Calculate separate buffer sizes (no more aliasing)
     const size_t q_smem_size = align_size(B_r * DQKV_val * sizeof(T));
+    const size_t k_smem_size = align_size(B_c * DQKV_val * sizeof(T));
     const size_t v_smem_size = align_size(B_c * DQKV_val * sizeof(T));
     const size_t o_smem_size = align_size(B_r * DQKV_val * sizeof(float));
     const size_t stats_size = align_size(B_r * 2 * sizeof(float));
-    const size_t k_pv_smem_size = align_size(std::max(sizeof(T) * B_c * DQKV_val, sizeof(float) * B_r * DQKV_val));
-    const size_t scores_p_smem_size = align_size(sizeof(float) * B_r * B_c);
+    const size_t scores_smem_size = align_size(B_r * B_c * sizeof(float));
+    const size_t p_smem_size = align_size(B_r * B_c * sizeof(T));
+    const size_t pv_smem_size = align_size(B_r * DQKV_val * sizeof(float));
 
     const size_t total_smem_size =
-        q_smem_size + v_smem_size + o_smem_size + stats_size + k_pv_smem_size + scores_p_smem_size;
+        q_smem_size + k_smem_size + v_smem_size + o_smem_size + stats_size + scores_smem_size + p_smem_size + pv_smem_size;
 
     flash_attn_prefill_kernel_v2<T, B_c, B_r, T_r, WARP_NUM, DQKV_val>
         <<<grid, block, total_smem_size, stream>>>(Q.data_ptr(), K.data_ptr(), V.data_ptr(), output.data_ptr(), n_heads,

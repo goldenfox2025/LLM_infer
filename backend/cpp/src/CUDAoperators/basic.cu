@@ -1033,6 +1033,19 @@ template void compute_attention_scores_prefill<float>(const Tensor<float> &, con
 template void compute_att_output_prefill<float>(const Tensor<float> &, const Tensor<float> &, Tensor<float> &, size_t,
                                                 size_t, size_t, size_t, cudaStream_t);
 
+// 对 __half 类型的实例化
+template void rope<__half>(Tensor<__half> *, size_t, float, cudaStream_t);
+template void rms_norm<__half>(Tensor<__half> *, const Tensor<__half> *, const Tensor<__half> *, float, cudaStream_t);
+
+template void compute_attention_scores<__half>(const Tensor<__half> &, const Tensor<__half> &, size_t, size_t,
+                                               Tensor<__half> &, size_t, cudaStream_t);
+template void compute_att_output<__half>(const Tensor<__half> &, const Tensor<__half> &, size_t, size_t,
+                                         Tensor<__half> &, size_t, cudaStream_t);
+template void compute_attention_scores_prefill<__half>(const Tensor<__half> &, const Tensor<__half> &, Tensor<__half> &,
+                                                       size_t, cudaStream_t);
+template void compute_att_output_prefill<__half>(const Tensor<__half> &, const Tensor<__half> &, Tensor<__half> &,
+                                                 size_t, size_t, size_t, size_t, cudaStream_t);
+
 // 对 nvbf16 类型的实例化
 
 template void rope<nvbf16>(Tensor<nvbf16> *, size_t, float, cudaStream_t);
