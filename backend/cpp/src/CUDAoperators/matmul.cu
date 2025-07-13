@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "advanced_kernels.cuh"  // 添加高性能kernel头文件
 #include "cudaOP.cuh"
 #include "cutlass/cutlass.h"
 #include "cutlass/epilogue/thread/linear_combination.h"
@@ -678,6 +679,8 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
         my_cutlass_dtype_t dtype;
         if constexpr (std::is_same_v<T, __nv_bfloat16>) {
             dtype = my_cutlass_dtype_t::MY_CUTLASS_DTYPE_BF16;
+        } else if constexpr (std::is_same_v<T, float>) {
+            dtype = my_cutlass_dtype_t::MY_CUTLASS_DTYPE_FLOAT32;  // 使用正确的枚举值
         } else {
             throw std::runtime_error("Unsupported template type T for cuda_OP::matmul -> cutlass bridge.");
         }
@@ -764,6 +767,29 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
                                                                  static_cast<int>(N), ldc);
         }
         // std::cout << "add_bias_kernel 调用成功" << std::endl;
+        return;
+    } else if (use_ == 3) {
+        // 使用高性能kernel5和kernel6
+        // 只有在 M != 1 时才使用高性能kernel
+        if (M != 1) {
+            // 检查数据类型是否支持
+            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                if (bias == nullptr) {
+                    // 默认使用kernel6 (16x16x16)
+                    advanced_matmul_kernel6<T>(A, B, C, stream);
+                } else {
+                    // 使用kernel6 with bias
+                    advanced_matmul_kernel6_with_bias<T>(A, B, *bias, C, stream);
+                }
+            } else {
+                throw std::runtime_error("Advanced kernels only support bfloat16 type");
+            }
+            return;
+        }
+
+        // 如果M=1，会执行到这里，重新开始use_=1的逻辑
+        // 这里可以递归调用或者直接复制use_=1的逻辑
+        matmul<T>(A, B, C, stream, bias, 1);
         return;
     }
 

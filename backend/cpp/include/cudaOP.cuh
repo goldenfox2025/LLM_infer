@@ -84,7 +84,7 @@ void launch_gemv_scores(const T *x, const T *y, AccT *dst, const int channel_siz
 
 template <typename T>
 void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream = nullptr,
-            const Tensor<T> *bias = nullptr, int use_ = 1);
+            const Tensor<T> *bias = nullptr, int use_ = 3);
 
 // rope 算子，用于位置编码
 template <typename T>
@@ -108,22 +108,20 @@ void gemv_qkv(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k
 
 // Fused GEMV QKV + RoPE operation: compute Q,K,V and apply RoPE to Q,K in a single kernel
 template <typename T>
-void gemv_qkv_rope(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v, 
-                   const Tensor<T> *bias, const size_t *d_offset, const Tensor<float> *sin_cos_cache,
-                   int *offset_array, int layer_index, size_t Q_len, size_t K_len, size_t V_len,
-                   size_t n_heads, size_t n_kv_heads, size_t head_dim,
-                   cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
+void gemv_qkv_rope(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<T> *k, Tensor<T> *v,
+                   const Tensor<T> *bias, const size_t *d_offset, const Tensor<float> *sin_cos_cache, int *offset_array,
+                   int layer_index, size_t Q_len, size_t K_len, size_t V_len, size_t n_heads, size_t n_kv_heads,
+                   size_t head_dim, cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
 
 // RoPE + KV Cache写入融合算子：对K执行RoPE并直接写入KV cache，对V直接写入KV cache
 template <typename T>
-void rope_k_precompute_with_write_kv(
-    const Tensor<T> &k_input,           // 输入的K张量 [seq_len, n_kv_heads, head_dim]
-    const Tensor<T> &v_input,           // 输入的V张量 [seq_len, n_kv_heads, head_dim]
-    const std::vector<Tensor<T>*> &k_cache_slices,  // K cache切片数组
-    const std::vector<Tensor<T>*> &v_cache_slices,  // V cache切片数组
-    const size_t *d_offset,             // RoPE offset
-    const Tensor<float> *sin_cos_cache, // 预计算的sin/cos缓存
-    cudaStream_t stream = nullptr       // CUDA stream
+void rope_k_precompute_with_write_kv(const Tensor<T> &k_input,  // 输入的K张量 [seq_len, n_kv_heads, head_dim]
+                                     const Tensor<T> &v_input,  // 输入的V张量 [seq_len, n_kv_heads, head_dim]
+                                     const std::vector<Tensor<T> *> &k_cache_slices,  // K cache切片数组
+                                     const std::vector<Tensor<T> *> &v_cache_slices,  // V cache切片数组
+                                     const size_t *d_offset,                          // RoPE offset
+                                     const Tensor<float> *sin_cos_cache,              // 预计算的sin/cos缓存
+                                     cudaStream_t stream = nullptr                    // CUDA stream
 );
 // softmax 算子，dim 指定操作维度，mask 与 offset 为可选参数
 template <typename T>
@@ -334,7 +332,7 @@ void flash_attention_prefill(const Tensor<T> &Q,  // Query张量 [seq_len, n_hea
 
 // WMMA-optimized attention score computation (Q @ K^T)
 template <typename T>
-void compute_attention_scores_prefill_wmma(const Tensor<T> &Q, const Tensor<T> &K, Tensor<T> &att_scores, 
+void compute_attention_scores_prefill_wmma(const Tensor<T> &Q, const Tensor<T> &K, Tensor<T> &att_scores,
                                            size_t head_dim, cudaStream_t stream = nullptr);
 
 // WMMA-optimized attention output computation (attention_scores @ V)
@@ -362,5 +360,24 @@ template <typename T>
 void compute_att_output_prefill_adaptive(const Tensor<T> &att_probs, const Tensor<T> &V, Tensor<T> &att_output,
                                          size_t n_q_heads, size_t head_dim, size_t total_seq_len, size_t n_kv_heads,
                                          cudaStream_t stream = nullptr);
+
+// 高性能kernel5和kernel6函数声明
+// kernel5: 16x8x16 MMA指令，不带bias
+template <typename T>
+void advanced_matmul_kernel5(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream = nullptr);
+
+// kernel5: 16x8x16 MMA指令，带bias
+template <typename T>
+void advanced_matmul_kernel5_with_bias(const Tensor<T> &A, const Tensor<T> &B, const Tensor<T> &bias, Tensor<T> *C,
+                                       cudaStream_t stream = nullptr);
+
+// kernel6: 16x16x16 MMA指令，不带bias
+template <typename T>
+void advanced_matmul_kernel6(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream = nullptr);
+
+// kernel6: 16x16x16 MMA指令，带bias
+template <typename T>
+void advanced_matmul_kernel6_with_bias(const Tensor<T> &A, const Tensor<T> &B, const Tensor<T> &bias, Tensor<T> *C,
+                                       cudaStream_t stream = nullptr);
 
 }  // namespace cuda_OP
