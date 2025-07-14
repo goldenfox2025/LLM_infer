@@ -380,4 +380,13 @@ template <typename T>
 void advanced_matmul_kernel6_with_bias(const Tensor<T> &A, const Tensor<T> &B, const Tensor<T> &bias, Tensor<T> *C,
                                        cudaStream_t stream = nullptr);
 
+// cute2: 基于CUTLASS CuTe库的高性能内核，不带bias
+template <typename T>
+void cute2_matmul_kernel(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream = nullptr);
+
+// cute2: 基于CUTLASS CuTe库的高性能内核，带bias
+template <typename T>
+void cute2_matmul_kernel_with_bias(const Tensor<T> &A, const Tensor<T> &B, const Tensor<T> &bias, Tensor<T> *C,
+                                   cudaStream_t stream = nullptr);
+
 }  // namespace cuda_OP

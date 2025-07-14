@@ -138,6 +138,60 @@ void advanced_matmul_kernel6_with_bias(const Tensor<T> &A, const Tensor<T> &B, c
     }
 }
 
+// cute2: 基于CUTLASS CuTe库的高性能内核，不带bias
+template <typename T>
+void cute2_matmul_kernel(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream) {
+    const std::vector<size_t> &A_shape = A.sizes();
+    const std::vector<size_t> &B_shape = B.sizes();
+
+    size_t M = A_shape[0];
+    size_t K = A_shape[1];
+    size_t N = B_shape[1];
+
+    // 调用内核函数
+    advanced_kernels::cute2_matmul_kernel<T>(A.data_ptr(), B.data_ptr(), C->data_ptr(), static_cast<int>(M),
+                                             static_cast<int>(N), static_cast<int>(K), stream);
+}
+
+// cute2: 基于CUTLASS CuTe库的高性能内核，带bias
+// 使用add_bias_kernel添加bias
+template <typename T>
+__global__ void add_bias_kernel(T *C, const T *bias, int M, int N) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (row < M && col < N) {
+        int c_index = row * N + col;
+        C[c_index] = C[c_index] + bias[col];
+    }
+}
+template <typename T>
+void cute2_matmul_kernel_with_bias(const Tensor<T> &A, const Tensor<T> &B, const Tensor<T> &bias, Tensor<T> *C,
+                                   cudaStream_t stream) {
+    const std::vector<size_t> &A_shape = A.sizes();
+    const std::vector<size_t> &B_shape = B.sizes();
+    const std::vector<size_t> &bias_shape = bias.sizes();
+
+    size_t M = A_shape[0];
+    size_t K = A_shape[1];
+    size_t N = B_shape[1];
+
+    // 检查维度匹配
+
+    if (bias_shape.size() != 1 || bias_shape[0] != N) {
+        throw std::runtime_error("Bias dimensions do not match for cute2 kernel");
+    }
+
+    // 先进行矩阵乘法，然后加bias
+    advanced_kernels::cute2_matmul_kernel<T>(A.data_ptr(), B.data_ptr(), C->data_ptr(), static_cast<int>(M),
+                                             static_cast<int>(N), static_cast<int>(K), stream);
+
+    // 添加bias
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
+    add_bias_kernel<T>
+        <<<gridDim, blockDim, 0, stream>>>(C->data_ptr(), bias.data_ptr(), static_cast<int>(M), static_cast<int>(N));
+}
+
 // 显式实例化模板
 template void advanced_matmul_kernel5<float>(const Tensor<float> &A, const Tensor<float> &B, Tensor<float> *C,
                                              cudaStream_t stream);
@@ -164,5 +218,14 @@ template void advanced_matmul_kernel6_with_bias<__nv_bfloat16>(const Tensor<__nv
                                                                const Tensor<__nv_bfloat16> &B,
                                                                const Tensor<__nv_bfloat16> &bias,
                                                                Tensor<__nv_bfloat16> *C, cudaStream_t stream);
+
+// 重新启用cute2的实例化，使用正确的类型名称
+template void cute2_matmul_kernel<__nv_bfloat16>(const Tensor<__nv_bfloat16> &A, const Tensor<__nv_bfloat16> &B,
+                                                 Tensor<__nv_bfloat16> *C, cudaStream_t stream);
+
+template void cute2_matmul_kernel_with_bias<__nv_bfloat16>(const Tensor<__nv_bfloat16> &A,
+                                                           const Tensor<__nv_bfloat16> &B,
+                                                           const Tensor<__nv_bfloat16> &bias, Tensor<__nv_bfloat16> *C,
+                                                           cudaStream_t stream);
 
 }  // namespace cuda_OP

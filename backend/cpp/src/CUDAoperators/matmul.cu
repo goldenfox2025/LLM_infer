@@ -779,7 +779,7 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
                     advanced_matmul_kernel6<T>(A, B, C, stream);
                 } else {
                     // 使用kernel6 with bias
-                    advanced_matmul_kernel6_with_bias<T>(A, B, *bias, C, stream);
+                    cute2_matmul_kernel_with_bias<T>(A, B, *bias, C, stream);
                 }
             } else {
                 throw std::runtime_error("Advanced kernels only support bfloat16 type");
@@ -789,6 +789,36 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
 
         // 如果M=1，会执行到这里，重新开始use_=1的逻辑
         // 这里可以递归调用或者直接复制use_=1的逻辑
+        matmul<T>(A, B, C, stream, bias, 1);
+        return;
+    } else if (use_ == 4) {
+        // 使用cute2高性能内核
+        // 只有在 M != 1 时才使用高性能kernel
+        if (M != 1) {
+            // 检查数据类型是否支持
+            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                if (bias == nullptr) {
+                    // 使用cute2无bias版本
+                    cute2_matmul_kernel<T>(A, B, C, stream);
+                } else {
+                    // 使用cute2带bias版本（暂未实现，使用分离的bias添加）
+                    cute2_matmul_kernel<T>(A, B, C, stream);
+
+                    // 手动添加bias
+                    dim3 blockDim(16, 16);
+                    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
+
+                    // 使用matmul.cu中已有的add_bias_kernel
+                    add_bias_kernel<T><<<gridDim, blockDim, 0, stream>>>(
+                        C->data_ptr(), bias->data_ptr(), static_cast<int>(M), static_cast<int>(N), static_cast<int>(N));
+                }
+            } else {
+                throw std::runtime_error("cute2 kernels only support bfloat16 type");
+            }
+            return;
+        }
+
+        // 如果M=1，回退到cuBLAS
         matmul<T>(A, B, C, stream, bias, 1);
         return;
     }
