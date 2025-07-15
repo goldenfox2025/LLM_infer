@@ -129,7 +129,17 @@ void rope_k_precompute_with_write_kv(
 template <typename T>
 void softmax(Tensor<T> *output, const Tensor<T> *input, int dim, bool mask = true, int offset = 0,
              cudaStream_t stream = nullptr);
-
+template <typename T>
+void rope_qkv_precompute_with_write_kv(
+    Tensor<T> *q_tensor,                    // 输入输出的Q张量（可选，如果为nullptr则不处理Q）
+    const Tensor<T> &k_input,               // 输入的K张量 [seq_len, n_kv_heads, head_dim]
+    const Tensor<T> &v_input,               // 输入的V张量 [seq_len, n_kv_heads, head_dim]
+    const std::vector<Tensor<T>*> &k_cache_slices,  // K cache切片数组（用于获取基地址和计算偏移）
+    const std::vector<Tensor<T>*> &v_cache_slices,  // V cache切片数组
+    const size_t *d_offset,                 // RoPE offset
+    const Tensor<float> *sin_cos_cache,     // 预计算的sin/cos缓存
+    cudaStream_t stream                     // CUDA stream
+) ;
 // silu 激活函数算子
 template <typename T>
 void silu(Tensor<T> *output, const Tensor<T> *input, cudaStream_t stream = nullptr);

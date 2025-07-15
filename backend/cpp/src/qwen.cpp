@@ -1008,16 +1008,7 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        // 对Q执行RoPE（原地操作）
-        if (has_rope_cache()) {
-            cuda_OP::rope_with_precomputed_cache(&q_buf_view, d_rope_offset_, &rope_sin_cos_cache_, nullptr, nullptr,
-                                                 0);
-        } else {
-            // 回退到原来的动态计算版本
-            cuda_OP::rope_with_device_offset(&q_buf_view, d_rope_offset_, rope_theta_);
-        }
-
-        // 对K执行RoPE并同时写入KV cache，对V直接写入KV cache
+        // 使用融合的QKV RoPE kernel：对Q执行原地RoPE，对K执行RoPE并写入cache，对V直接写入cache
         if (has_rope_cache()) {
             // 准备KV cache切片指针数组
             std::vector<Tensor<T>*> k_cache_slices(seq_len);
@@ -1028,10 +1019,13 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
                 v_cache_slices[j] = &kv_cache->v_cache(i, offset + j);
             }
             
-            cuda_OP::rope_k_precompute_with_write_kv(k_buf_view, v_buf_view, k_cache_slices, v_cache_slices,
-                                                     d_rope_offset_, &rope_sin_cos_cache_);
+            // 使用增强版融合kernel，支持Q张量原地RoPE + KV写入cache
+            cuda_OP::rope_qkv_precompute_with_write_kv(&q_buf_view, k_buf_view, v_buf_view, 
+                                                       k_cache_slices, v_cache_slices,
+                                                       d_rope_offset_, &rope_sin_cos_cache_, nullptr);
         } else {
-            // 回退版本：先对K执行RoPE，再分别写入KV cache
+            // 回退版本：分别处理Q和KV
+            cuda_OP::rope_with_device_offset(&q_buf_view, d_rope_offset_, rope_theta_);
             cuda_OP::rope_with_device_offset(&k_buf_view, d_rope_offset_, rope_theta_);
             
             for (size_t j = 0; j < seq_len; j++) {

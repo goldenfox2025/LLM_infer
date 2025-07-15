@@ -7,114 +7,118 @@
 
 namespace cuda_OP {
 
-// 增强版RoPE + KV Cache写入融合kernel，支持Q处理、向量化和cp.async
-// 利用KV cache连续内存特性，直接计算地址而不分配指针数组
 template <typename T, int actual_pairs_per_thread = 2>
 __global__ void rope_qkv_fused_kernel(
-    T *q_inout,                 // 输入输出的Q张量 [seq_len, n_heads, head_dim]（原地操作，可选）
-    const T *k_input,           // 输入的K张量 [seq_len, n_kv_heads, head_dim]
-    const T *v_input,           // 输入的V张量 [seq_len, n_kv_heads, head_dim]
-    T *k_cache_base,            // K cache连续内存基地址 [n_layers, max_seq_len, head_dim]
-    T *v_cache_base,            // V cache连续内存基地址 [n_layers, max_seq_len, head_dim]
+    T *q_inout,
+    const T *k_input,
+    const T *v_input,
+    T *k_cache_base,
+    T *v_cache_base,
     size_t seq_len,
-    size_t n_heads,             // Q张量的头数
-    size_t n_kv_heads,          // K,V张量的头数
+    size_t n_heads,
+    size_t n_kv_heads,
     size_t head_dim,
-    size_t max_seq_len,         // KV cache的最大序列长度
-    size_t layer_idx,           // 当前层索引
-    size_t cache_offset,        // 在cache中的起始位置
-    const size_t *d_rope_offset, // RoPE offset
-    const float *sin_cos_cache, // 预计算的sin/cos缓存
-    size_t cache_stride,        // sin_cos_cache的stride
-    int q_input_stride,         // Q输入张量的stride
-    int k_input_stride,         // K输入张量的stride
-    int v_input_stride,         // V输入张量的stride
-    bool process_q = true       // 是否处理Q张量
+    size_t max_seq_len,
+    size_t layer_idx,
+    size_t cache_offset,
+    const size_t *d_rope_offset,
+    const float *sin_cos_cache,
+    size_t cache_stride,
+    int q_input_stride,
+    int k_input_stride,
+    int v_input_stride,
+    bool process_q = true
 ) {
-    // 从设备内存读取rope offset
-    size_t rope_offset = *d_rope_offset;
-    
-    // 线程组织：blockIdx.x = head_idx, blockIdx.y = seq_idx
-    size_t head_idx = blockIdx.x;
-    size_t seq_idx = blockIdx.y;
-    
-    // 边界检查
+    // 使用 extern char[] 作为原始共享内存，避免模板实例化冲突
+    extern __shared__ char s_raw_buffer[];
+    // 将其转换为我们需要的类型化指针
+    T* s_buffer = reinterpret_cast<T*>(s_raw_buffer);
+
+    const size_t rope_offset = *d_rope_offset;
+    const size_t head_idx = blockIdx.x;
+    const size_t seq_idx = blockIdx.y;
+
     if (seq_idx >= seq_len) {
         return;
     }
-    
-    // RoPE作用于向量的前一半和后一半
-    size_t head_dim_half = head_dim / 2;
-    
-    // 当前线程的职责
-    size_t group_idx = threadIdx.x;
-    // Token在原始完整序列中的绝对位置
-    size_t absolute_seq_pos = seq_idx + rope_offset;
-    
-    // 处理Q张量（如果需要）
+
+    const size_t head_dim_half = head_dim / 2;
+    const size_t group_idx = threadIdx.x;
+    const size_t absolute_seq_pos = seq_idx + rope_offset;
+
+    T* q_head_ptr = nullptr;
     if (process_q && head_idx < n_heads) {
-        T *q_head_ptr = q_inout + seq_idx * q_input_stride + head_idx * head_dim;
+        q_head_ptr = q_inout + seq_idx * q_input_stride + head_idx * head_dim;
+    }
+
+    const T* k_head_ptr = nullptr;
+    T* k_cache_ptr = nullptr;
+    const T* v_head_ptr = nullptr;
+    T* v_cache_ptr = nullptr;
+
+    if (head_idx < n_kv_heads) {
+        k_head_ptr = k_input + seq_idx * k_input_stride + head_idx * head_dim;
+        v_head_ptr = v_input + seq_idx * v_input_stride + head_idx * head_dim;
         
-        // 执行Q的RoPE变换（原地操作）
-        for (int i = 0; i < actual_pairs_per_thread; ++i) {
-            size_t rot_dim = group_idx * actual_pairs_per_thread + i;
-            
-            if (rot_dim < head_dim_half) {
-                // 从预计算缓存中读取sin/cos值
-                size_t cache_idx = absolute_seq_pos * cache_stride + rot_dim * 2;
-                float2 sincos = *reinterpret_cast<const float2 *>(sin_cos_cache + cache_idx);
-                
-                // 读取Q张量的要旋转的一对数
-                float x0 = static_cast<float>(q_head_ptr[rot_dim]);
-                float x1 = static_cast<float>(q_head_ptr[rot_dim + head_dim_half]);
-                
-                // 执行RoPE变换并写回Q张量
-                q_head_ptr[rot_dim] = static_cast<T>(x0 * sincos.y - x1 * sincos.x);
-                q_head_ptr[rot_dim + head_dim_half] = static_cast<T>(x0 * sincos.x + x1 * sincos.y);
+        const size_t cache_pos_base = layer_idx * max_seq_len * n_kv_heads * head_dim +
+                                      (cache_offset + seq_idx) * n_kv_heads * head_dim +
+                                      head_idx * head_dim;
+        k_cache_ptr = k_cache_base + cache_pos_base;
+        v_cache_ptr = v_cache_base + cache_pos_base;
+
+        // 将共享内存指针转换为32位无符号整数以匹配asm约束'r'
+        unsigned int s_buffer_base_addr = __cvta_generic_to_shared(s_raw_buffer);
+
+        constexpr int copy_bytes = 16;
+        int copy_chunks = (head_dim * sizeof(T)) / copy_bytes;
+        for (int i = threadIdx.x; i < copy_chunks; i += blockDim.x) {
+            unsigned int dst_addr = s_buffer_base_addr + i * copy_bytes;
+            CP_ASYNC_CA(dst_addr,
+                        v_head_ptr + (i * copy_bytes / sizeof(T)),
+                        copy_bytes);
+        }
+        CP_ASYNC_COMMIT_GROUP();
+    }
+
+    for (int i = 0; i < actual_pairs_per_thread; ++i) {
+        size_t rot_dim = group_idx * actual_pairs_per_thread + i;
+        if (rot_dim < head_dim_half) {
+            size_t cache_idx = absolute_seq_pos * cache_stride + rot_dim * 2;
+            float2 sincos = *reinterpret_cast<const float2 *>(sin_cos_cache + cache_idx);
+
+            if (q_head_ptr) {
+                float q0 = static_cast<float>(q_head_ptr[rot_dim]);
+                float q1 = static_cast<float>(q_head_ptr[rot_dim + head_dim_half]);
+                q_head_ptr[rot_dim] = static_cast<T>(q0 * sincos.y - q1 * sincos.x);
+                q_head_ptr[rot_dim + head_dim_half] = static_cast<T>(q0 * sincos.x + q1 * sincos.y);
+            }
+
+            if (k_head_ptr) {
+                float k0 = static_cast<float>(k_head_ptr[rot_dim]);
+                float k1 = static_cast<float>(k_head_ptr[rot_dim + head_dim_half]);
+                k_cache_ptr[rot_dim] = static_cast<T>(k0 * sincos.y - k1 * sincos.x);
+                k_cache_ptr[rot_dim + head_dim_half] = static_cast<T>(k0 * sincos.x + k1 * sincos.y);
             }
         }
     }
-    
-    // 处理K张量
+
     if (head_idx < n_kv_heads) {
-        const T *k_head_ptr = k_input + seq_idx * k_input_stride + head_idx * head_dim;
-        const T *v_head_ptr = v_input + seq_idx * v_input_stride + head_idx * head_dim;
-        
-        // 计算K cache目标地址：[layer_idx, cache_offset + seq_idx, head_idx * head_dim]
-        size_t k_cache_pos = layer_idx * max_seq_len * n_kv_heads * head_dim + 
-                            (cache_offset + seq_idx) * n_kv_heads * head_dim + 
-                            head_idx * head_dim;
-        T *k_cache_ptr = k_cache_base + k_cache_pos;
-        
-        // 计算V cache目标地址
-        size_t v_cache_pos = layer_idx * max_seq_len * n_kv_heads * head_dim + 
-                            (cache_offset + seq_idx) * n_kv_heads * head_dim + 
-                            head_idx * head_dim;
-        T *v_cache_ptr = v_cache_base + v_cache_pos;
-        
-        // 执行K的RoPE变换并写入cache
-        for (int i = 0; i < actual_pairs_per_thread; ++i) {
-            size_t rot_dim = group_idx * actual_pairs_per_thread + i;
+        CP_ASYNC_WAIT_ALL();
+        __syncthreads();
+
+        constexpr int vec_size = sizeof(float4) / sizeof(T);
+        if (head_dim % vec_size == 0) {
+            const float4* s_v_vec_ptr = reinterpret_cast<const float4*>(s_buffer);
+            float4* v_cache_vec_ptr = reinterpret_cast<float4*>(v_cache_ptr);
+            const size_t head_dim_vec = head_dim / vec_size;
             
-            if (rot_dim < head_dim_half) {
-                // 从预计算缓存中读取sin/cos值
-                size_t cache_idx = absolute_seq_pos * cache_stride + rot_dim * 2;
-                float2 sincos = *reinterpret_cast<const float2 *>(sin_cos_cache + cache_idx);
-                
-                // 读取K张量的要旋转的一对数
-                float x0 = static_cast<float>(k_head_ptr[rot_dim]);
-                float x1 = static_cast<float>(k_head_ptr[rot_dim + head_dim_half]);
-                
-                // 执行RoPE变换并直接写入K cache
-                k_cache_ptr[rot_dim] = static_cast<T>(x0 * sincos.y - x1 * sincos.x);
-                k_cache_ptr[rot_dim + head_dim_half] = static_cast<T>(x0 * sincos.x + x1 * sincos.y);
+            for (size_t i = threadIdx.x; i < head_dim_vec; i += blockDim.x) {
+                v_cache_vec_ptr[i] = s_v_vec_ptr[i];
             }
-        }
-        
-        // V张量直接复制到cache（简化实现）
-        // 每个线程处理一个元素，简单高效
-        for (size_t dim_idx = threadIdx.x; dim_idx < head_dim; dim_idx += blockDim.x) {
-            v_cache_ptr[dim_idx] = v_head_ptr[dim_idx];
+        } else {
+            for (size_t dim_idx = threadIdx.x; dim_idx < head_dim; dim_idx += blockDim.x) {
+                v_cache_ptr[dim_idx] = s_buffer[dim_idx];
+            }
         }
     }
 }

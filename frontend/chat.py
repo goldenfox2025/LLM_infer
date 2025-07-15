@@ -324,7 +324,7 @@ def main():
                        help='模型类型')
     parser.add_argument('--device', type=str, default="cuda", choices=['cuda', 'cpu'], help='运行设备 (cuda 或 cpu)') # qwen不支持cpu 会强制使用cuda
     parser.add_argument('--system_prompt', type=str, default="You are a helpful AI assistant.", help='系统提示词')
-    parser.add_argument('--max_length', type=int, default=224, help='生成文本的最大长度')
+    parser.add_argument('--max_length', type=int, default=424, help='生成文本的最大长度')
     parser.add_argument('--temperature', type=float, default=0.7, help='生成温度')
     parser.add_argument('--top_p', type=float, default=1, help='top-p 采样阈值')
     parser.add_argument('--top_k', type=int, default=20, help='top-k 采样阈值')
