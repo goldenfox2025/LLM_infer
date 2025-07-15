@@ -840,13 +840,12 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         // 残差连接
         // cuda_OP::add(&residual, &residual, &ffn_out);
         if (i == n_layers_ - 1) {
-            // 最后一层的残差连接
-            cuda_OP::add(&residual, &residual, &ffn_out);
+            // 最后一层的残差连接，直接与最终的RMS norm合并
+            auto &norm_weight = params_.at("norm.weight");
+            cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &norm_weight, rms_norm_eps_);
         } else {
             std::string lx = "layers." + std::to_string(i + 1) + ".";
-            auto &attention_norm_weight =
-
-                params_.at(lx + "input_layernorm.weight");
+            auto &attention_norm_weight = params_.at(lx + "input_layernorm.weight");
             cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &attention_norm_weight, rms_norm_eps_);
         }
 
@@ -863,13 +862,8 @@ Tensor<T> QwenModel<T>::forward_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         // }
     }
 
-    // 最终的LayerNorm (RMSNorm)
-    auto &norm_weight = params_.at("norm.weight");
-    Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA, false, "final_h");
-    // 使用新的算子抽象层
-    operators_->rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
-    // 旧算子
-    // cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+    // 最终的LayerNorm已经在最后一层的循环中合并处理了
+    Tensor<T> final_h = hidden_states;
 
     // 保存最终norm
     if (!save_prefix.empty()) {
@@ -1177,8 +1171,9 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         operators_->matmul(&ffn_out, &gate_buf_silu, down_weight, down_bias);
 
         if (i == n_layers_ - 1) {
-            // 最后一层的残差连接
-            cuda_OP::add(&residual, &residual, &ffn_out);
+            // 最后一层的残差连接，直接与最终的RMS norm合并
+            auto &norm_weight = params_.at("norm.weight");
+            cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &norm_weight, rms_norm_eps_);
         } else {
             std::string lx = "layers." + std::to_string(i + 1) + ".";
             auto &attention_norm_weight = params_.at(lx + "input_layernorm.weight");
@@ -1186,9 +1181,8 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         }
     }
 
-    auto &norm_weight = params_.at("norm.weight");
-    Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA);
-    cuda_OP::rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_);
+    // 最终的LayerNorm已经在最后一层的循环中合并处理了
+    Tensor<T> final_h = hidden_states;
 
     auto lm_head_weight = get_weight("lm_head");
 
@@ -1533,8 +1527,9 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         operators_->matmul(&ffn_out, &gate_buf_silu, down_weight, nullptr, stream);
 
         if (i == n_layers_ - 1) {
-            // 最后一层只做残差连接
-            operators_->add(&residual, &residual, &ffn_out, stream);
+            // 最后一层的残差连接，直接与最终的RMS norm合并
+            auto &norm_weight = params_.at("norm.weight");
+            cuda_OP::add_rms(&hidden_states, &residual, &ffn_out, &norm_weight, rms_norm_eps_, stream);
         } else {
             // 非最后一层：残差连接 + 下一层的input_layernorm
             std::string next_layer_prefix = "layers." + std::to_string(i + 1) + ".";
@@ -1543,9 +1538,8 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         }
     }
 
-    auto &norm_weight = params_.at("norm.weight");
-    Tensor<T> final_h({seq_len, hidden_size_}, Device::CUDA, false, "graph_final_h");
-    operators_->rms_norm(&final_h, &residual, &norm_weight, rms_norm_eps_, stream);
+    // 最终的LayerNorm已经在最后一层的循环中合并处理了
+    Tensor<T> final_h = hidden_states;
 
     auto lm_head_weight = get_weight("lm_head");
     Tensor<T> logits({seq_len, vocab_size_}, Device::CUDA, false, "graph_fixed_logits");
