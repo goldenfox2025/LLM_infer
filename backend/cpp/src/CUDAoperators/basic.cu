@@ -198,41 +198,19 @@ template <typename T>
 void rms_norm(Tensor<T> *output, const Tensor<T> *input, const Tensor<T> *weight, float eps, cudaStream_t stream) {
     // input/output shape 均为 [seq_len, d]
     size_t seq_len = input->sizes()[0];
-    size_t d = input->sizes()[1];  // row_size
+    size_t d = input->sizes()[1];
 
-    // --- 可调参数 ---
-    // 块大小（每行用多少线程处理）
-    // 常见选择: 128, 256, 512. 需要根据 GPU 架构和 d 的大小进行调整测试
-    // 256 是一个比较通用的起点
     int threads_per_block = 1024;
 
-    // 确保线程数不超过设备限制 (通常是 1024)
-    // 同时考虑 d 的大小，如果 d 很小，用太多线程可能浪费
-    // if (d < threads_per_block) {
-    //     threads_per_block = next_power_of_2(d); // 或者选择一个合理的较小值
-    // }
-    // 这里暂时不加动态调整逻辑，假设 256 是一个可接受的起点
-
-    // 检查 threads_per_block 是否是 warpSize (32) 的倍数通常更好，但非必须
-    // 检查是否超过 1024 (大多数设备的最大值)
     if (threads_per_block > 1024)
         threads_per_block = 1024;
 
-    // --- Kernel 启动 ---
-    // 网格大小 gridDim.x = seq_len (一个 block 处理一行)
-    // 块大小 blockDim.x = threads_per_block
     dim3 block_dim(threads_per_block);
-    dim3 grid_dim(seq_len);  // grid_dim.x = seq_len
-
+    dim3 grid_dim(seq_len);
     rms_norm_kernel_v2<T>
         <<<grid_dim, block_dim, 0, stream>>>(input->data_ptr(), output->data_ptr(), weight->data_ptr(), eps, d);
 
-    // --- 错误检查和同步 ---
     checkCudaError(cudaGetLastError());
-    // 对于性能分析或确保后续 CPU 操作能看到结果，需要同步
-    // if (stream == nullptr) {
-    //   checkCudaError(cudaDeviceSynchronize());
-    // }
 }
 
 // Helper function (optional, if you want dynamic adjustment based on d)
@@ -297,12 +275,6 @@ __global__ void rope_kernel_v1(T *tensor, size_t seq_len, size_t n_heads, size_t
         head_ptr[i + head_dim_half] = static_cast<T>(rotated_x1);
     }
 }
-
-// --- BF16 Specialization using __nv_bfloat162 ---
-// This leverages vector types and intrinsics for BF16
-
-// Check if CUDA version supports __nv_bfloat162 intrinsics (usually >= 11.0)
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)  // Ampere or later recommended
 
 template <>
 __global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor, size_t seq_len, size_t n_heads, size_t head_dim,
@@ -395,7 +367,6 @@ __global__ void rope_kernel_v1<__nv_bfloat16>(__nv_bfloat16 *tensor, size_t seq_
         *reinterpret_cast<__nv_bfloat162 *>(&head_ptr[i0 + head_dim_half]) = rotated_x1_bf16;
     }
 }
-#endif  // __CUDA_ARCH__ >= 800
 
 template <typename T>
 __global__ void rope_kernel(T *tensor, size_t seq_len, size_t n_heads, size_t head_dim, size_t offset, float theta) {
