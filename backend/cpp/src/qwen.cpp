@@ -1109,11 +1109,9 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         auto o_weight = get_weight(layer_prefix + "self_attn.o_proj");
         operators_->matmul(&att_proj, &att_heads.view({seq_len, n_heads_ * head_dim_}), o_weight, o_bias);
 
-        // 残差连接
-        cuda_OP::add(&residual, &residual, &att_proj);
 
         auto &ffn_norm_weight = params_.at(layer_prefix + "post_attention_layernorm.weight");
-        cuda_OP::rms_norm(&hidden_states, &residual, &ffn_norm_weight, rms_norm_eps_);
+        cuda_OP::add_rms(&hidden_states, &residual, &att_proj, &ffn_norm_weight, rms_norm_eps_);
 
         const Tensor<T> *gate_bias = nullptr;
         const Tensor<T> *up_bias = nullptr;
@@ -1487,34 +1485,25 @@ Tensor<T> QwenModel<T>::forward_for_graph(const Tensor<uint32_t> *input, KVCache
         cuda_OP::add_rms(&hidden_states, &residual, &att_proj, &ffn_norm_weight, rms_norm_eps_, stream);
 
         // 2.4 MLP前馈网络 - 使用tagged memory
-        std::string gate_tag = "graph_gate_buf_" + std::to_string(i);
-        std::string up_tag = "graph_up_buf_" + std::to_string(i);
         std::string ffn_tag = "graph_ffn_out_" + std::to_string(i);
-        Tensor<T> gate_buf;
-        Tensor<T> up_buf;
-        // Tensor<T> gate_buf({seq_len, intermediate_size_}, Device::CUDA, false, gate_tag);
-        // Tensor<T> up_buf({seq_len, intermediate_size_}, Device::CUDA, false, up_tag);
-        Tensor<T> merged_mlp_result({seq_len, 2 * intermediate_size_}, Device::CUDA, false,
-                                    "merged_mlp_result_" + std::to_string(i));
-        if (quant_type_ == 1) {
-            gate_buf = Tensor<T>({seq_len, intermediate_size_}, Device::CUDA, false, gate_tag);
-            up_buf = Tensor<T>({seq_len, intermediate_size_}, Device::CUDA, false, up_tag);
+        Tensor<T> gate_buf_silu({seq_len, intermediate_size_}, Device::CUDA, false, "graph_gate_buf_silu_" + std::to_string(i));
+
+        if (quant_type_ == 0) {
+            // Use the fused GEMV MLP kernel for non-quantized models
+            auto merged_mlp_weight = params_.at("merged_mlp_" + std::to_string(i));
+            cuda_OP::gemv_mlp_fused(&hidden_states, &merged_mlp_weight, &gate_buf_silu, stream);
+        } else {
+            // Fallback to original implementation for quantized models
+            std::string gate_tag = "graph_gate_buf_" + std::to_string(i);
+            std::string up_tag = "graph_up_buf_" + std::to_string(i);
+            Tensor<T> gate_buf({seq_len, intermediate_size_}, Device::CUDA, false, gate_tag);
+            Tensor<T> up_buf({seq_len, intermediate_size_}, Device::CUDA, false, up_tag);
             auto gate_weight = get_weight(layer_prefix + "mlp.gate_proj");
             auto up_weight = get_weight(layer_prefix + "mlp.up_proj");
             operators_->matmul(&gate_buf, &hidden_states, gate_weight, nullptr, stream);
             operators_->matmul(&up_buf, &hidden_states, up_weight, nullptr, stream);
-        } else {
-            // 实际上，0也可以走上面的封装
-            // 但以后再说
-
-            auto merged_mlp_weight = params_.at("merged_mlp_" + std::to_string(i));
-            cuda_OP::matmul(hidden_states, merged_mlp_weight, &merged_mlp_result, stream);
-            gate_buf = merged_mlp_result.slice({0, 0}, {1, intermediate_size_});
-            up_buf = merged_mlp_result.slice({0, intermediate_size_}, {1, 2 * intermediate_size_});
+            cuda_OP::silu_multiply(&gate_buf_silu, &gate_buf, &up_buf, stream);
         }
-
-        Tensor<T> gate_buf_silu({seq_len, intermediate_size_}, Device::CUDA);
-        cuda_OP::silu_multiply(&gate_buf_silu, &gate_buf, &up_buf, stream);
 
         Tensor<T> ffn_out({seq_len, hidden_size_}, Device::CUDA, false, ffn_tag);
         auto down_weight = get_weight(layer_prefix + "mlp.down_proj");

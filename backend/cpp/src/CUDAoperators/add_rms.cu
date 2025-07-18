@@ -109,10 +109,10 @@ void add_rms(Tensor<T> *output, Tensor<T> *input, const Tensor<T> *add_, const T
     dim3 block_dim(threads_per_block);
     dim3 grid_dim(seq_len);
 
-    // --- 调用 Debug Kernel ---
+
     add_rms_kernel<T><<<grid_dim, block_dim, 0, stream>>>(output->data_ptr(), input->data_ptr(), add_->data_ptr(),
                                                           weight->data_ptr(), eps, d);
-    // ---
+   
 
     checkCudaError(cudaGetLastError());
 }

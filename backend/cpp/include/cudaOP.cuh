@@ -114,6 +114,15 @@ void gemv_qkv_rope(const Tensor<T> *A, const Tensor<T> *B, Tensor<T> *q, Tensor<
                    size_t n_heads, size_t n_kv_heads, size_t head_dim,
                    cudaStream_t stream = nullptr, int n_layers = 28, int *pingpong_index = nullptr);
 
+// Fused GEMV MLP: compute gate_proj, up_proj, silu and multiply in a single kernel
+template <typename T>
+void gemv_mlp_fused(
+    const Tensor<T>* hidden_states,
+    const Tensor<T>* merged_mlp_weight,
+    Tensor<T>* output,
+    cudaStream_t stream
+);
+
 // RoPE + KV Cache写入融合算子：对K执行RoPE并直接写入KV cache，对V直接写入KV cache
 template <typename T>
 void rope_k_precompute_with_write_kv(

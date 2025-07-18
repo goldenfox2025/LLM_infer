@@ -42,7 +42,7 @@ class SpeculativeDecoder {
    public:
     // 构造函数，接收目标模型和草稿模型
     SpeculativeDecoder(std::shared_ptr<BaseModel> target_model, std::shared_ptr<BaseModel> draft_model,
-                       size_t spec_length = 12,   // 投机长度默认为12
+                       size_t spec_length = 6,   // 投机长度默认为12
                        size_t thread_count = 8);  // 线程池大小参数，默认8线程
 
     // 析构函数，释放CUDA资源
