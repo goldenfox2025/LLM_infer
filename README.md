@@ -17,7 +17,7 @@
 **测试条件:**
 * **模型:** Qwen2 1.5B-Instruct-BF16
 * **硬件:** RTX4070Laptop
-* **参数:** 启用Flash Attention 输出长度限制为201（包括prefill输出的1个token在内）`enabled`, `top-k = 20`, `top-p = disabled`
+* **参数:** `启用Flash Attention` `输出长度限制为201（包括prefill输出的1个token在内` `top-k = 20`, `top-p = disabled`
 
 | 性能指标 (Performance Metric) | `llama.cpp` | `LLM_infer` |
 | :--- | :--- | :--- |
