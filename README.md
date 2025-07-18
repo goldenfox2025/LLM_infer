@@ -15,7 +15,7 @@
 为了评估 `LLM_infer` 引擎的基础性能，我们将其与业界知名的 `llama.cpp` 在同等条件下进行了性能对比。
 
 **测试条件:**
-* **模型:** Qwen2 1.5B-Instruct-BF16
+* **模型:** Qwen2.5 1.5B-Instruct-BF16
 * **硬件:** RTX4070Laptop
 * **参数:** `启用Flash Attention` `输出长度限制为201（包括prefill输出的1个token在内）` `top-k = 20`, `top-p = disabled`
 
@@ -35,7 +35,7 @@
 
 在基础引擎之上，我们进一步探索了AWQ量化技术对性能的增益。
 
-| 性能指标 (Performance Metric) | Qwen2 1.5B (BF16) | Qwen2 1.5B (AWQ) |
+| 性能指标 (Performance Metric) | Qwen3 1.7B (BF16) | Qwen3 1.7B (AWQ) |
 | :--- | :--- | :--- |
 | **Prompt处理 (Prefill)** | 23 tokens / 24.26 ms | **23 tokens / 50.73 ms** |
 | **Prompt处理速度 (Prefill Speed)** | **956.31 tokens/s** | 453.38 tokens/s (0.47x) |
