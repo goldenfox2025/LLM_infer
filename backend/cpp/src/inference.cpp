@@ -148,6 +148,18 @@ std::pair<const Tensor<T>, const Tensor<T>> KVCache<T>::get_contiguous_tensor(si
     return {K, V};
 }
 
+template <typename T>
+std::pair<Tensor<T>, Tensor<T>> KVCache<T>::get_layer_view(size_t layer) {
+    if (layer >= n_layers_) {
+        throw std::runtime_error("KVCache: Layer index out of range in get_layer_view");
+    }
+    // Return a view (slice) of the specified layer.
+    // The view is writable and points to the continuous memory block of that layer.
+    Tensor<T> k_view = k_cache_contiguous_.slice({layer, 0, 0}, {layer + 1, max_seq_len_, head_dim_}).squeeze(0);
+    Tensor<T> v_view = v_cache_contiguous_.slice({layer, 0, 0}, {layer + 1, max_seq_len_, head_dim_}).squeeze(0);
+    return {k_view, v_view};
+}
+
 // 显式实例化模板类
 template class KVCache<float>;
 template class KVCache<__nv_bfloat16>;

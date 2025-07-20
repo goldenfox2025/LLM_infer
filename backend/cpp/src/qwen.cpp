@@ -1008,21 +1008,15 @@ Tensor<T> QwenModel<T>::prefill_cuda(const Tensor<uint32_t> *input, KVCache<T> *
         Tensor<T> k_buf_view = k_buf.view({seq_len, n_kv_heads_, head_dim_});
         Tensor<T> v_buf_view = v_buf.view({seq_len, n_kv_heads_, head_dim_});
 
-        // 使用融合的QKV RoPE kernel：对Q执行原地RoPE，对K执行RoPE并写入cache，对V直接写入cache
+        // Use the new fused kernel for RoPE and KV cache writing.
         if (has_rope_cache()) {
-            // 准备KV cache切片指针数组
-            std::vector<Tensor<T>*> k_cache_slices(seq_len);
-            std::vector<Tensor<T>*> v_cache_slices(seq_len);
-            
-            for (size_t j = 0; j < seq_len; j++) {
-                k_cache_slices[j] = &kv_cache->k_cache(i, offset + j);
-                v_cache_slices[j] = &kv_cache->v_cache(i, offset + j);
-            }
-            
-            // 使用增强版融合kernel，支持Q张量原地RoPE + KV写入cache
-            cuda_OP::rope_qkv_precompute_with_write_kv(&q_buf_view, k_buf_view, v_buf_view, 
-                                                       k_cache_slices, v_cache_slices,
-                                                       d_rope_offset_, &rope_sin_cos_cache_, nullptr);
+            // Get a writable view of the current layer's K/V cache.
+            auto [k_cache_layer, v_cache_layer] = kv_cache->get_layer_view(i);
+
+            // Call the simplified, layer-wise fused kernel.
+            cuda_OP::rope_kv_fused(q_buf_view, k_buf_view, v_buf_view, 
+                                   k_cache_layer, v_cache_layer,
+                                   d_rope_offset_, rope_sin_cos_cache_, nullptr);
         } else {
             // 回退版本：分别处理Q和KV
             cuda_OP::rope_with_device_offset(&q_buf_view, d_rope_offset_, rope_theta_);

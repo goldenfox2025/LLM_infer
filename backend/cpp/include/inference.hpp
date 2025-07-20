@@ -88,6 +88,9 @@ class KVCache : public KVCacheBase {
   std::pair<const Tensor<T>, const Tensor<T>> get_contiguous_tensor(
       size_t layer) const;
 
+  // Gets a writable view of a single layer's K/V cache.
+  std::pair<Tensor<T>, Tensor<T>> get_layer_view(size_t layer);
+
  private:
   // 使用连续内存存储所有层的 KV，形状为 [n_layers, max_seq_len, head_dim]
   Tensor<T> k_cache_contiguous_;
