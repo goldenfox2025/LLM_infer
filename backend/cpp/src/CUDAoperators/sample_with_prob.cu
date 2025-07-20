@@ -519,19 +519,17 @@ void sample_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, float* p
 
 // 批量缩放logits并初始化索引的kernel
 template <typename T>
-__global__ void batch_scale_logits_and_init_indices_kernel(const T* __restrict__ logits,
-                                                           T* d_scaled_logits,
-                                                           int* d_indices,
-                                                           size_t seq_len,
-                                                           size_t vocab_size,
+__global__ void batch_scale_logits_and_init_indices_kernel(const T* __restrict__ logits, T* d_scaled_logits,
+                                                           int* d_indices, size_t seq_len, size_t vocab_size,
                                                            float temperature) {
     int seq_idx = blockIdx.x;
     int token_idx = threadIdx.x + blockIdx.y * blockDim.x;
-    
-    if (seq_idx >= seq_len || token_idx >= vocab_size) return;
+
+    if (seq_idx >= seq_len || token_idx >= vocab_size)
+        return;
 
     size_t global_idx = seq_idx * vocab_size + token_idx;
-    
+
     // 缩放logits
     float logit_f;
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
@@ -540,13 +538,13 @@ __global__ void batch_scale_logits_and_init_indices_kernel(const T* __restrict__
         logit_f = static_cast<float>(__ldg(&logits[global_idx]));
     }
     float scaled_logit_f = logit_f / temperature;
-    
+
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         d_scaled_logits[global_idx] = __float2bfloat16(scaled_logit_f);
     } else {
         d_scaled_logits[global_idx] = static_cast<T>(scaled_logit_f);
     }
-    
+
     // 初始化索引
     d_indices[global_idx] = token_idx;
 }
@@ -554,20 +552,14 @@ __global__ void batch_scale_logits_and_init_indices_kernel(const T* __restrict__
 // 批量采样kernel - 每个块处理一个序列
 template <typename T, int BLOCK_DIM_X>
 __global__ void batch_sample_from_sorted_topk_with_prob_kernel(
-    const T* __restrict__ d_sorted_topk_logits,
-    const int* __restrict__ d_sorted_topk_indices,
-    size_t seq_len,
-    size_t k,
-    const float* __restrict__ d_max_vals,
-    curandState* states,
-    uint32_t* d_sampled_indices,
-    float* d_sampled_probs) {
-    
+    const T* __restrict__ d_sorted_topk_logits, const int* __restrict__ d_sorted_topk_indices, size_t seq_len, size_t k,
+    const float* __restrict__ d_max_vals, curandState* states, uint32_t* d_sampled_indices, float* d_sampled_probs) {
     int seq_idx = blockIdx.x;
-    if (seq_idx >= seq_len) return;
+    if (seq_idx >= seq_len)
+        return;
 
     using BlockReduce = cub::BlockReduce<float, BLOCK_DIM_X>;
-    
+
     __shared__ union SharedStorage {
         typename BlockReduce::TempStorage reduce_storage;
         struct Combined {
@@ -577,7 +569,7 @@ __global__ void batch_sample_from_sorted_topk_with_prob_kernel(
     } shared_storage;
 
     int tid = threadIdx.x;
-    
+
     // 获取当前序列的数据指针
     const T* seq_logits = d_sorted_topk_logits + seq_idx * k;
     const int* seq_indices = d_sorted_topk_indices + seq_idx * k;
@@ -596,11 +588,11 @@ __global__ void batch_sample_from_sorted_topk_with_prob_kernel(
         }
 
         float exp_val = expf(scaled_logit_f - max_val);
-        
+
         if (i < MAX_TOPK) {
             shared_storage.combined.exp_vals[i] = exp_val;
         }
-        
+
         thread_exp_sum += exp_val;
     }
     __syncthreads();
@@ -631,7 +623,7 @@ __global__ void batch_sample_from_sorted_topk_with_prob_kernel(
             selected_final_index = static_cast<uint32_t>(seq_indices[0]);
             float* s_exp_vals = shared_storage.combined.exp_vals;
             selected_prob = s_exp_vals[0] / total_exp_sum;
-            
+
             for (int i = 0; i < k; ++i) {
                 cumulative += s_exp_vals[i];
                 if (cumulative >= r) {
@@ -689,8 +681,8 @@ void sample_batch_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, fl
     // --- 内存管理 ---
     auto& pool = GlobalCudaMemoryPool::instance();
     size_t total_elements = seq_len * vocab_size;
-    size_t topk_elements = seq_len * top_k;
-    
+    // size_t topk_elements = seq_len * top_k;
+
     T* d_scaled_logits = static_cast<T*>(pool.allocate(total_elements * sizeof(T)));
     int* d_indices = static_cast<int*>(pool.allocate(total_elements * sizeof(int)));
     T* d_sorted_logits = static_cast<T*>(pool.allocate(total_elements * sizeof(T)));
@@ -706,7 +698,7 @@ void sample_batch_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, fl
     // --- 步骤1: 批量缩放logits并初始化索引 ---
     const int block_size = 256;
     dim3 grid_size(seq_len, (vocab_size + block_size - 1) / block_size);
-    
+
     batch_scale_logits_and_init_indices_kernel<T><<<grid_size, block_size, 0, stream>>>(
         logits.data_ptr(), d_scaled_logits, d_indices, seq_len, vocab_size, temperature);
     CUDA_CHECK(cudaGetLastError());
@@ -714,7 +706,7 @@ void sample_batch_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, fl
     // --- 步骤2: 批量查找最大值 ---
     // 创建分段偏移量数组
     int* d_offsets = static_cast<int*>(pool.allocate((seq_len + 1) * sizeof(int)));
-    
+
     // 设置分段偏移量
     const int offset_block_size = 256;
     const int offset_grid_size = (seq_len + 1 + offset_block_size - 1) / offset_block_size;
@@ -724,22 +716,20 @@ void sample_batch_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, fl
     cub::TransformInputIterator<float, ConvertToFloatFunctor<T>, const T*> itr(d_scaled_logits,
                                                                                ConvertToFloatFunctor<T>());
 
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_vals, 
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_vals,
                                                seq_len, d_offsets, d_offsets + 1, stream));
     d_reduce_temp_storage = pool.allocate(reduce_temp_storage_bytes);
-    CUDA_CHECK(cub::DeviceSegmentedReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_vals, 
+    CUDA_CHECK(cub::DeviceSegmentedReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_vals,
                                                seq_len, d_offsets, d_offsets + 1, stream));
 
     // --- 步骤3: 批量排序 ---
-    CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes,
-                                                                  d_scaled_logits, d_sorted_logits, d_indices,
-                                                                  d_sorted_indices, total_elements, seq_len,
-                                                                  d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream));
+    CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits, d_sorted_logits, d_indices, d_sorted_indices,
+        total_elements, seq_len, d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream));
     d_sort_temp_storage = pool.allocate(sort_temp_storage_bytes);
-    CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes,
-                                                                  d_scaled_logits, d_sorted_logits, d_indices,
-                                                                  d_sorted_indices, total_elements, seq_len,
-                                                                  d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream));
+    CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits, d_sorted_logits, d_indices, d_sorted_indices,
+        total_elements, seq_len, d_offsets, d_offsets + 1, 0, sizeof(T) * 8, stream));
 
     // --- 步骤4: 批量采样 ---
     const int sample_block_size = 128;

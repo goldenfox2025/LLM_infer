@@ -84,7 +84,7 @@ void launch_gemv_scores(const T *x, const T *y, AccT *dst, const int channel_siz
 
 template <typename T>
 void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t stream = nullptr,
-            const Tensor<T> *bias = nullptr, int use_ = 1);
+            const Tensor<T> *bias = nullptr, int use_ = 2);
 
 // rope 算子，用于位置编码
 template <typename T>

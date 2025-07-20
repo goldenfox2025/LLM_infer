@@ -502,8 +502,8 @@ __global__ void sample_batch_parallel_kernel(
 
     // 共享内存用于存储处理结果
     extern __shared__ float shared_mem[];
-    float* s_scaled_logits = shared_mem;               // 缩放后的logits
-    float* s_exp_vals = s_scaled_logits + vocab_size;  // exp值
+    float* s_scaled_logits = shared_mem;  // 缩放后的logits
+    // float* s_exp_vals = s_scaled_logits + vocab_size;  // exp值
     // int* s_indices = (int*)(s_exp_vals + top_k);               // 索引数组
 
     // 获取当前序列位置的logits指针

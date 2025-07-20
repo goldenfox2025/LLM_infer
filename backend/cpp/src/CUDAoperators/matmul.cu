@@ -534,7 +534,7 @@ void cublas_matmul_wrapper(cublasHandle_t handle, cublasOperation_t transa, cubl
     cudaDataType_t cuda_data_type_B;
     cudaDataType_t cuda_data_type_C;
 
-    cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
+    cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
     // printf("启用 TF32 计算类型\n");
 
     // cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
