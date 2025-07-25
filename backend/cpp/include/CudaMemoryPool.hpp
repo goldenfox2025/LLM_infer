@@ -24,9 +24,10 @@ class CudaMemoryPool {
           prefill_buffer_size_(0),
           prefill_buffer_used_(0),
           prefill_max_size_(256 * 1024 * 1024) {
+        // 调用cudaFree(0)可初始化CUDA上下文。
         cudaError_t err = cudaFree(0);
         if (err != cudaSuccess && err != cudaErrorInvalidDevicePointer) {
-            // Initialization check failed
+            // 初始化检查失败，可能表示CUDA环境存在问题。
         }
     }
 
@@ -34,214 +35,75 @@ class CudaMemoryPool {
         std::lock_guard<std::mutex> lock(mutex_);
         is_shutting_down_ = true;
 
-        cudaError_t driver_status = cudaFree(0);
-        bool driver_available = (driver_status == cudaSuccess || driver_status == cudaErrorInvalidDevicePointer);
+        bool driver_available = is_cuda_driver_available();
 
         if (driver_available) {
+            // 释放所有缓存的内存块
             for (auto& [size, blocks] : free_blocks_) {
                 for (void* ptr : blocks) {
-                    cudaError_t err = cudaFree(ptr);
-                    if (err != cudaSuccess) {
-                        if (err == cudaErrorCudartUnloading) {
-                            driver_available = false;
-                            break;
-                        }
-                    }
-                }
-                if (!driver_available)
-                    break;
-            }
-            free_blocks_.clear();
-
-            if (driver_available && prefill_buffer_ != nullptr) {
-                cudaError_t err = cudaFree(prefill_buffer_);
-                if (err != cudaSuccess) {
-                    if (err == cudaErrorCudartUnloading)
-                        driver_available = false;
-                } else {
-                    prefill_buffer_ = nullptr;
-                    prefill_buffer_size_ = 0;
-                    prefill_buffer_used_ = 0;
+                    safe_cuda_free(ptr, driver_available);
                 }
             }
 
-            if (driver_available) {
-                for (auto const& [tag_key, ptr_val] : tagged_memory_) {
-                    cudaError_t err = cudaFree(ptr_val);
-                    if (err != cudaSuccess) {
-                        if (err == cudaErrorCudartUnloading) {
-                            driver_available = false;
-                            break;
-                        }
-                    }
-                }
+            // 释放所有标签化内存块
+            for (auto const& [tag, block_info] : tagged_memory_) {
+                safe_cuda_free(block_info.ptr, driver_available);
             }
-            tagged_memory_.clear();
-            memory_tags_.clear();
-            tagged_memory_sizes_.clear();
-            tagged_memory_active_.clear();
 
-        } else {
-            free_blocks_.clear();
-            tagged_memory_.clear();
-            memory_tags_.clear();
-            tagged_memory_sizes_.clear();
-            tagged_memory_active_.clear();
-            prefill_buffer_ = nullptr;
-            prefill_buffer_size_ = 0;
-            prefill_buffer_used_ = 0;
+            // 释放prefill缓冲区
+            if (prefill_buffer_ != nullptr) {
+                safe_cuda_free(prefill_buffer_, driver_available);
+            }
         }
 
-        if (!active_allocations_.empty()) {
-            size_t active_bytes = 0;
-            for (auto const& [ptr, size_val] : active_allocations_) {
-                active_bytes += size_val;
-            }
-            active_allocations_.clear();
-        }
+        // 无论驱动状态如何，都清空所有跟踪记录
+        free_blocks_.clear();
+        tagged_memory_.clear();
+        memory_tags_.clear();
+        active_allocations_.clear();
+        prefill_buffer_ = nullptr;
+        prefill_buffer_size_ = 0;
+        prefill_buffer_used_ = 0;
     }
 
+    // 删除拷贝和移动操作，保证单例。
     CudaMemoryPool(const CudaMemoryPool&) = delete;
     CudaMemoryPool& operator=(const CudaMemoryPool&) = delete;
     CudaMemoryPool(CudaMemoryPool&&) = delete;
     CudaMemoryPool& operator=(CudaMemoryPool&&) = delete;
 
+    // --- 公开接口 ---
+
     void* allocate(size_t size, bool is_prefill_request = false, const std::string& tag = "") {
         if (size == 0)
             return nullptr;
+        if (!tag.empty()) {
+            // 重定向到专用的标签分配函数。
+            return allocate_tagged(tag, size, is_prefill_request);
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (is_shutting_down_)
+            return nullptr;
 
         size_t aligned_size = (size + 255) & ~255;
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (is_shutting_down_) {
-            return nullptr;
-        }
-
-        bool actual_is_prefill_request = is_prefill_request;
-        // if (!actual_is_prefill_request && is_prefill_phase_) {
-        //     actual_is_prefill_request = true;
-        // }
-
         void* ptr = nullptr;
 
-        if (!tag.empty()) {
-            if (actual_is_prefill_request) {
-                ptr = try_allocate_from_prefill(size, aligned_size, true);
-                if (ptr) {
-                    tagged_memory_[tag] = ptr;
-                    memory_tags_[ptr] = tag;
-                    tagged_memory_sizes_[tag] = aligned_size;
-                    tagged_memory_active_[tag] = true;
-                    return ptr;
-                }
-            }
-            return allocate_new_block(size, aligned_size, tag);
-        } else {
-            if (actual_is_prefill_request) {
-                bool has_active_tagged_memory = false;
-                for (const auto& [tag_name, is_active] : tagged_memory_active_) {
-                    if (is_active) {
-                        has_active_tagged_memory = true;
-                        break;
-                    }
-                }
-
-                if (!has_active_tagged_memory) {
-                    ptr = try_allocate_from_prefill(size, aligned_size, true);
-                }
-            }
+        // Prefill阶段的分配优先使用prefill缓冲区。
+        bool use_prefill = is_prefill_request || is_prefill_phase_;
+        if (use_prefill) {
+            ptr = try_allocate_from_prefill_internal(aligned_size);
             if (ptr)
                 return ptr;
-
-            ptr = try_allocate_from_cache(aligned_size);
-            if (ptr)
-                return ptr;
-
-            return allocate_new_block(size, aligned_size, "");
-        }
-    }
-
-    void* try_allocate_from_prefill(size_t size, size_t aligned_size, bool is_prefill_context) {
-        if (!is_prefill_context || !is_prefill_mode_ || !prefill_buffer_) {
-            return nullptr;
         }
 
-        if (prefill_buffer_used_ + aligned_size <= prefill_buffer_size_) {
-            void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
-            prefill_buffer_used_ += aligned_size;
-            active_allocations_[ptr] = aligned_size;
+        // 尝试从缓存中寻找合适的内存块。
+        ptr = try_allocate_from_cache_internal(aligned_size);
+        if (ptr)
             return ptr;
-        }
 
-        if (prefill_buffer_size_ < prefill_max_size_) {
-            size_t new_size = std::min(prefill_buffer_size_ * 3 / 2, prefill_max_size_);
-            new_size = std::max(new_size, prefill_buffer_used_ + aligned_size);
-            new_size = std::min(new_size, prefill_max_size_);
-
-            void* new_buffer = nullptr;
-            cudaError_t err = cudaMalloc(&new_buffer, new_size);
-            if (err != cudaSuccess) {
-                return nullptr;
-            }
-
-            if (prefill_buffer_used_ > 0) {
-                cudaError_t copy_err =
-                    cudaMemcpy(new_buffer, prefill_buffer_, prefill_buffer_used_, cudaMemcpyDeviceToDevice);
-                if (copy_err != cudaSuccess) {
-                    cudaFree(new_buffer);
-                    return nullptr;
-                }
-            }
-
-            cudaFree(prefill_buffer_);
-            prefill_buffer_ = new_buffer;
-            prefill_buffer_size_ = new_size;
-
-            void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
-            prefill_buffer_used_ += aligned_size;
-            active_allocations_[ptr] = aligned_size;
-            return ptr;
-        }
-        return nullptr;
-    }
-
-    void* try_allocate_from_cache(size_t aligned_size) {
-        auto it = free_blocks_.find(aligned_size);
-        if (it != free_blocks_.end() && !it->second.empty()) {
-            void* ptr = it->second.back();
-            it->second.pop_back();
-            active_allocations_[ptr] = aligned_size;
-            return ptr;
-        }
-        return nullptr;
-    }
-
-    void* allocate_new_block(size_t size, size_t aligned_size, const std::string& tag = "") {
-        size_t free_memory = 0, total_memory = 0;
-        cudaError_t mem_err = cudaMemGetInfo(&free_memory, &total_memory);
-        if (mem_err == cudaSuccess && aligned_size > free_memory * 0.8) {
-            trim_threshold_internal(2);
-            cudaMemGetInfo(&free_memory, &total_memory);
-            if (aligned_size > free_memory * 0.8) {
-                trim_internal();
-            }
-        }
-
-        void* ptr = nullptr;
-        cudaError_t err = cudaMalloc(&ptr, aligned_size);
-        if (err != cudaSuccess) {
-            return nullptr;
-        }
-
-        active_allocations_[ptr] = aligned_size;
-
-        if (!tag.empty()) {
-            tagged_memory_[tag] = ptr;
-            memory_tags_[ptr] = tag;
-            tagged_memory_sizes_[tag] = aligned_size;
-            tagged_memory_active_[tag] = true;
-        }
-        return ptr;
+        // 最后再分配新的内存块。
+        return allocate_new_block_internal(aligned_size, "");
     }
 
     void free(void* ptr) {
@@ -250,87 +112,48 @@ class CudaMemoryPool {
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (is_shutting_down_) {
-            free_during_shutdown(ptr);
+            // 关闭时，仅停止跟踪分配，由析构函数统一释放。
+            active_allocations_.erase(ptr);
             return;
         }
 
         auto it_active = active_allocations_.find(ptr);
         if (it_active == active_allocations_.end()) {
+            // 未找到指针，可能是重复释放或无效指针。
             return;
         }
         size_t aligned_size = it_active->second;
 
-        if (is_from_prefill_buffer(ptr)) {
-            auto tag_it_prefill = memory_tags_.find(ptr);
-            if (tag_it_prefill != memory_tags_.end()) {
-                tagged_memory_active_[tag_it_prefill->second] = false;
-            }
-            free_from_prefill_buffer(ptr, aligned_size);
+        // 检查指针是否属于标签内存块，若是则标记为非活动。
+        auto it_tag = memory_tags_.find(ptr);
+        if (it_tag != memory_tags_.end()) {
+            tagged_memory_[it_tag->second].is_active = false;
             active_allocations_.erase(it_active);
             return;
         }
 
-        auto tag_it = memory_tags_.find(ptr);
-        if (tag_it != memory_tags_.end()) {
-            std::string tag = tag_it->second;
-            tagged_memory_active_[tag] = false;
+        // 检查指针是否来自prefill缓冲区。
+        if (is_from_prefill_buffer_internal(ptr)) {
+            free_from_prefill_buffer_internal(ptr, aligned_size);
             active_allocations_.erase(it_active);
             return;
         }
 
-        if (should_cache_block(aligned_size)) {
+        // 对常规分配，进行缓存或直接释放。
+        if (should_cache_block_internal(aligned_size)) {
             free_blocks_[aligned_size].push_back(ptr);
         } else {
-            cudaError_t err = cudaFree(ptr);
-            if (err != cudaSuccess) {
-                handle_cuda_error(err, aligned_size);
-            }
+            bool driver_ok = is_cuda_driver_available();
+            safe_cuda_free(ptr, driver_ok);
         }
+
         active_allocations_.erase(it_active);
-        perform_periodic_cleanup();
-    }
-
-    void free_during_shutdown(void* ptr) {
-        auto it = active_allocations_.find(ptr);
-        if (it != active_allocations_.end()) {
-            active_allocations_.erase(it);
-        }
-    }
-
-    bool is_from_prefill_buffer(void* ptr) {
-        if (!is_prefill_mode_ || !prefill_buffer_)
-            return false;
-        char* prefill_start = static_cast<char*>(prefill_buffer_);
-        char* prefill_end = prefill_start + prefill_buffer_size_;
-        char* ptr_char = static_cast<char*>(ptr);
-        return (ptr_char >= prefill_start && ptr_char < prefill_end);
-    }
-
-    void free_from_prefill_buffer(void* ptr, size_t aligned_size) {
-    }
-
-    bool should_cache_block(size_t aligned_size) {
-        size_t max_blocks = 8;
-        if (aligned_size >= 1024 * 1024) {
-            max_blocks = 2;
-        } else if (aligned_size >= 65536) {
-            max_blocks = 4;
-        }
-        return free_blocks_[aligned_size].size() < max_blocks;
-    }
-
-    void handle_cuda_error(cudaError_t err, size_t aligned_size) {
-        if (err == cudaErrorCudartUnloading) {
-            is_shutting_down_ = true;
-        } else {
-            // cudaFree failed
-        }
+        perform_periodic_cleanup_internal();
     }
 
     void* allocate_tagged(const std::string& tag, size_t size, bool is_prefill_request = false) {
-        if (tag.empty()) {
+        if (tag.empty())
             return allocate(size, is_prefill_request);
-        }
         if (size == 0)
             return nullptr;
 
@@ -340,85 +163,49 @@ class CudaMemoryPool {
 
         size_t aligned_size = (size + 255) & ~255;
 
-        auto it_tag_mem = tagged_memory_.find(tag);
-        if (it_tag_mem != tagged_memory_.end()) {
-            void* ptr = it_tag_mem->second;
-            size_t old_block_size = tagged_memory_sizes_[tag];
-            bool is_block_active = tagged_memory_active_[tag];
+        auto it = tagged_memory_.find(tag);
+        if (it != tagged_memory_.end()) {
+            TaggedBlockInfo& block_info = it->second;
 
-            if (!is_block_active) {
-                if (old_block_size >= aligned_size) {
-                    tagged_memory_active_[tag] = true;
-                    active_allocations_[ptr] = old_block_size;
-                    return ptr;
-                } else {
-                    cudaError_t free_err = cudaFree(ptr);
-                    if (free_err != cudaSuccess && free_err != cudaErrorInvalidDevicePointer &&
-                        free_err != cudaErrorCudartUnloading) {
-                        // Failed to free undersized inactive tagged block
-                    }
+            // 内存块已存在，检查是否可用。
+            if (block_info.size >= aligned_size) {
+                // 如果已经是活动状态，这是一个有效的重入请求。
+                // 如果是非活动状态，重新激活它。
+                if (!block_info.is_active) {
+                    block_info.is_active = true;
+                    active_allocations_[block_info.ptr] = block_info.size;
                 }
+                return block_info.ptr;
             } else {
-                if (old_block_size >= aligned_size) {
-                    return ptr;
-                } else {
-                    cudaError_t free_err = cudaFree(ptr);
-                    if (free_err != cudaSuccess && free_err != cudaErrorInvalidDevicePointer &&
-                        free_err != cudaErrorCudartUnloading) {
-                        // Failed to free undersized active tagged block
-                    }
-                    active_allocations_.erase(ptr);
+                // 现有内存块太小，释放它再分配新的。
+                if (block_info.is_active) {
+                    active_allocations_.erase(block_info.ptr);
                 }
+                bool driver_ok = is_cuda_driver_available();
+                safe_cuda_free(block_info.ptr, driver_ok);
+                memory_tags_.erase(block_info.ptr);
+                tagged_memory_.erase(it);
             }
-
-            tagged_memory_.erase(it_tag_mem);
-            memory_tags_.erase(ptr);
-            tagged_memory_sizes_.erase(tag);
-            tagged_memory_active_.erase(tag);
         }
 
-        // 修复：Tagged memory始终从独立的cudaMalloc分配，不使用prefill buffer
-        // 这样可以避免与prefill阶段的临时内存产生冲突
-        // Tagged memory通常是需要跨prefill阶段保持稳定的固定内存
-        return allocate_new_block(size, aligned_size, tag);
+        // 为标签分配一个新的内存块 (标签内存不使用prefill缓冲区)。
+        return allocate_new_block_internal(aligned_size, tag);
     }
 
     void* get_tagged_memory(const std::string& tag) {
-        if (tag.empty()) {
+        if (tag.empty())
             return nullptr;
-        }
-
         std::lock_guard<std::mutex> lock(mutex_);
-
         auto it = tagged_memory_.find(tag);
-        if (it == tagged_memory_.end()) {
-            return nullptr;
-        }
-
-        void* ptr = it->second;
-
-        // 修改：无条件返回tagged memory，不检查active状态
-        // 这样可以确保tagged memory始终可用于写入
-        return ptr;
+        // 只要标签存在，就返回指针，无视其活动状态。
+        return (it != tagged_memory_.end()) ? it->second.ptr : nullptr;
     }
 
     bool has_tag(const std::string& tag) {
-        if (tag.empty()) {
+        if (tag.empty())
             return false;
-        }
         std::lock_guard<std::mutex> lock(mutex_);
         return tagged_memory_.count(tag) > 0;
-    }
-
-    void perform_periodic_cleanup() {
-        size_t total_cached_blocks = 0;
-        for (const auto& [size_key, blocks] : free_blocks_) {
-            total_cached_blocks += blocks.size();
-        }
-
-        if (total_cached_blocks > 100) {
-            trim_threshold_internal(4);
-        }
     }
 
     void trim(size_t size = 0) {
@@ -433,67 +220,7 @@ class CudaMemoryPool {
 
     bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 512 * 1024 * 1024) {
         std::lock_guard<std::mutex> lock(mutex_);
-
-        if (is_shutting_down_) {
-            return false;
-        }
-
-        prefill_max_size_ = max_size;
-
-        if (is_prefill_mode_) {
-            if (prefill_buffer_ != nullptr && prefill_buffer_size_ >= initial_size) {
-                prefill_buffer_used_ = 0;
-                return true;
-            } else {
-                if (prefill_buffer_ != nullptr) {
-                    cudaFree(prefill_buffer_);
-                    prefill_buffer_ = nullptr;
-                }
-                prefill_buffer_size_ = 0;
-                prefill_buffer_used_ = 0;
-                is_prefill_mode_ = false;
-            }
-        }
-
-        size_t adjusted_initial_size = adjust_prefill_size(initial_size);
-
-        cudaError_t err = cudaMalloc(&prefill_buffer_, adjusted_initial_size);
-        if (err != cudaSuccess) {
-            std::cerr << "CudaMemoryPool: Error - Failed to allocate prefill buffer: "
-                      << (adjusted_initial_size / (1024.0 * 1024.0)) << " MB, Error: " << cudaGetErrorString(err)
-                      << std::endl;
-            prefill_buffer_ = nullptr;
-            prefill_buffer_size_ = 0;
-            prefill_buffer_used_ = 0;
-            is_prefill_mode_ = false;
-            return false;
-        }
-
-        prefill_buffer_size_ = adjusted_initial_size;
-        prefill_buffer_used_ = 0;
-        is_prefill_mode_ = true;
-
-        std::cerr << "CudaMemoryPool: Prefill mode enabled. Initial: " << (prefill_buffer_size_ / (1024.0 * 1024.0))
-                  << " MB, Max: " << (prefill_max_size_ / (1024.0 * 1024.0)) << " MB" << std::endl;
-        return true;
-    }
-
-    size_t adjust_prefill_size(size_t requested_size) {
-        size_t free_memory = 0, total_memory = 0;
-        cudaError_t mem_err = cudaMemGetInfo(&free_memory, &total_memory);
-        if (mem_err == cudaSuccess) {
-            if (requested_size > free_memory * 0.8) {
-                size_t adjusted_size = static_cast<size_t>(free_memory * 0.7);
-                std::cerr << "CudaMemoryPool: Warning - Requested prefill size ("
-                          << (requested_size / (1024.0 * 1024.0))
-                          << "MB) is too large. Adjusted to: " << (adjusted_size / (1024.0 * 1024.0))
-                          << " MB (70% of free " << (free_memory / (1024.0 * 1024.0)) << "MB)" << std::endl;
-                return adjusted_size > (1024 * 1024) ? adjusted_size : (1024 * 1024);
-            }
-        } else {
-            // Failed to get GPU memory info
-        }
-        return requested_size;
+        return enable_prefill_mode_internal(initial_size, max_size);
     }
 
     void disable_prefill_mode() {
@@ -503,66 +230,31 @@ class CudaMemoryPool {
 
     void reset_prefill_buffer() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!is_prefill_mode_ || prefill_buffer_ == nullptr)
-            return;
-        prefill_buffer_used_ = 0;
-    }
-
-    std::pair<size_t, size_t> count_active_prefill_allocations() const {
-        size_t count = 0;
-        size_t bytes = 0;
-        if (!prefill_buffer_)
-            return {count, bytes};
-
-        char* buffer_start = static_cast<char*>(prefill_buffer_);
-        char* buffer_end = buffer_start + prefill_buffer_size_;
-
-        for (const auto& [ptr, alloc_size] : active_allocations_) {
-            char* ptr_char = static_cast<char*>(ptr);
-            if (ptr_char >= buffer_start && ptr_char < buffer_end) {
-                count++;
-                bytes += alloc_size;
-            }
+        if (is_prefill_mode_ && prefill_buffer_ != nullptr) {
+            prefill_buffer_used_ = 0;
+            // 注意：这不会从active_allocations_移除prefill分配。
+            // 调用者需保证reset后不再使用这些指针。
         }
-        return {count, bytes};
     }
 
     void set_prefill_phase(bool is_prefill) {
         std::lock_guard<std::mutex> lock(mutex_);
         is_prefill_phase_ = is_prefill;
-
-        if (is_prefill && !is_prefill_mode_ && !is_shutting_down_) {
-            enable_prefill_mode_internal();
-        }
-
-        if (!is_prefill && is_prefill_mode_) {
-            bool has_active_tagged_memory = false;
-            for (const auto& [tag, is_active] : tagged_memory_active_) {
-                if (is_active) {
-                    has_active_tagged_memory = true;
-                    break;
-                }
-            }
-
-            if (!has_active_tagged_memory) {
-                prefill_buffer_used_ = 0;
-            }
-        }
     }
 
     void prepare_for_shutdown() {
         std::lock_guard<std::mutex> lock(mutex_);
         is_shutting_down_ = true;
-        free_blocks_.clear();
-        std::cerr << "CudaMemoryPool: Prepared for safe shutdown. Further CUDA "
-                     "operations will be restricted."
-                  << std::endl;
+        trim_internal(0);  // 清理所有缓存
+        std::cerr << "CudaMemoryPool: 已准备安全关闭，将限制后续CUDA操作。" << std::endl;
     }
 
     bool is_shutting_down() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return is_shutting_down_;
     }
+
+    // --- 统计信息 ---
 
     struct PoolStats {
         size_t total_cached_blocks = 0;
@@ -581,24 +273,22 @@ class CudaMemoryPool {
         std::lock_guard<std::mutex> lock(mutex_);
         PoolStats stats;
 
+        stats.active_allocations_count = active_allocations_.size();
+        stats.active_bytes = std::accumulate(active_allocations_.begin(), active_allocations_.end(), 0ULL,
+                                             [](size_t sum, const auto& pair) { return sum + pair.second; });
+
         stats.size_categories_in_cache = free_blocks_.size();
         for (const auto& [size_val, blocks] : free_blocks_) {
             stats.total_cached_blocks += blocks.size();
             stats.total_cached_bytes += size_val * blocks.size();
         }
 
-        stats.active_allocations_count = active_allocations_.size();
-        stats.active_bytes = std::accumulate(active_allocations_.begin(), active_allocations_.end(), 0ULL,
-                                             [](size_t sum, const auto& pair) { return sum + pair.second; });
-
         stats.tagged_allocations_count = tagged_memory_.size();
-        for (const auto& [tag, active_status] : tagged_memory_active_) {
-            if (active_status) {
+        for (const auto& [tag, block_info] : tagged_memory_) {
+            stats.tagged_total_bytes += block_info.size;
+            if (block_info.is_active) {
                 stats.tagged_active_count++;
             }
-        }
-        for (const auto& [tag, size_val] : tagged_memory_sizes_) {
-            stats.tagged_total_bytes += size_val;
         }
 
         stats.prefill_buffer_size_bytes = prefill_buffer_size_;
@@ -607,111 +297,176 @@ class CudaMemoryPool {
     }
 
    private:
-    void enable_prefill_mode_internal(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 512 * 1024 * 1024) {
-        if (is_shutting_down_)
-            return;
-        prefill_max_size_ = max_size;
+    // --- 内部数据结构 ---
 
-        if (is_prefill_mode_) {
-            if (prefill_buffer_ != nullptr && prefill_buffer_size_ >= initial_size) {
-                prefill_buffer_used_ = 0;
-                return;
-            } else {
-                if (prefill_buffer_ != nullptr) {
-                    cudaFree(prefill_buffer_);
-                    prefill_buffer_ = nullptr;
+    struct TaggedBlockInfo {
+        void* ptr = nullptr;
+        size_t size = 0;
+        bool is_active = false;
+    };
+
+    // --- 内部状态变量 ---
+
+    mutable std::mutex mutex_;
+    bool is_shutting_down_;
+
+    // 常规缓存状态
+    std::unordered_map<size_t, std::vector<void*>> free_blocks_;
+    std::unordered_map<void*, size_t> active_allocations_;
+
+    // 标签内存状态
+    std::map<std::string, TaggedBlockInfo> tagged_memory_;
+    std::map<void*, std::string> memory_tags_;
+
+    // Prefill 缓冲区状态
+    bool is_prefill_mode_;
+    bool is_prefill_phase_;
+    void* prefill_buffer_;
+    size_t prefill_buffer_size_;
+    size_t prefill_buffer_used_;
+    size_t prefill_max_size_;
+
+    // --- 内部辅助方法 ---
+
+    void* try_allocate_from_prefill_internal(size_t aligned_size) {
+        if (!is_prefill_mode_ || !prefill_buffer_) {
+            return nullptr;
+        }
+
+        if (prefill_buffer_used_ + aligned_size <= prefill_buffer_size_) {
+            void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
+            prefill_buffer_used_ += aligned_size;
+            active_allocations_[ptr] = aligned_size;
+            return ptr;
+        }
+
+        // 如果空间不足且未达到最大值，尝试扩容。
+        if (prefill_buffer_size_ < prefill_max_size_) {
+            size_t new_size = std::min(prefill_buffer_size_ * 3 / 2, prefill_max_size_);
+            new_size = std::max(new_size, prefill_buffer_used_ + aligned_size);
+            new_size = std::min(new_size, prefill_max_size_);
+
+            void* new_buffer = nullptr;
+            if (cudaMalloc(&new_buffer, new_size) != cudaSuccess)
+                return nullptr;
+
+            if (prefill_buffer_used_ > 0) {
+                if (cudaMemcpy(new_buffer, prefill_buffer_, prefill_buffer_used_, cudaMemcpyDeviceToDevice) !=
+                    cudaSuccess) {
+                    cudaFree(new_buffer);
+                    return nullptr;
                 }
-                prefill_buffer_size_ = 0;
-                prefill_buffer_used_ = 0;
-                is_prefill_mode_ = false;
             }
+
+            cudaFree(prefill_buffer_);  // 释放旧缓冲区
+            prefill_buffer_ = new_buffer;
+            prefill_buffer_size_ = new_size;
+
+            void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
+            prefill_buffer_used_ += aligned_size;
+            active_allocations_[ptr] = aligned_size;
+            return ptr;
         }
 
-        size_t adjusted_initial_size = adjust_prefill_size_internal(initial_size);
-        cudaError_t err = cudaMalloc(&prefill_buffer_, adjusted_initial_size);
-        if (err != cudaSuccess) {
-            std::cerr << "CudaMemoryPool (Internal): Error - Failed to allocate "
-                         "prefill buffer: "
-                      << (adjusted_initial_size / (1024.0 * 1024.0)) << " MB, Error: " << cudaGetErrorString(err)
-                      << std::endl;
-            prefill_buffer_ = nullptr;
-            prefill_buffer_size_ = 0;
-            prefill_buffer_used_ = 0;
-            is_prefill_mode_ = false;
-            return;
-        }
-        prefill_buffer_size_ = adjusted_initial_size;
-        prefill_buffer_used_ = 0;
-        is_prefill_mode_ = true;
-        std::cerr << "CudaMemoryPool (Internal): Prefill mode enabled. Initial: "
-                  << (prefill_buffer_size_ / (1024.0 * 1024.0))
-                  << " MB, Max: " << (prefill_max_size_ / (1024.0 * 1024.0)) << " MB" << std::endl;
+        return nullptr;
     }
 
-    size_t adjust_prefill_size_internal(size_t requested_size) {
+    void* try_allocate_from_cache_internal(size_t aligned_size) {
+        auto it = free_blocks_.find(aligned_size);
+        if (it != free_blocks_.end() && !it->second.empty()) {
+            void* ptr = it->second.back();
+            it->second.pop_back();
+            if (it->second.empty()) {
+                free_blocks_.erase(it);
+            }
+            active_allocations_[ptr] = aligned_size;
+            return ptr;
+        }
+        return nullptr;
+    }
+
+    void* allocate_new_block_internal(size_t aligned_size, const std::string& tag) {
         size_t free_memory = 0, total_memory = 0;
-        cudaError_t mem_err = cudaMemGetInfo(&free_memory, &total_memory);
-        if (mem_err == cudaSuccess) {
-            if (requested_size > free_memory * 0.8) {
-                size_t adjusted_size = static_cast<size_t>(free_memory * 0.7);
-                std::cerr << "CudaMemoryPool (Internal): Warning - Requested prefill size ("
-                          << (requested_size / (1024.0 * 1024.0))
-                          << "MB) is too large. Adjusted to: " << (adjusted_size / (1024.0 * 1024.0)) << " MB."
-                          << std::endl;
-                return adjusted_size > (1024 * 1024) ? adjusted_size : (1024 * 1024);
-            }
-        }
-        return requested_size;
-    }
-
-    void disable_prefill_mode_internal() {
-        if (!is_prefill_mode_)
-            return;
-
-        if (prefill_buffer_ != nullptr) {
-            cudaError_t driver_status = cudaFree(0);
-            if (driver_status == cudaSuccess || driver_status == cudaErrorInvalidDevicePointer) {
-                cudaError_t err = cudaFree(prefill_buffer_);
-                if (err != cudaSuccess) {
-                    std::cerr << "CudaMemoryPool: Warning - Failed to free prefill "
-                                 "buffer during disable: "
-                              << cudaGetErrorString(err) << std::endl;
-                    if (err == cudaErrorCudartUnloading) {
-                        is_shutting_down_ = true;
-                    }
+        if (cudaMemGetInfo(&free_memory, &total_memory) == cudaSuccess) {
+            if (aligned_size > free_memory) {  // 如果请求大小大于可用显存
+                // 尝试释放一些缓存来腾出空间。
+                trim_threshold_internal(2);  // 适度清理
+                if (cudaMemGetInfo(&free_memory, &total_memory) == cudaSuccess && aligned_size > free_memory) {
+                    trim_internal(0);  // 彻底清理
                 }
-            } else {
-                is_shutting_down_ = true;
             }
-            prefill_buffer_ = nullptr;
         }
 
-        prefill_buffer_size_ = 0;
-        prefill_buffer_used_ = 0;
-        is_prefill_mode_ = false;
-        std::cerr << "CudaMemoryPool: Prefill mode disabled." << std::endl;
+        void* ptr = nullptr;
+        if (cudaMalloc(&ptr, aligned_size) != cudaSuccess) {
+            // 清理后分配仍然失败。
+            return nullptr;
+        }
+
+        active_allocations_[ptr] = aligned_size;
+
+        if (!tag.empty()) {
+            tagged_memory_[tag] = {ptr, aligned_size, true};
+            memory_tags_[ptr] = tag;
+        }
+        return ptr;
     }
 
-    void trim_internal(size_t size = 0) {
-        if (size == 0) {
+    bool is_from_prefill_buffer_internal(const void* ptr) const {
+        if (!is_prefill_mode_ || !prefill_buffer_)
+            return false;
+        const char* p = static_cast<const char*>(ptr);
+        const char* start = static_cast<const char*>(prefill_buffer_);
+        const char* end = start + prefill_buffer_size_;
+        return p >= start && p < end;
+    }
+
+    void free_from_prefill_buffer_internal(void* ptr, size_t aligned_size) {
+        // 此函数为空是设计如此。
+        // prefill缓冲区作为“竞技场(Arena)”或“碰撞指针(Bump)”分配器工作。
+        // 内存只在整个缓冲区被重置时(如调用reset_prefill_buffer)才统一回收。
+        // 单个内存的free操作仅在调用方free()中从active_allocations_移除记录。
+    }
+
+    bool should_cache_block_internal(size_t aligned_size) const {
+        size_t max_blocks = 8;
+        if (aligned_size >= 1024 * 1024)
+            max_blocks = 2;  // >= 1MB
+        else if (aligned_size >= 65536)
+            max_blocks = 4;  // >= 64KB
+
+        auto it = free_blocks_.find(aligned_size);
+        if (it == free_blocks_.end())
+            return true;
+        return it->second.size() < max_blocks;
+    }
+
+    void perform_periodic_cleanup_internal() {
+        size_t total_cached_blocks = 0;
+        for (const auto& [size_key, blocks] : free_blocks_) {
+            total_cached_blocks += blocks.size();
+        }
+
+        if (total_cached_blocks > 100) {
+            trim_threshold_internal(4);
+        }
+    }
+
+    void trim_internal(size_t size) {
+        bool driver_ok = is_cuda_driver_available();
+        if (size == 0) {  // 清理所有缓存
             for (auto& [block_size, blocks] : free_blocks_) {
                 for (void* ptr : blocks) {
-                    cudaError_t err = cudaFree(ptr);
-                    if (err != cudaSuccess && err != cudaErrorCudartUnloading && err != cudaErrorInvalidDevicePointer) {
-                        // Failed to free block
-                    }
+                    safe_cuda_free(ptr, driver_ok);
                 }
             }
             free_blocks_.clear();
-        } else {
+        } else {  // 清理特定大小的缓存
             size_t aligned_size = (size + 255) & ~255;
             auto it = free_blocks_.find(aligned_size);
             if (it != free_blocks_.end()) {
                 for (void* ptr : it->second) {
-                    cudaError_t err = cudaFree(ptr);
-                    if (err != cudaSuccess && err != cudaErrorCudartUnloading && err != cudaErrorInvalidDevicePointer) {
-                        // Failed to free block
-                    }
+                    safe_cuda_free(ptr, driver_ok);
                 }
                 free_blocks_.erase(it);
             }
@@ -719,18 +474,14 @@ class CudaMemoryPool {
     }
 
     void trim_threshold_internal(size_t max_blocks_per_size) {
+        bool driver_ok = is_cuda_driver_available();
         for (auto it = free_blocks_.begin(); it != free_blocks_.end();) {
-            std::vector<void*>& blocks = it->second;
-            while (blocks.size() > max_blocks_per_size) {
-                void* ptr = blocks.back();
-                cudaError_t err = cudaFree(ptr);
-                if (err != cudaSuccess && err != cudaErrorCudartUnloading && err != cudaErrorInvalidDevicePointer) {
-                    // Failed to free block
-                }
-                blocks.pop_back();
+            while (it->second.size() > max_blocks_per_size) {
+                void* ptr = it->second.back();
+                it->second.pop_back();
+                safe_cuda_free(ptr, driver_ok);
             }
-
-            if (blocks.empty()) {
+            if (it->second.empty()) {
                 it = free_blocks_.erase(it);
             } else {
                 ++it;
@@ -738,29 +489,110 @@ class CudaMemoryPool {
         }
     }
 
-    std::map<std::string, void*> tagged_memory_;
-    std::map<void*, std::string> memory_tags_;
-    std::map<std::string, size_t> tagged_memory_sizes_;
-    std::map<std::string, bool> tagged_memory_active_;
+    bool enable_prefill_mode_internal(size_t initial_size, size_t max_size) {
+        if (is_shutting_down_)
+            return false;
 
-    std::unordered_map<size_t, std::vector<void*>> free_blocks_;
-    std::unordered_map<void*, size_t> active_allocations_;
+        prefill_max_size_ = max_size;
 
-    bool is_prefill_mode_;
-    void* prefill_buffer_;
-    size_t prefill_buffer_size_;
-    size_t prefill_buffer_used_;
-    size_t prefill_max_size_;
-    bool is_prefill_phase_;
+        if (is_prefill_mode_) {  // 如果已开启，检查是否需要重置或扩容
+            if (prefill_buffer_ != nullptr && prefill_buffer_size_ >= initial_size) {
+                prefill_buffer_used_ = 0;  // 缓冲区足够大，直接重置
+                return true;
+            }
+            // 当前缓冲区太小或为空，先关闭以清理资源。
+            disable_prefill_mode_internal();
+        }
 
-    bool is_shutting_down_;
+        size_t adjusted_initial_size = adjust_prefill_size_internal(initial_size);
+        if (cudaMalloc(&prefill_buffer_, adjusted_initial_size) != cudaSuccess) {
+            prefill_buffer_ = nullptr;
+            prefill_buffer_size_ = 0;
+            is_prefill_mode_ = false;
+            return false;
+        }
 
-    mutable std::mutex mutex_;
+        prefill_buffer_size_ = adjusted_initial_size;
+        prefill_buffer_used_ = 0;
+        is_prefill_mode_ = true;
+        std::cerr << "CudaMemoryPool: Prefill模式已开启。初始: " << (prefill_buffer_size_ / (1024.0 * 1024.0))
+                  << " MB, 最大: " << (prefill_max_size_ / (1024.0 * 1024.0)) << " MB" << std::endl;
+        return true;
+    }
+
+    void disable_prefill_mode_internal() {
+        if (!is_prefill_mode_)
+            return;
+
+        if (prefill_buffer_ != nullptr) {
+            bool driver_ok = is_cuda_driver_available();
+            safe_cuda_free(prefill_buffer_, driver_ok);
+            prefill_buffer_ = nullptr;
+        }
+
+        prefill_buffer_size_ = 0;
+        prefill_buffer_used_ = 0;
+        is_prefill_mode_ = false;
+        std::cerr << "CudaMemoryPool: Prefill模式已关闭。" << std::endl;
+    }
+
+    size_t adjust_prefill_size_internal(size_t requested_size) {
+        size_t free_memory = 0, total_memory = 0;
+        if (cudaMemGetInfo(&free_memory, &total_memory) == cudaSuccess) {
+            // 预留20%的空闲显存。
+            if (requested_size > free_memory * 0.8) {
+                size_t adjusted_size = static_cast<size_t>(free_memory * 0.7);
+                std::cerr << "CudaMemoryPool: 警告 - 请求的prefill尺寸过大，已调整为 "
+                          << (adjusted_size / (1024.0 * 1024.0)) << " MB。" << std::endl;
+                return std::max(adjusted_size, (size_t)1024 * 1024);  // 保证至少1MB
+            }
+        }
+        return requested_size;
+    }
+
+    bool is_cuda_driver_available() {
+        cudaError_t err = cudaFree(0);
+        return err == cudaSuccess || err == cudaErrorInvalidDevicePointer;
+    }
+
+    void safe_cuda_free(void* ptr, bool& driver_available_flag) {
+        if (!ptr || !driver_available_flag)
+            return;
+
+        cudaError_t err = cudaFree(ptr);
+        if (err != cudaSuccess && err == cudaErrorCudartUnloading) {
+            driver_available_flag = false;
+        }
+    }
 };
+
+// ==================================================================
+// 全局单例包装器
+// ==================================================================
 
 class GlobalCudaMemoryPool {
    public:
-    static CudaMemoryPool& instance();
+    static CudaMemoryPool& instance() {
+        // std::call_once确保初始化安全。
+        // 需要显式调用清理函数来控制关闭顺序，避免CUDA上下文提前销毁。
+        std::call_once(init_flag_, []() {
+            std::lock_guard<std::mutex> lock(init_mutex_);
+            if (!pool_instance_ptr) {
+                pool_instance_ptr = new CudaMemoryPool();
+            }
+        });
+        return *pool_instance_ptr;
+    }
+
+    // --- 静态接口转发 ---
+
+    static void* allocate(size_t size, bool is_prefill_request = false, const std::string& tag = "") {
+        return instance().allocate(size, is_prefill_request, tag);
+    }
+
+    static void free(void* ptr) {
+        instance().free(ptr);
+    }
 
     static bool enable_prefill_mode(size_t initial_size = 48 * 1024 * 1024, size_t max_size = 512 * 1024 * 1024) {
         return instance().enable_prefill_mode(initial_size, max_size);
@@ -769,26 +601,13 @@ class GlobalCudaMemoryPool {
     static void disable_prefill_mode() {
         instance().disable_prefill_mode();
     }
+
     static void reset_prefill_buffer() {
         instance().reset_prefill_buffer();
     }
+
     static void set_prefill_phase(bool is_prefill) {
         instance().set_prefill_phase(is_prefill);
-    }
-
-    static void prepare_for_shutdown() {
-        if (pool_instance_ptr != nullptr) {
-            pool_instance_ptr->prepare_for_shutdown();
-        } else {
-            // Shutdown called before instance creation
-        }
-    }
-
-    static bool is_shutting_down() {
-        if (pool_instance_ptr != nullptr) {
-            return pool_instance_ptr->is_shutting_down();
-        }
-        return false;
     }
 
     static void* allocate_tagged(const std::string& tag, size_t size, bool is_prefill_request = false) {
@@ -801,6 +620,23 @@ class GlobalCudaMemoryPool {
 
     static bool has_tag(const std::string& tag) {
         return instance().has_tag(tag);
+    }
+
+    static void prepare_for_shutdown() {
+        // 可以在实例创建前调用。
+        std::lock_guard<std::mutex> lock(init_mutex_);
+        if (pool_instance_ptr != nullptr) {
+            pool_instance_ptr->prepare_for_shutdown();
+        }
+    }
+
+    static bool is_shutting_down() {
+        std::lock_guard<std::mutex> lock(init_mutex_);
+        if (pool_instance_ptr != nullptr) {
+            return pool_instance_ptr->is_shutting_down();
+        }
+        // 若实例还不存在，则不算作关闭中。
+        return false;
     }
 
     static void explicitly_delete_pool_instance() {
