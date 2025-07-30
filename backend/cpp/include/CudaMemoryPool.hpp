@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda.h>  // <--- 引入CUDA Driver API以使用VMM
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -23,8 +24,12 @@ class CudaMemoryPool {
           prefill_buffer_(nullptr),
           prefill_buffer_size_(0),
           prefill_buffer_used_(0),
-          prefill_max_size_(256 * 1024 * 1024) {
-        // 调用cudaFree(0)可初始化CUDA上下文。
+          prefill_buffer_committed_(0),
+          prefill_max_size_(256 * 1024 * 1024),
+          vmm_granularity_(0) {
+        // 调用cuInit(0)确保Driver API已初始化, 多次调用是安全的。
+        // 调用cudaFree(0)可初始化CUDA Runtime和上下文。
+        cuInit(0);
         cudaError_t err = cudaFree(0);
         if (err != cudaSuccess && err != cudaErrorInvalidDevicePointer) {
             // 初始化检查失败，可能表示CUDA环境存在问题。
@@ -34,6 +39,11 @@ class CudaMemoryPool {
     ~CudaMemoryPool() {
         std::lock_guard<std::mutex> lock(mutex_);
         is_shutting_down_ = true;
+
+        // 优先清理VMM资源
+        if (is_prefill_mode_) {
+            disable_prefill_mode_internal();
+        }
 
         bool driver_available = is_cuda_driver_available();
 
@@ -50,10 +60,8 @@ class CudaMemoryPool {
                 safe_cuda_free(block_info.ptr, driver_available);
             }
 
-            // 释放prefill缓冲区
-            if (prefill_buffer_ != nullptr) {
-                safe_cuda_free(prefill_buffer_, driver_available);
-            }
+            // VMM prefill_buffer_的释放已由disable_prefill_mode_internal处理
+            // 无需再调用 safe_cuda_free(prefill_buffer_, driver_available);
         }
 
         // 无论驱动状态如何，都清空所有跟踪记录
@@ -64,6 +72,8 @@ class CudaMemoryPool {
         prefill_buffer_ = nullptr;
         prefill_buffer_size_ = 0;
         prefill_buffer_used_ = 0;
+        prefill_buffer_committed_ = 0;
+        vmm_chunks_.clear();
     }
 
     // 删除拷贝和移动操作，保证单例。
@@ -169,8 +179,6 @@ class CudaMemoryPool {
 
             // 内存块已存在，检查是否可用。
             if (block_info.size >= aligned_size) {
-                // 如果已经是活动状态，这是一个有效的重入请求。
-                // 如果是非活动状态，重新激活它。
                 if (!block_info.is_active) {
                     block_info.is_active = true;
                     active_allocations_[block_info.ptr] = block_info.size;
@@ -192,12 +200,11 @@ class CudaMemoryPool {
         return allocate_new_block_internal(aligned_size, tag);
     }
 
-    void* get_tagged_memory(const std::string& tag) {
+       void* get_tagged_memory(const std::string& tag) {
         if (tag.empty())
             return nullptr;
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = tagged_memory_.find(tag);
-        // 只要标签存在，就返回指针，无视其活动状态。
         return (it != tagged_memory_.end()) ? it->second.ptr : nullptr;
     }
 
@@ -255,7 +262,6 @@ class CudaMemoryPool {
     }
 
     // --- 统计信息 ---
-
     struct PoolStats {
         size_t total_cached_blocks = 0;
         size_t total_cached_bytes = 0;
@@ -265,7 +271,8 @@ class CudaMemoryPool {
         size_t tagged_allocations_count = 0;
         size_t tagged_active_count = 0;
         size_t tagged_total_bytes = 0;
-        size_t prefill_buffer_size_bytes = 0;
+        size_t prefill_buffer_reserved_bytes = 0;
+        size_t prefill_buffer_committed_bytes = 0;
         size_t prefill_buffer_used_bytes = 0;
     };
 
@@ -291,7 +298,8 @@ class CudaMemoryPool {
             }
         }
 
-        stats.prefill_buffer_size_bytes = prefill_buffer_size_;
+        stats.prefill_buffer_reserved_bytes = prefill_buffer_size_;
+        stats.prefill_buffer_committed_bytes = prefill_buffer_committed_;
         stats.prefill_buffer_used_bytes = prefill_buffer_used_;
         return stats;
     }
@@ -303,6 +311,12 @@ class CudaMemoryPool {
         void* ptr = nullptr;
         size_t size = 0;
         bool is_active = false;
+    };
+
+    // VMM块信息
+    struct VmmChunk {
+        CUmemGenericAllocationHandle handle;
+        size_t size = 0;
     };
 
     // --- 内部状态变量 ---
@@ -318,13 +332,16 @@ class CudaMemoryPool {
     std::map<std::string, TaggedBlockInfo> tagged_memory_;
     std::map<void*, std::string> memory_tags_;
 
-    // Prefill 缓冲区状态
+    // Prefill 缓冲区状态 (VMM实现)
     bool is_prefill_mode_;
     bool is_prefill_phase_;
-    void* prefill_buffer_;
-    size_t prefill_buffer_size_;
-    size_t prefill_buffer_used_;
+    void* prefill_buffer_;             // 指向VMM预留的虚拟地址空间(VA)的起始位置
+    size_t prefill_buffer_size_;       // VMM预留的VA总大小
+    size_t prefill_buffer_used_;       // 在VA空间中已分配出去的大小(碰撞指针)
+    size_t prefill_buffer_committed_;  // 已映射到VA的物理内存大小
     size_t prefill_max_size_;
+    size_t vmm_granularity_;            // VMM分配的粒度
+    std::vector<VmmChunk> vmm_chunks_;  // 跟踪所有物理内存块
 
     // --- 内部辅助方法 ---
 
@@ -333,44 +350,68 @@ class CudaMemoryPool {
             return nullptr;
         }
 
-        if (prefill_buffer_used_ + aligned_size <= prefill_buffer_size_) {
+        // 检查当前已提交的物理内存是否足够
+        if (prefill_buffer_used_ + aligned_size <= prefill_buffer_committed_) {
             void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
             prefill_buffer_used_ += aligned_size;
             active_allocations_[ptr] = aligned_size;
             return ptr;
         }
 
-        // 如果空间不足且未达到最大值，尝试扩容。
-        if (prefill_buffer_size_ < prefill_max_size_) {
-            size_t new_size = std::min(prefill_buffer_size_ * 3 / 2, prefill_max_size_);
-            new_size = std::max(new_size, prefill_buffer_used_ + aligned_size);
-            new_size = std::min(new_size, prefill_max_size_);
-
-            void* new_buffer = nullptr;
-            if (cudaMalloc(&new_buffer, new_size) != cudaSuccess)
-                return nullptr;
-
-            if (prefill_buffer_used_ > 0) {
-                if (cudaMemcpy(new_buffer, prefill_buffer_, prefill_buffer_used_, cudaMemcpyDeviceToDevice) !=
-                    cudaSuccess) {
-                    cudaFree(new_buffer);
-                    return nullptr;
-                }
-            }
-
-            cudaFree(prefill_buffer_);  // 释放旧缓冲区
-            prefill_buffer_ = new_buffer;
-            prefill_buffer_size_ = new_size;
-
-            void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
-            prefill_buffer_used_ += aligned_size;
-            active_allocations_[ptr] = aligned_size;
-            return ptr;
+        // 物理内存不足，尝试映射新的物理块进行扩容
+        // 检查预留的虚拟地址空间是否还足够
+        if (prefill_buffer_committed_ >= prefill_buffer_size_) {
+            return nullptr;  // 虚拟地址空间已用完
         }
 
-        return nullptr;
+        // 计算需要扩容的大小，至少为请求大小，但通常更大以减少扩容次数
+        size_t min_new_chunk_size = std::max(vmm_granularity_, aligned_size);
+        size_t new_chunk_size = std::max(min_new_chunk_size * 2, (prefill_buffer_committed_ / 4));  // 扩容当前大小的25%
+        new_chunk_size = (new_chunk_size + vmm_granularity_ - 1) & ~(vmm_granularity_ - 1);         // 对齐到粒度
+        new_chunk_size =
+            std::min(new_chunk_size, prefill_buffer_size_ - prefill_buffer_committed_);  // 不能超过剩余虚拟空间
+
+        if (new_chunk_size < aligned_size)
+            return nullptr;  // 即使扩容也无法满足
+
+        // 创建新的物理内存块
+        CUmemGenericAllocationHandle handle;
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location = {CU_MEM_LOCATION_TYPE_DEVICE, 0};
+        if (cuMemCreate(&handle, new_chunk_size, &prop, 0) != CUDA_SUCCESS) {
+            return nullptr;
+        }
+
+        // 将新的物理块映射到虚拟地址空间的末尾
+        CUdeviceptr va_ptr = reinterpret_cast<CUdeviceptr>(prefill_buffer_);
+        if (cuMemMap(va_ptr + prefill_buffer_committed_, new_chunk_size, 0, handle, 0) != CUDA_SUCCESS) {
+            cuMemRelease(handle);
+            return nullptr;
+        }
+
+        // 设置内存访问权限
+        CUmemAccessDesc accessDesc = {};
+        accessDesc.location = prop.location;
+        accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+        if (cuMemSetAccess(va_ptr + prefill_buffer_committed_, new_chunk_size, &accessDesc, 1) != CUDA_SUCCESS) {
+            cuMemUnmap(va_ptr + prefill_buffer_committed_, new_chunk_size);
+            cuMemRelease(handle);
+            return nullptr;
+        }
+
+        // 更新状态
+        vmm_chunks_.push_back({handle, new_chunk_size});
+        prefill_buffer_committed_ += new_chunk_size;
+
+        // 扩容成功后，再次进行分配
+        void* ptr = static_cast<char*>(prefill_buffer_) + prefill_buffer_used_;
+        prefill_buffer_used_ += aligned_size;
+        active_allocations_[ptr] = aligned_size;
+        return ptr;
     }
 
+    // ... [其它未改动的内部方法: try_allocate_from_cache_internal, allocate_new_block_internal, etc.]
     void* try_allocate_from_cache_internal(size_t aligned_size) {
         auto it = free_blocks_.find(aligned_size);
         if (it != free_blocks_.end() && !it->second.empty()) {
@@ -388,18 +429,16 @@ class CudaMemoryPool {
     void* allocate_new_block_internal(size_t aligned_size, const std::string& tag) {
         size_t free_memory = 0, total_memory = 0;
         if (cudaMemGetInfo(&free_memory, &total_memory) == cudaSuccess) {
-            if (aligned_size > free_memory) {  // 如果请求大小大于可用显存
-                // 尝试释放一些缓存来腾出空间。
-                trim_threshold_internal(2);  // 适度清理
+            if (aligned_size > free_memory) {
+                trim_threshold_internal(2);
                 if (cudaMemGetInfo(&free_memory, &total_memory) == cudaSuccess && aligned_size > free_memory) {
-                    trim_internal(0);  // 彻底清理
+                    trim_internal(0);
                 }
             }
         }
 
         void* ptr = nullptr;
         if (cudaMalloc(&ptr, aligned_size) != cudaSuccess) {
-            // 清理后分配仍然失败。
             return nullptr;
         }
 
@@ -417,14 +456,15 @@ class CudaMemoryPool {
             return false;
         const char* p = static_cast<const char*>(ptr);
         const char* start = static_cast<const char*>(prefill_buffer_);
+        // 使用预留的虚拟地址空间总大小来判断
         const char* end = start + prefill_buffer_size_;
         return p >= start && p < end;
     }
 
     void free_from_prefill_buffer_internal(void* ptr, size_t aligned_size) {
         // 此函数为空是设计如此。
-        // prefill缓冲区作为“竞技场(Arena)”或“碰撞指针(Bump)”分配器工作。
-        // 内存只在整个缓冲区被重置时(如调用reset_prefill_buffer)才统一回收。
+        // VMM prefill缓冲区作为“竞技场”分配器工作。
+        // 内存只在整个缓冲区被重置时(reset_prefill_buffer)或关闭时(disable_prefill_mode)才统一回收。
         // 单个内存的free操作仅在调用方free()中从active_allocations_移除记录。
     }
 
@@ -446,7 +486,6 @@ class CudaMemoryPool {
         for (const auto& [size_key, blocks] : free_blocks_) {
             total_cached_blocks += blocks.size();
         }
-
         if (total_cached_blocks > 100) {
             trim_threshold_internal(4);
         }
@@ -454,14 +493,14 @@ class CudaMemoryPool {
 
     void trim_internal(size_t size) {
         bool driver_ok = is_cuda_driver_available();
-        if (size == 0) {  // 清理所有缓存
+        if (size == 0) {
             for (auto& [block_size, blocks] : free_blocks_) {
                 for (void* ptr : blocks) {
                     safe_cuda_free(ptr, driver_ok);
                 }
             }
             free_blocks_.clear();
-        } else {  // 清理特定大小的缓存
+        } else {
             size_t aligned_size = (size + 255) & ~255;
             auto it = free_blocks_.find(aligned_size);
             if (it != free_blocks_.end()) {
@@ -493,63 +532,105 @@ class CudaMemoryPool {
         if (is_shutting_down_)
             return false;
 
-        prefill_max_size_ = max_size;
-
-        if (is_prefill_mode_) {  // 如果已开启，检查是否需要重置或扩容
-            if (prefill_buffer_ != nullptr && prefill_buffer_size_ >= initial_size) {
-                prefill_buffer_used_ = 0;  // 缓冲区足够大，直接重置
-                return true;
-            }
-            // 当前缓冲区太小或为空，先关闭以清理资源。
+        // 如果已开启，先关闭以释放旧资源
+        if (is_prefill_mode_) {
             disable_prefill_mode_internal();
         }
 
-        size_t adjusted_initial_size = adjust_prefill_size_internal(initial_size);
-        if (cudaMalloc(&prefill_buffer_, adjusted_initial_size) != cudaSuccess) {
-            prefill_buffer_ = nullptr;
-            prefill_buffer_size_ = 0;
-            is_prefill_mode_ = false;
+        // 获取VMM分配粒度
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location = {CU_MEM_LOCATION_TYPE_DEVICE, 0};
+        cuMemGetAllocationGranularity(&vmm_granularity_, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+        if (vmm_granularity_ == 0)
+            return false;
+
+        prefill_max_size_ = (max_size + vmm_granularity_ - 1) & ~(vmm_granularity_ - 1);
+
+        // 1. 预留虚拟地址空间(VA)
+        CUdeviceptr ptr_d = 0;
+        if (cuMemAddressReserve(&ptr_d, prefill_max_size_, 0, 0, 0) != CUDA_SUCCESS) {
             return false;
         }
+        prefill_buffer_ = reinterpret_cast<void*>(ptr_d);
+        prefill_buffer_size_ = prefill_max_size_;
 
-        prefill_buffer_size_ = adjusted_initial_size;
+        // 2. 分配并映射初始物理块
+        size_t adjusted_initial_size = adjust_prefill_size_internal(initial_size);
+        if (adjusted_initial_size > 0) {
+            CUmemGenericAllocationHandle handle;
+            if (cuMemCreate(&handle, adjusted_initial_size, &prop, 0) != CUDA_SUCCESS) {
+                cuMemAddressFree(ptr_d, prefill_max_size_);
+                prefill_buffer_ = nullptr;
+                return false;
+            }
+
+            if (cuMemMap(ptr_d, adjusted_initial_size, 0, handle, 0) != CUDA_SUCCESS) {
+                cuMemRelease(handle);
+                cuMemAddressFree(ptr_d, prefill_max_size_);
+                prefill_buffer_ = nullptr;
+                return false;
+            }
+
+            CUmemAccessDesc accessDesc = {};
+            accessDesc.location = prop.location;
+            accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+            cuMemSetAccess(ptr_d, adjusted_initial_size, &accessDesc, 1);
+
+            vmm_chunks_.push_back({handle, adjusted_initial_size});
+            prefill_buffer_committed_ = adjusted_initial_size;
+        }
+
         prefill_buffer_used_ = 0;
         is_prefill_mode_ = true;
-        std::cerr << "CudaMemoryPool: Prefill模式已开启。初始: " << (prefill_buffer_size_ / (1024.0 * 1024.0))
-                  << " MB, 最大: " << (prefill_max_size_ / (1024.0 * 1024.0)) << " MB" << std::endl;
+        std::cerr << "CudaMemoryPool: Prefill模式已开启(VMM)。预留: " << (prefill_buffer_size_ / (1024.0 * 1024.0))
+                  << " MB, 初始提交: " << (prefill_buffer_committed_ / (1024.0 * 1024.0)) << " MB" << std::endl;
         return true;
     }
 
     void disable_prefill_mode_internal() {
-        if (!is_prefill_mode_)
+        if (!is_prefill_mode_ || !prefill_buffer_)
             return;
 
-        if (prefill_buffer_ != nullptr) {
-            bool driver_ok = is_cuda_driver_available();
-            safe_cuda_free(prefill_buffer_, driver_ok);
-            prefill_buffer_ = nullptr;
+        CUdeviceptr va_ptr = reinterpret_cast<CUdeviceptr>(prefill_buffer_);
+        size_t offset = 0;
+
+        // 取消映射并释放所有物理块
+        for (const auto& chunk : vmm_chunks_) {
+            cuMemUnmap(va_ptr + offset, chunk.size);
+            cuMemRelease(chunk.handle);
+            offset += chunk.size;
         }
 
+        // 释放整个虚拟地址空间
+        if (prefill_buffer_size_ > 0) {
+            cuMemAddressFree(va_ptr, prefill_buffer_size_);
+        }
+
+        vmm_chunks_.clear();
+        prefill_buffer_ = nullptr;
         prefill_buffer_size_ = 0;
         prefill_buffer_used_ = 0;
+        prefill_buffer_committed_ = 0;
         is_prefill_mode_ = false;
         std::cerr << "CudaMemoryPool: Prefill模式已关闭。" << std::endl;
     }
 
     size_t adjust_prefill_size_internal(size_t requested_size) {
+        if (vmm_granularity_ == 0)
+            return 0;
         size_t free_memory = 0, total_memory = 0;
         if (cudaMemGetInfo(&free_memory, &total_memory) == cudaSuccess) {
-            // 预留20%的空闲显存。
+            // 预留20%的空闲显存
             if (requested_size > free_memory * 0.8) {
-                size_t adjusted_size = static_cast<size_t>(free_memory * 0.7);
-                std::cerr << "CudaMemoryPool: 警告 - 请求的prefill尺寸过大，已调整为 "
-                          << (adjusted_size / (1024.0 * 1024.0)) << " MB。" << std::endl;
-                return std::max(adjusted_size, (size_t)1024 * 1024);  // 保证至少1MB
+                requested_size = static_cast<size_t>(free_memory * 0.7);
             }
         }
-        return requested_size;
+        // 将大小向上对齐到VMM粒度
+        return (std::max(requested_size, vmm_granularity_) + vmm_granularity_ - 1) & ~(vmm_granularity_ - 1);
     }
 
+    // ... [其它未改动的辅助方法: is_cuda_driver_available, safe_cuda_free]
     bool is_cuda_driver_available() {
         cudaError_t err = cudaFree(0);
         return err == cudaSuccess || err == cudaErrorInvalidDevicePointer;
@@ -573,8 +654,6 @@ class CudaMemoryPool {
 class GlobalCudaMemoryPool {
    public:
     static CudaMemoryPool& instance() {
-        // std::call_once确保初始化安全。
-        // 需要显式调用清理函数来控制关闭顺序，避免CUDA上下文提前销毁。
         std::call_once(init_flag_, []() {
             std::lock_guard<std::mutex> lock(init_mutex_);
             if (!pool_instance_ptr) {
@@ -623,7 +702,6 @@ class GlobalCudaMemoryPool {
     }
 
     static void prepare_for_shutdown() {
-        // 可以在实例创建前调用。
         std::lock_guard<std::mutex> lock(init_mutex_);
         if (pool_instance_ptr != nullptr) {
             pool_instance_ptr->prepare_for_shutdown();
@@ -635,7 +713,6 @@ class GlobalCudaMemoryPool {
         if (pool_instance_ptr != nullptr) {
             return pool_instance_ptr->is_shutting_down();
         }
-        // 若实例还不存在，则不算作关闭中。
         return false;
     }
 

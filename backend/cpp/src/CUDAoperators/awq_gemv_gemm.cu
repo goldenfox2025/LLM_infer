@@ -37,8 +37,7 @@ __global__ void matmul_awq_gemm_kernel(const T* __restrict__ inp,        // 输�
                                        T* __restrict__ out,              // 输出矩阵 [M, N]
                                        int M, int K, int N,
                                        int group_size,  // AWQ group 大小
-                                       int G_PADDED,    // !!! 新增: Scales 张量的实际第二维度 (Padding) !!!
-                                       const T* __restrict__ bias) {
+                                       int G_PADDED, const T* __restrict__ bias) {
     const int G = K / group_size;
     const int K_PACKED = (K + PACK_FACTOR - 1) / PACK_FACTOR;
     const int G_PACKED = (G + PACK_FACTOR - 1) / PACK_FACTOR;

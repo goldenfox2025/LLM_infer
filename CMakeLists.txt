@@ -51,6 +51,7 @@ target_link_libraries(model_bridge PRIVATE
     operators         # 再链接具体的实现
     CUDA::cublas
     CUDA::cudart
+    CUDA::cuda_driver
 )
 
 
