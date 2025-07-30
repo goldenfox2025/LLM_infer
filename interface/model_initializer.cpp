@@ -372,8 +372,8 @@ bool ModelInitializer::init_cuda_memory_pool(
                 << " MB free, " << (total_memory / (1024 * 1024)) << " MB total"
                 << std::endl;
 
-      // 只有当可用内存超过1GB时才开启prefill模式
-      if (free_memory > 1024 * 1024 * 1024) {
+      
+      if (free_memory > 256 * 1024 * 1024) {
         // 计算prefill内存大小，使用可用内存的10%，但不超过256MB
         size_t prefill_size =
             std::min(free_memory / 10, static_cast<size_t>(256 * 1024 * 1024));
