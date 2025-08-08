@@ -81,5 +81,8 @@ target_compile_options(model_bridge PRIVATE
 # --- 设置 CUDA 特定属性 ---
 set_target_properties(model_bridge PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# 添加 test 子目录
+add_subdirectory(test)
+
 # --- (可选) 安装规则 ---
 # install(TARGETS model_bridge DESTINATION your_install_path)

@@ -59,6 +59,27 @@ __global__ void scale_logits_and_init_indices_kernel(const T* __restrict__ logit
     }
 }
 
+// 将 logits 缩放为 float 并初始化索引
+template <typename T>
+__global__ void scale_logits_to_float_and_init_indices_kernel(const T* __restrict__ logits,
+                                                              float* __restrict__ scaled_logits_f,
+                                                              int* __restrict__ indices, size_t vocab_size,
+                                                              float temperature) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+
+    for (int i = idx; i < static_cast<int>(vocab_size); i += stride) {
+        float v = 0.0f;
+        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+            v = __bfloat162float(__ldg(&logits[i]));
+        } else {
+            v = static_cast<float>(__ldg(&logits[i]));
+        }
+        scaled_logits_f[i] = v / temperature;
+        indices[i] = i;
+    }
+}
+
 // CUB TransformIterator 的辅助 Functor
 // 功能: 在 CUB 操作中动态地将输入类型 Tin (如 bfloat16) 转换为 float。
 template <typename Tin>
@@ -99,10 +120,10 @@ void generate_random_values(float* values, size_t count, curandState* states, cu
     CUDA_CHECK(cudaGetLastError());
 }
 
-// Kernel：计算指定token的概率
+// Kernel：计算指定token的概率（考虑temperature）
 template <typename T>
 __global__ void get_token_probability_kernel(const T* logits, int position, uint32_t token_id, float* output_prob,
-                                             size_t vocab_size) {
+                                             size_t vocab_size, float temperature) {
     // 单线程执行，计算指定token的概率
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // 计算该位置的logits起始位置
@@ -113,9 +134,9 @@ __global__ void get_token_probability_kernel(const T* logits, int position, uint
         for (size_t i = 0; i < vocab_size; i++) {
             float val;
             if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                val = __bfloat162float(pos_logits[i]);
+                val = __bfloat162float(pos_logits[i]) / temperature;
             } else {
-                val = static_cast<float>(pos_logits[i]);
+                val = static_cast<float>(pos_logits[i]) / temperature;
             }
             max_val = fmaxf(max_val, val);
         }
@@ -125,9 +146,9 @@ __global__ void get_token_probability_kernel(const T* logits, int position, uint
         for (size_t i = 0; i < vocab_size; i++) {
             float val;
             if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                val = __bfloat162float(pos_logits[i]);
+                val = __bfloat162float(pos_logits[i]) / temperature;
             } else {
-                val = static_cast<float>(pos_logits[i]);
+                val = static_cast<float>(pos_logits[i]) / temperature;
             }
             sum_exp += expf(val - max_val);
         }
@@ -135,9 +156,9 @@ __global__ void get_token_probability_kernel(const T* logits, int position, uint
         // 计算目标token的概率
         float token_val;
         if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-            token_val = __bfloat162float(pos_logits[token_id]);
+            token_val = __bfloat162float(pos_logits[token_id]) / temperature;
         } else {
-            token_val = static_cast<float>(pos_logits[token_id]);
+            token_val = static_cast<float>(pos_logits[token_id]) / temperature;
         }
 
         // 计算softmax概率
@@ -173,7 +194,7 @@ float get_token_probability(const Tensor<T>& logits, int position, uint32_t toke
     cudaMalloc(&d_prob, sizeof(float));
 
     // 启动kernel计算概率
-    get_token_probability_kernel<<<1, 1, 0, stream>>>(logits.data_ptr(), position, token_id, d_prob, vocab_size);
+    get_token_probability_kernel<<<1, 1, 0, stream>>>(logits.data_ptr(), position, token_id, d_prob, vocab_size, 1.0f);
     CUDA_CHECK(cudaGetLastError());
 
     // 将结果复制回主机
@@ -187,9 +208,9 @@ float get_token_probability(const Tensor<T>& logits, int position, uint32_t toke
     return h_prob;
 }
 
-// Kernel：从排序后的top-k结果中采样，并记录概率
-template <typename T, int BLOCK_DIM_X>
-__global__ void sample_from_sorted_topk_with_prob_kernel(const T* __restrict__ d_sorted_topk_logits,
+// Kernel：从排序后的top-k结果中采样，并记录概率（float logits）
+template <int BLOCK_DIM_X>
+__global__ void sample_from_sorted_topk_with_prob_kernel(const float* __restrict__ d_sorted_topk_logits,
                                                          const int* __restrict__ d_sorted_topk_indices, size_t k,
                                                          const float* __restrict__ d_max_val_ptr, curandState* states,
                                                          uint32_t* d_sampled_index, float* d_sampled_prob) {
@@ -217,14 +238,7 @@ __global__ void sample_from_sorted_topk_with_prob_kernel(const T* __restrict__ d
     // 并行计算exp(logit - max_val)
     float thread_exp_sum = 0.0f;
     for (int i = tid; i < k; i += BLOCK_DIM_X) {
-        T scaled_logit_T = d_sorted_topk_logits[i];
-        float scaled_logit_f;
-
-        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-            scaled_logit_f = __bfloat162float(scaled_logit_T);
-        } else {
-            scaled_logit_f = static_cast<float>(scaled_logit_T);
-        }
+        float scaled_logit_f = d_sorted_topk_logits[i];
 
         float exp_val = expf(scaled_logit_f - max_val_shared);
 
@@ -318,10 +332,11 @@ std::pair<uint32_t, float> sample_with_prob(Tensor<T>&& logits, float temperatur
 
     // --- 内存管理 ---
     auto& pool = GlobalCudaMemoryPool::instance();
-    T* d_scaled_logits = static_cast<T*>(pool.allocate(vocab_size * sizeof(T)));
+    // 使用 float 作为排序键
+    float* d_scaled_logits_f = static_cast<float*>(pool.allocate(vocab_size * sizeof(float)));
     float* d_max_val = static_cast<float*>(pool.allocate(sizeof(float)));
     int* d_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));
-    T* d_sorted_logits = static_cast<T*>(pool.allocate(vocab_size * sizeof(T)));
+    float* d_sorted_logits_f = static_cast<float*>(pool.allocate(vocab_size * sizeof(float)));
     int* d_sorted_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));
 
     // 为token和概率分配内存
@@ -340,31 +355,29 @@ std::pair<uint32_t, float> sample_with_prob(Tensor<T>&& logits, float temperatur
     const int scale_init_block_size = 256;
     const int scale_init_grid_size = (vocab_size + scale_init_block_size - 1) / scale_init_block_size;
 
-    scale_logits_and_init_indices_kernel<T><<<scale_init_grid_size, scale_init_block_size, 0, stream>>>(
-        d_logits_ptr, d_scaled_logits, d_indices, vocab_size, temperature);
+    // 缩放为 float 并初始化索引
+    scale_logits_to_float_and_init_indices_kernel<T><<<scale_init_grid_size, scale_init_block_size, 0, stream>>>(
+        d_logits_ptr, d_scaled_logits_f, d_indices, vocab_size, temperature);
     CUDA_CHECK(cudaGetLastError());
 
     // --- 步骤2: 查找最大缩放Logit ---
-    cub::TransformInputIterator<float, ConvertToFloatFunctor<T>, const T*> itr(d_scaled_logits,
-                                                                               ConvertToFloatFunctor<T>());
-
-    CUDA_CHECK(
-        cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_val, vocab_size, stream));
+    CUDA_CHECK(cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, d_scaled_logits_f, d_max_val,
+                                      vocab_size, stream));
     d_reduce_temp_storage = pool.allocate(reduce_temp_storage_bytes);
-    CUDA_CHECK(
-        cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_val, vocab_size, stream));
+    CUDA_CHECK(cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, d_scaled_logits_f, d_max_val,
+                                      vocab_size, stream));
     CUDA_CHECK(cudaGetLastError());
 
     // --- 步骤3: 按Logit值降序排序 ---
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits,
-                                                         d_sorted_logits, d_indices, d_sorted_indices, vocab_size, 0,
-                                                         sizeof(T) * 8, stream));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes,
+                                                         d_scaled_logits_f, d_sorted_logits_f, d_indices,
+                                                         d_sorted_indices, vocab_size, 0, sizeof(float) * 8, stream));
 
     d_sort_temp_storage = pool.allocate(sort_temp_storage_bytes);
 
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits,
-                                                         d_sorted_logits, d_indices, d_sorted_indices, vocab_size, 0,
-                                                         sizeof(T) * 8, stream));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes,
+                                                         d_scaled_logits_f, d_sorted_logits_f, d_indices,
+                                                         d_sorted_indices, vocab_size, 0, sizeof(float) * 8, stream));
     CUDA_CHECK(cudaGetLastError());
 
     // --- 步骤4: 从Top-K结果中进行最终加权采样 ---
@@ -375,13 +388,15 @@ std::pair<uint32_t, float> sample_with_prob(Tensor<T>&& logits, float temperatur
     size_t sample_shared_mem = reduce_storage_size_est + exp_values_size;
 
     int max_shared_mem_per_block = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, 0));
+    int cur_dev = 0;
+    CUDA_CHECK(cudaGetDevice(&cur_dev));
+    CUDA_CHECK(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, cur_dev));
     if (sample_shared_mem > max_shared_mem_per_block) {
         throw std::runtime_error("计算出的所需共享内存超过设备限制");
     }
 
-    sample_from_sorted_topk_with_prob_kernel<T, sample_block_size><<<1, sample_block_size, sample_shared_mem, stream>>>(
-        d_sorted_logits, d_sorted_indices, top_k, d_max_val, d_states, d_sampled_index, d_sampled_prob);
+    sample_from_sorted_topk_with_prob_kernel<sample_block_size><<<1, sample_block_size, sample_shared_mem, stream>>>(
+        d_sorted_logits_f, d_sorted_indices, top_k, d_max_val, d_states, d_sampled_index, d_sampled_prob);
     CUDA_CHECK(cudaGetLastError());
 
     // --- 结果处理 ---
@@ -392,14 +407,14 @@ std::pair<uint32_t, float> sample_with_prob(Tensor<T>&& logits, float temperatur
     cudaMemcpyAsync(&h_sampled_prob, d_sampled_prob, sizeof(float), cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
 
-    // 计算选中token在整个词汇表中的真实概率
+    // 计算选中token在整个词汇表中的真实概率（考虑temperature）
     float real_prob = get_token_probability(logits, seq_len - 1, h_sampled_index, stream);
 
     // --- 释放临时内存 ---
-    pool.free(d_scaled_logits);
+    pool.free(d_scaled_logits_f);
     pool.free(d_max_val);
     pool.free(d_indices);
-    pool.free(d_sorted_logits);
+    pool.free(d_sorted_logits_f);
     pool.free(d_sorted_indices);
     pool.free(d_reduce_temp_storage);
     pool.free(d_sort_temp_storage);
@@ -447,10 +462,10 @@ void sample_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, float* p
 
     // --- 内存管理 ---
     auto& pool = GlobalCudaMemoryPool::instance();
-    T* d_scaled_logits = static_cast<T*>(pool.allocate(vocab_size * sizeof(T)));
+    float* d_scaled_logits_f = static_cast<float*>(pool.allocate(vocab_size * sizeof(float)));
     float* d_max_val = static_cast<float*>(pool.allocate(sizeof(float)));
     int* d_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));
-    T* d_sorted_logits = static_cast<T*>(pool.allocate(vocab_size * sizeof(T)));
+    float* d_sorted_logits_f = static_cast<float*>(pool.allocate(vocab_size * sizeof(float)));
     int* d_sorted_indices = static_cast<int*>(pool.allocate(vocab_size * sizeof(int)));
 
     // CUB临时存储
@@ -463,31 +478,28 @@ void sample_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, float* p
     const int scale_init_block_size = 256;
     const int scale_init_grid_size = (vocab_size + scale_init_block_size - 1) / scale_init_block_size;
 
-    scale_logits_and_init_indices_kernel<T><<<scale_init_grid_size, scale_init_block_size, 0, stream>>>(
-        d_logits_ptr, d_scaled_logits, d_indices, vocab_size, temperature);
+    scale_logits_to_float_and_init_indices_kernel<T><<<scale_init_grid_size, scale_init_block_size, 0, stream>>>(
+        d_logits_ptr, d_scaled_logits_f, d_indices, vocab_size, temperature);
     CUDA_CHECK(cudaGetLastError());
 
     // --- 步骤2: 查找最大缩放Logit ---
-    cub::TransformInputIterator<float, ConvertToFloatFunctor<T>, const T*> itr(d_scaled_logits,
-                                                                               ConvertToFloatFunctor<T>());
-
-    CUDA_CHECK(
-        cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_val, vocab_size, stream));
+    CUDA_CHECK(cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, d_scaled_logits_f, d_max_val,
+                                      vocab_size, stream));
     d_reduce_temp_storage = pool.allocate(reduce_temp_storage_bytes);
-    CUDA_CHECK(
-        cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, itr, d_max_val, vocab_size, stream));
+    CUDA_CHECK(cub::DeviceReduce::Max(d_reduce_temp_storage, reduce_temp_storage_bytes, d_scaled_logits_f, d_max_val,
+                                      vocab_size, stream));
     CUDA_CHECK(cudaGetLastError());
 
     // --- 步骤3: 按Logit值降序排序 ---
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits,
-                                                         d_sorted_logits, d_indices, d_sorted_indices, vocab_size, 0,
-                                                         sizeof(T) * 8, stream));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes,
+                                                         d_scaled_logits_f, d_sorted_logits_f, d_indices,
+                                                         d_sorted_indices, vocab_size, 0, sizeof(float) * 8, stream));
 
     d_sort_temp_storage = pool.allocate(sort_temp_storage_bytes);
 
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes, d_scaled_logits,
-                                                         d_sorted_logits, d_indices, d_sorted_indices, vocab_size, 0,
-                                                         sizeof(T) * 8, stream));
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(d_sort_temp_storage, sort_temp_storage_bytes,
+                                                         d_scaled_logits_f, d_sorted_logits_f, d_indices,
+                                                         d_sorted_indices, vocab_size, 0, sizeof(float) * 8, stream));
     CUDA_CHECK(cudaGetLastError());
 
     // --- 步骤4: 从Top-K结果中进行最终加权采样，直接写入输出位置 ---
@@ -498,20 +510,22 @@ void sample_to_fixed_with_prob(Tensor<T>&& logits, uint32_t* token_ptr, float* p
     size_t sample_shared_mem = reduce_storage_size_est + exp_values_size;
 
     int max_shared_mem_per_block = 0;
-    CUDA_CHECK(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, 0));
+    int cur_dev2 = 0;
+    CUDA_CHECK(cudaGetDevice(&cur_dev2));
+    CUDA_CHECK(cudaDeviceGetAttribute(&max_shared_mem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, cur_dev2));
     if (sample_shared_mem > max_shared_mem_per_block) {
         throw std::runtime_error("计算出的所需共享内存超过设备限制");
     }
 
-    sample_from_sorted_topk_with_prob_kernel<T, sample_block_size><<<1, sample_block_size, sample_shared_mem, stream>>>(
-        d_sorted_logits, d_sorted_indices, top_k, d_max_val, d_states, token_ptr, prob_ptr);
+    sample_from_sorted_topk_with_prob_kernel<sample_block_size><<<1, sample_block_size, sample_shared_mem, stream>>>(
+        d_sorted_logits_f, d_sorted_indices, top_k, d_max_val, d_states, token_ptr, prob_ptr);
     CUDA_CHECK(cudaGetLastError());
 
     // --- 释放临时内存 ---
-    pool.free(d_scaled_logits);
+    pool.free(d_scaled_logits_f);
     pool.free(d_max_val);
     pool.free(d_indices);
-    pool.free(d_sorted_logits);
+    pool.free(d_sorted_logits_f);
     pool.free(d_sorted_indices);
     pool.free(d_reduce_temp_storage);
     pool.free(d_sort_temp_storage);

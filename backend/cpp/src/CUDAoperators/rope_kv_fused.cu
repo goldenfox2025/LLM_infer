@@ -158,7 +158,7 @@ void rope_kv_fused(Tensor<T>& q_tensor,        // 输入/输出Q张量，形状 
     size_t head_dim_half = head_dim / 2;
     int threads_per_block = (head_dim_half + actual_pairs_per_thread - 1) / actual_pairs_per_thread;
     threads_per_block = std::max(threads_per_block, (int)((head_dim + 3) / 4));  // 确保有足够的线程进行V复制
-    threads_per_block = std::min(threads_per_block, 1024);                       // 遵守CUDA限制
+    threads_per_block = std::min(threads_per_block, 1024);
 
     dim3 grid_dim(n_heads, seq_len);  // 网格覆盖所有Q头和序列元素
     dim3 block_dim(threads_per_block);
