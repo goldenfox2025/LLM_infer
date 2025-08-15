@@ -753,7 +753,7 @@ void matmul(const Tensor<T> &A, const Tensor<T> &B, Tensor<T> *C, cudaStream_t s
                                      &beta,
                                      C->data_ptr(),  // 输出 C
                                      ldc);           // ldc = N
-            cudaStreamSynchronize(stream);
+            // cudaStreamSynchronize(stream);
         }
         // std::cout << "cublas_matmul_wrapper<T> 调用成功" << std::endl;
         if (bias != nullptr) {

@@ -382,8 +382,7 @@ class CudaMemoryPool {
         if (cuMemCreate(&handle, new_chunk_size, &prop, 0) != CUDA_SUCCESS) {
             return nullptr;
         }
-
-        // 将新的物理块映射到虚拟地址空间的末尾
+       // 将新的物理块映射到虚拟地址空间的末尾
         CUdeviceptr va_ptr = reinterpret_cast<CUdeviceptr>(prefill_buffer_);
         if (cuMemMap(va_ptr + prefill_buffer_committed_, new_chunk_size, 0, handle, 0) != CUDA_SUCCESS) {
             cuMemRelease(handle);
@@ -630,7 +629,7 @@ class CudaMemoryPool {
         return (std::max(requested_size, vmm_granularity_) + vmm_granularity_ - 1) & ~(vmm_granularity_ - 1);
     }
 
-    // ... [其它未改动的辅助方法: is_cuda_driver_available, safe_cuda_free]
+   
     bool is_cuda_driver_available() {
         cudaError_t err = cudaFree(0);
         return err == cudaSuccess || err == cudaErrorInvalidDevicePointer;

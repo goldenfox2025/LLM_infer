@@ -179,7 +179,9 @@ InferenceEngine<T>::InferenceEngine(std::shared_ptr<BaseModel> model, Device dev
                 device),
       thread_pool_(4),
       device_(device),
-      d_states(nullptr) {  // 初始化 d_states 为 nullptr
+      d_states(nullptr),  // 初始化 d_states 为 nullptr
+      benchmark_mode_(true),  // 默认开启基准测试模式
+      benchmark_warmup_tokens_(64) {  // 默认基准测试预热64个tokens
 
     // 如果请求的设备是CUDA，确保模型也在CUDA上
     if (device_ == Device::CUDA) {
@@ -317,15 +319,13 @@ namespace py = pybind11;
 #include <vector>   // 用于 std::vector
 
 template <typename T>
-void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& input_ids, size_t max_length,
-                                                float temperature, float top_p, size_t top_k,
-                                                std::function<void(uint32_t)> callback) {
-    // 如果是第一次调用，执行预热
-    if (!has_warmed_up_ && device_ == Device::CUDA) {
-        std::cout << "执行CUDA预热..." << std::endl << std::flush;
+void InferenceEngine<T>::warmup(size_t warmup_tokens, bool force_warmup, float temperature, float top_p, size_t top_k) {
+    // 检查是否需要预热
+    if ((!has_warmed_up_ || force_warmup) && device_ == Device::CUDA) {
+        std::cout << "执行CUDA预热 (tokens: " << warmup_tokens << ")..." << std::endl << std::flush;
 
-        // 创建一个小的输入序列用于预热
-        std::vector<uint32_t> warmup_input(64, 1);
+        // 创建预热输入序列
+        std::vector<uint32_t> warmup_input(warmup_tokens, 1);
 
         // 保存当前KV缓存状态
         size_t original_kv_size = kv_cache_.size();
@@ -350,6 +350,7 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             uint32_t* warmup_token =
                 model_->prefill(&input_tensor, thread_pool_, &kv_cache_, top_k, temperature, top_p, d_states);
             GlobalCudaMemoryPool::set_prefill_phase(false);
+            
             // 如果是QwenModel且支持CUDA图，在预热阶段调用一次forward来初始化CUDA图
             // 这样可以使用真实的KV cache
             std::cout << "检查是否需要初始化CUDA图..." << std::endl;
@@ -378,6 +379,7 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
                     // 不是致命错误，继续执行
                 }
             }
+            
             // 停止计时
             warmup_timer.stop();
 
@@ -388,7 +390,9 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             GlobalCudaMemoryPool::reset_prefill_buffer();
 
             // 标记已完成预热
-            has_warmed_up_ = true;
+            if (!force_warmup) {
+                has_warmed_up_ = true;
+            }
             kv_cache_.resize(0);
             std::cout << "CUDA预热完成，耗时: " << std::fixed << std::setprecision(2) << warmup_timer.milliseconds()
                       << " 毫秒" << std::endl
@@ -397,6 +401,37 @@ void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& inp
             std::cerr << "预热过程中发生错误: " << e.what() << std::endl;
             // 即使预热失败，也继续执行正常的推理
         }
+    } else if (device_ == Device::CPU) {
+        std::cout << "CPU模式，跳过CUDA预热" << std::endl;
+    } else if (has_warmed_up_ && !force_warmup) {
+        std::cout << "已完成预热，跳过重复预热" << std::endl;
+    }
+}
+
+template <typename T>
+void InferenceEngine<T>::set_benchmark_mode(bool enable_benchmark, size_t benchmark_warmup_tokens) {
+    benchmark_mode_ = enable_benchmark;
+    benchmark_warmup_tokens_ = benchmark_warmup_tokens;
+    
+    if (enable_benchmark) {
+        std::cout << "启用基准测试模式，每次推理前预热 " << benchmark_warmup_tokens << " 个tokens" << std::endl;
+    } else {
+        std::cout << "关闭基准测试模式" << std::endl;
+    }
+}
+
+template <typename T>
+void InferenceEngine<T>::generate_with_callback(const std::vector<uint32_t>& input_ids, size_t max_length,
+                                                float temperature, float top_p, size_t top_k,
+                                                std::function<void(uint32_t)> callback) {
+    // 基准测试模式：每次调用前都预热
+    if (benchmark_mode_ && device_ == Device::CUDA) {
+        std::cout << "基准测试模式：开始预热..." << std::endl;
+        warmup(input_ids.size(), true, temperature, top_p, top_k);
+    }
+    // 如果是第一次调用且非基准测试模式，执行预热
+    else if (!has_warmed_up_ && device_ == Device::CUDA) {
+        warmup(64, false, temperature, top_p, top_k);
     }
 
     ThreadSafeQueue<GenerationResult> result_queue;

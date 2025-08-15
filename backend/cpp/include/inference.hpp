@@ -143,6 +143,16 @@ class InferenceEngine : public infer_base {
   // 重置推理状态（清空 KV 缓存）
   void reset();
 
+  // CUDA 预热函数
+  // warmup_tokens: 预热使用的token数量
+  // force_warmup: 是否强制预热（即使已经预热过）
+  void warmup(size_t warmup_tokens = 64, bool force_warmup = false, float temperature = 1.0f, float top_p = 0.9f, size_t top_k = 50);
+
+  // 设置基准测试模式
+  // enable_benchmark: 是否启用基准测试模式（每次调用前都预热）
+  // benchmark_warmup_tokens: 基准测试模式下的预热token数量
+  void set_benchmark_mode(bool enable_benchmark, size_t benchmark_warmup_tokens = 64);
+
   // 移动 InferenceEngine (及其模型和 KV Cache) 到 CUDA 设备
   InferenceEngine& cuda();
   // 移动 InferenceEngine (及其模型和 KV Cache) 到 CPU 设备 (可选)
@@ -155,4 +165,8 @@ class InferenceEngine : public infer_base {
   KVCache<T> kv_cache_;
   Device device_;
   curandState* d_states;
+  
+  // 基准测试模式相关变量
+  bool benchmark_mode_;
+  size_t benchmark_warmup_tokens_;
 };

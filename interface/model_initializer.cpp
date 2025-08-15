@@ -322,9 +322,9 @@ bool ModelInitializer::init_cuda_memory_pool(const std::unordered_map<std::strin
             std::cout << "Current GPU memory: " << (free_memory / (1024 * 1024)) << " MB free, "
                       << (total_memory / (1024 * 1024)) << " MB total" << std::endl;
 
-            if (free_memory > 256 * 1024 * 1024) {
-                // 计算prefill内存大小，使用可用内存的10%，但不超过256MB
-                size_t prefill_size = std::min(free_memory / 10, static_cast<size_t>(256 * 1024 * 1024));
+            if (free_memory > 1024 * 1024 * 1024) {
+        
+                size_t prefill_size = std::min(free_memory, static_cast<size_t>(256 * 1024 * 1024));
 
                 // 开启prefill模式
                 std::cout << "Enabling prefill mode with initial buffer size: " << (prefill_size / (1024 * 1024))
