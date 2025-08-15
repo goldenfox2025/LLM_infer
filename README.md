@@ -17,12 +17,25 @@
 * **硬件:** RTX4070Laptop
 * **参数:** `启用Flash Attention` `输出长度限制为201（包括prefill输出的1个token在内）` `top-k = 20`, `top-p = disabled`
 
-| 性能指标 (Performance Metric) | `llama.cpp` | `LLM_infer` |
+
+
+| 性能指标 | `llama.cpp` | `LLM_infer` |
 | :--- | :--- | :--- |
-| **Prompt处理 (Prefill)** | 23 tokens / 21.60 ms | **23 tokens / 17.94 ms** |
-| **Prompt处理速度 (Prefill Speed)** | 1065.01 tokens/s | **1282.05 tokens/s (1.20x)** |
-| **内容生成 (Decoding)** | 200 tokens / 2883.04 ms | **200 tokens / 2640.19 ms** |
-| **内容生成速度 (Decoding Speed)**| 69.37 tokens/s | **75.75 tokens/s (1.09x)** |
+| **首次Prompt处理 (Prefill耗时)** | 23 tokens / 21.60 ms | **23 tokens / 17.94 ms** |
+| **首次Prompt处理速度 (Prefill)** | 1065.01 tokens/s | **1282.05 tokens/s (提速1.20x)** |
+| **内容生成 (Decoding耗时)** | 200 tokens / 2883.04 ms | **200 tokens / 2640.19 ms** |
+| **内容生成速度 (Decoding)** | 69.37 tokens/s | **75.75 tokens/s (提速1.09x)** |
+| | | |
+| **基准测试模式 (Prefill耗时)** | 200 tokens / 33.44 ms | **200 tokens / 28.02 ms (提速1.19x)** |
+| **基准测试模式 (Prefill速度)** | 5980.84 tokens/s | **7137.75 tokens/s** |
+| **基准测试模式 (Decoding速度)** | 69.47 tokens/s | **75.75 tokens/s (提速1.09x)** |
+
+---
+
+**附注**
+
+- **基准测试 (Benchmark) 模式**：指对于每个测试输入，都在正式计时前，先用完全相同的输入运行一遍，以充分预热缓存（如JIT编译缓存、cuBLAS算法缓存等）。
+- **内存分配**：以上所有测试数据，LLM_infer是在优化Prefill缓冲区参数的条件下获得，确保在处理过程中不会发生因VMM的缓冲区不足而触发的新的物理内存分配。
 
 **结论：**
 测试结果表明，`LLM_infer` 引擎在核心推理任务上表现出更高的性能。在处理输入提示的Prefill阶段，其速度是`llama.cpp`的 **1.20倍**；在持续生成内容的Decoding阶段，速度实现了 **1.09倍** 的提升。
