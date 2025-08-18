@@ -67,7 +67,7 @@ __global__ void gemv_qkv_rope_fused_kernel(const T *A, const T *B, T *q, T *k, T
     }
 
     // Case 2: 索引在 Q 或 K 的范围内
-    size_t local_idx, base_len, current_n_heads;
+    size_t local_idx, current_n_heads;
     bool is_q;
 
     if (global_n < Q_len) {  // In Q

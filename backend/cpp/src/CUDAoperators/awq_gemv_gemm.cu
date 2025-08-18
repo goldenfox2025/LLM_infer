@@ -11,6 +11,7 @@
 
 #include "common.hpp"
 #include "cudaOP.cuh"
+#include "ptx_common.h"
 
 // CUDA 操作命名空间
 namespace cuda_OP {
@@ -19,159 +20,357 @@ constexpr int BITS = 4;                 // AWQ 量化位数
 constexpr int PACK_FACTOR = 32 / BITS;  // 一个 int32 可以打包多少个 4bit 数字
 constexpr int WARP_SIZE = 32;           // CUDA Warp 大小
 
-// gemv 格式的 awq 权重打包是顺序的
-// 仅支持bf16
-template <typename T,                                                    // 输入/输出数据类型 (half, bfloat16, float)
-          typename S,                                                    // Scale 数据类型 (通常是 float)
-          int BM,                                                        // M 方向的 Block 大小
-          int BN,                                                        // N 方向的 Block 大小
-          int BK,                                                        // K 方向的 Block 大小
-          int WMMA_M,                                                    // WMMA 指令的 M 方向大小
-          int WMMA_N,                                                    // WMMA 指令的 N 方向大小
-          int WMMA_K,                                                    // WMMA 指令的 K 方向大小
-          int WARP_CNT>                                                  // 每个 Block 的 Warp 数量
-__global__ void matmul_awq_gemm_kernel(const T* __restrict__ inp,        // 输入矩阵 [M, K]
-                                       const int32_t* __restrict__ qwt,  // 量化权重 [N, K/8] (N-Major)
-                                       const S* __restrict__ scl,        // 缩放因子 [N, G_padded] (N-Major)
-                                       const int32_t* __restrict__ zos,  // 零点 [N, G/8] (N-Major)
-                                       T* __restrict__ out,              // 输出矩阵 [M, N]
-                                       int M, int K, int N,
-                                       int group_size,  // AWQ group 大小
-                                       int G_PADDED, const T* __restrict__ bias) {
+// AWQ GEMM kernel - minimal change from WMMA to MMA
+template <typename T, typename S, int BM, int BN, int BK, int WMMA_M, int WMMA_N, int WMMA_K, int WAPR_NUM, int K_STAGE, int WARP_TILE_M, int WARP_TILE_N>
+__global__ void awq_gemm_kernel_mma(const T* __restrict__ A,           // 输入矩阵 [M, K]
+                                     const int32_t* __restrict__ qwt,   // 量化权重 [N, K/8] (N-Major)
+                                     const S* __restrict__ scl,         // 缩放因子 [N, G_padded] (N-Major)
+                                     const int32_t* __restrict__ zos,   // 零点 [N, G/8] (N-Major)
+                                     T* __restrict__ C,                 // 输出矩阵 [M, N]
+                                     int M, int N, int K, int group_size, int G_PADDED) {
+    // AWQ quantization constants
+    constexpr int BITS = 4;
+    constexpr int PACK_FACTOR = 32 / BITS;
     const int G = K / group_size;
-    const int K_PACKED = (K + PACK_FACTOR - 1) / PACK_FACTOR;
-    const int G_PACKED = (G + PACK_FACTOR - 1) / PACK_FACTOR;
-    const int WarpsN = BN / WMMA_N;
+    const int K_PACKED = K / PACK_FACTOR;
+    const int G_PACKED = G / PACK_FACTOR;
+    
+    // Follow exact kernel4 warp layout
+    int warp_id = threadIdx.x / 32;
+    constexpr int WARP_N_NUM = BN / (WMMA_N * WARP_TILE_N);
+    int warp_n_id = warp_id % WARP_N_NUM;
+    int warp_m_id = warp_id / WARP_N_NUM;
+    int global_m_base = blockIdx.x * BM;
+    int global_n_base = blockIdx.y * BN;
+    constexpr int SA_SIZE = BM * BK;
+    constexpr int SB_SIZE = BN * BK;
+    const int lane_id = threadIdx.x % 32;
+    
+    // Shared memory exactly like kernel4
+    __shared__ T smemA[K_STAGE * BM * BK];
+    __shared__ T smemB[K_STAGE * BN * BK];
+    uint32_t smem_a_base_ptr = __cvta_generic_to_shared(smemA);
+    uint32_t smem_b_base_ptr = __cvta_generic_to_shared(smemB);
 
-    int warp_id = threadIdx.x / WARP_SIZE;
-    int warp_m_id = warp_id / WarpsN;
-    int warp_n_id = warp_id % WarpsN;
+    constexpr int vec_size = sizeof(float4) / sizeof(T);
 
-    int m_global_start = blockIdx.x * BM;
-    int n_global_start = blockIdx.y * BN;
-    using namespace nvcuda;
-    using FragmentA = wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, T, wmma::row_major>;
-    using FragmentB = wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, T, wmma::row_major>;
-    using FragmentC = wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>;
-    __shared__ T smemA[BM * BK];
-    __shared__ T smemB[BK * BN];
-    __shared__ float smem_out[BM][BN];
-    FragmentC fragC;
-    wmma::fill_fragment(fragC, 0.0f);
-    constexpr int vec_unit = 16 / sizeof(T);
-    for (int tile_k = 0; tile_k < K; tile_k += BK) {
-        // 加载A矩阵
-        for (int load_idx = threadIdx.x; load_idx < BM * BK / vec_unit; load_idx += blockDim.x) {
-            int load_row = load_idx / (BK / vec_unit);
-            int load_pack_col = load_idx % (BK / vec_unit);
-            int global_row = m_global_start + load_row;
-            int global_col = tile_k + load_pack_col * vec_unit;
-            if (global_row < M) {
-                if (global_col + vec_unit <= K) {
-                    reinterpret_cast<float4*>(smemA)[load_row * (BK / vec_unit) + load_pack_col] =
-                        reinterpret_cast<const float4*>(
-                            inp)[(m_global_start + load_row) * (K / vec_unit) + global_col / vec_unit];
-                } else if (global_col < K) {
-                    for (int i = 0; i < vec_unit; ++i) {
-                        if (global_col + i < K) {
-                            smemA[load_row * BK + load_pack_col * vec_unit + i] =
-                                inp[(m_global_start + load_row) * K + global_col + i];
-                        } else {
-                            smemA[load_row * BK + load_pack_col * vec_unit + i] = 0.0f;
-                        }
-                    }
-                } else {
-                    for (int i = 0; i < vec_unit; ++i) {
-                        smemA[load_row * BK + load_pack_col * vec_unit + i] = 0.0f;
-                    }
-                }
-            } else {
-                for (int i = 0; i < vec_unit; ++i) {
-                    smemA[load_row * BK + load_pack_col * vec_unit + i] = 0.0f;
-                }
-            }
-        }
-        // 加载B矩阵
-
-        // BN 最初设置为 128
-        // 单个 int32 打包 8 个权重
-        // float4 可一次性加载 32 个数据
-        // 考虑到复杂性，仍然先实现单加载
-        // 或者说 int32 本身即可以理解为向量化加载
-        for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x) {
-            int load_row = load_idx / (BK / 8);
-            int load_col = load_idx % (BK / 8);
-            int global_row = n_global_start + load_row;
-            int global_col = tile_k + load_col * 8;
-
-            int32_t qwt_val = 0;
-            if (global_row < N && global_col < K) {
-                qwt_val = qwt[global_row * K_PACKED + (tile_k + load_col * 8) / 8];
-            }
-
-            int32_t zeros_val = 0;
-            if (global_row < N && global_col < K) {
-                zeros_val = zos[global_row * G_PACKED + ((tile_k + load_col * 8) / group_size) / 8];
-            }
-
-            for (int i = 0; i < 8; ++i) {
-                int current_k = global_col + i;
-                int inner_k = current_k % PACK_FACTOR;
-                int group_idx = current_k / group_size;
-                S scale_val = (global_row < N && current_k < K) ? scl[global_row * G_PADDED + group_idx] : S(0);
-                int shift_w = inner_k * BITS;
-                uint32_t w = (qwt_val >> shift_w) & ((1 << BITS) - 1);
-                int inner_g = (current_k / group_size) % PACK_FACTOR;
-                int shift_z = inner_g * BITS;
-                uint32_t z = (zeros_val >> shift_z) & ((1 << BITS) - 1);
-                float temp_val = (static_cast<float>(w) - static_cast<float>(z)) * static_cast<float>(scale_val);
-                T dequantized_val = static_cast<T>(temp_val);  // 最后转换
-
-                int n_local = load_row;
-                int k_local = load_col * 8 + i;
-                if (n_local < BN && k_local < BK) {
-                    smemB[k_local * BN + n_local] = dequantized_val;
-                }
-            }
-        }
-        __syncthreads();
-
-        for (int k_step = 0; k_step < BK; k_step += WMMA_K) {
-            FragmentA fragA_load;
-            FragmentB fragB_load;
-            const T* smemA_ptr = smemA + (warp_m_id * WMMA_M * BK) + k_step;
-            wmma::load_matrix_sync(fragA_load, smemA_ptr, BK);
-            const T* smemB_ptr = smemB + (k_step * BN) + (warp_n_id * WMMA_N);
-            wmma::load_matrix_sync(fragB_load, smemB_ptr, BN);
-
-            wmma::mma_sync(fragC, fragA_load, fragB_load, fragC);
-        }
-    }
-
-    const int out_m_base = warp_m_id * WMMA_M;
-    const int out_n_base = warp_n_id * WMMA_N;
-
-    wmma::store_matrix_sync(&smem_out[out_m_base][out_n_base], fragC, BN, wmma::mem_row_major);
-    __syncthreads();
+    // Use MMA registers like kernel6 (16x16x16)
+    uint32_t RC[WARP_TILE_M][WARP_TILE_N][8];
 #pragma unroll
-    for (int write_idx = threadIdx.x; write_idx < BM * BN; write_idx += blockDim.x) {
-        int m_local = write_idx / BN;
-        int load_row = write_idx % BN;
-
-        int m_global = m_global_start + m_local;
-        int n_global = n_global_start + load_row;
-
-        if (m_global < M && n_global < N) {
-            float result = smem_out[m_local][load_row];
-            if (bias) {
-                result += static_cast<float>(bias[n_global]);
-            }
-
-            out[m_global * N + n_global] = static_cast<T>(result);
+    for (int i = 0; i < WARP_TILE_M; ++i)
+    {
+#pragma unroll
+        for (int j = 0; j < WARP_TILE_N; ++j)
+        {
+            RC[i][j][0] = 0; RC[i][j][1] = 0; RC[i][j][2] = 0; RC[i][j][3] = 0;
+            RC[i][j][4] = 0; RC[i][j][5] = 0; RC[i][j][6] = 0; RC[i][j][7] = 0;
         }
     }
-}
+    
+    // Load initial stages exactly like kernel3
+    for (int k_load_stage = 0; k_load_stage < (K_STAGE - 1); ++k_load_stage)
+    {
+        // Load A matrix data exactly like kernel3
+        for (int load_idx = threadIdx.x * vec_size; load_idx < BM * BK; load_idx += blockDim.x * vec_size)
+        {
+            int smem_row = load_idx / (BK);
+            int smem_col = load_idx % (BK);
+            int global_row = global_m_base + smem_row;
+            int global_col = k_load_stage * BK + smem_col;
+            
+            if (global_row < M && (global_col + vec_size - 1) < K)
+            {
+                int load_gmem_a_addr = global_row * K + global_col;
+                uint32_t load_smem_a_ptr = smem_a_base_ptr + (load_idx + k_load_stage * SA_SIZE) * sizeof(T);
+                CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+            }
+        }
+        
+        // Optimized AWQ dequantization - vectorized and group-aware
+        for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x)
+        {
+            int smem_row = load_idx / (BK / 8);
+            int smem_col_base = (load_idx % (BK / 8)) * 8;
+            int global_row = global_n_base + smem_row;
+            int global_col_base = k_load_stage * BK + smem_col_base;
+            
+            // Vectorized AWQ dequantization - process 8 consecutive K values
+            int32_t qwt_val = 0;
+            if (global_row < N && global_col_base < K) {
+                qwt_val = qwt[global_row * K_PACKED + global_col_base / PACK_FACTOR];
+            }
+            
+            // Pre-fetch scale and zero for this group (group_size=128 optimization)
+            int base_group_idx = global_col_base / group_size;
+            S scale_val = (global_row < N && global_col_base < K) ? scl[global_row * G_PADDED + base_group_idx] : S(0);
+            int32_t zeros_val = 0;
+            if (global_row < N && global_col_base < K) {
+                zeros_val = zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR];
+            }
+            
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                int smem_col = smem_col_base + i;
+                int global_col = global_col_base + i;
+                T dequantized_val = T(0);
+                
+                if (global_row < N && global_col < K) {
+                    // Extract weight from packed value
+                    int inner_k = global_col % PACK_FACTOR;
+                    int shift_w = inner_k * BITS;
+                    uint32_t w = (qwt_val >> shift_w) & 0xF;
+                    
+                    // Get scale and zero (optimize for group_size=128)
+                    int current_group = global_col / group_size;
+                    S current_scale = (current_group == base_group_idx) ? scale_val : 
+                                      scl[global_row * G_PADDED + current_group];
+                    
+                    int inner_g = current_group % PACK_FACTOR;
+                    int shift_z = inner_g * BITS;
+                    uint32_t z = (zeros_val >> shift_z) & 0xF;
+                    
+                    dequantized_val = static_cast<T>((static_cast<float>(w) - static_cast<float>(z)) * static_cast<float>(current_scale));
+                }
+                
+                // Store in kernel4-compatible layout
+                int base_load_idx = smem_row * BK + smem_col;
+                int store_idx = base_load_idx + k_load_stage * SB_SIZE;
+                smemB[store_idx] = dequantized_val;
+            }
+        }
+        CP_ASYNC_COMMIT_GROUP();
+    }
+    CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+    __syncthreads();
 
+    // Main loop exactly like kernel4 with MMA
+    uint32_t RA[WARP_TILE_M][4];
+    uint32_t RB[WARP_TILE_N][4];
+    for (int k_load_base = (K_STAGE - 1) * BK; k_load_base < K; k_load_base += BK)
+    {
+        const int k_load_stage = k_load_base / BK;
+        int smem_sel = (k_load_stage + 1) % K_STAGE;
+        int smem_sel_next = k_load_stage % K_STAGE;
+
+        // Load A matrix data exactly like kernel4
+        for (int load_idx = threadIdx.x * vec_size; load_idx < BM * BK; load_idx += blockDim.x * vec_size)
+        {
+            int smem_row = load_idx / (BK);
+            int smem_col = load_idx % (BK);
+            int global_row = global_m_base + smem_row;
+            int global_col = k_load_base + smem_col;
+            
+            if (global_row < M && (global_col + vec_size - 1) < K)
+            {
+                int load_gmem_a_addr = global_row * K + global_col;
+                uint32_t load_smem_a_ptr = smem_a_base_ptr + (load_idx + smem_sel_next * SA_SIZE) * sizeof(T);
+                CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
+            }
+        }
+        
+        // Optimized AWQ dequantization - vectorized and group-aware
+        for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x)
+        {
+            int smem_row = load_idx / (BK / 8);
+            int smem_col_base = (load_idx % (BK / 8)) * 8;
+            int global_row = global_n_base + smem_row;
+            int global_col_base = k_load_base + smem_col_base;
+            
+            // Vectorized AWQ dequantization - process 8 consecutive K values
+            int32_t qwt_val = 0;
+            if (global_row < N && global_col_base < K) {
+                qwt_val = qwt[global_row * K_PACKED + global_col_base / PACK_FACTOR];
+            }
+            
+            // Pre-fetch scale and zero for this group (group_size=128 optimization)
+            int base_group_idx = global_col_base / group_size;
+            S scale_val = (global_row < N && global_col_base < K) ? scl[global_row * G_PADDED + base_group_idx] : S(0);
+            int32_t zeros_val = 0;
+            if (global_row < N && global_col_base < K) {
+                zeros_val = zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR];
+            }
+            
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                int smem_col = smem_col_base + i;
+                int global_col = global_col_base + i;
+                T dequantized_val = T(0);
+                
+                if (global_row < N && global_col < K) {
+                    // Extract weight from packed value
+                    int inner_k = global_col % PACK_FACTOR;
+                    int shift_w = inner_k * BITS;
+                    uint32_t w = (qwt_val >> shift_w) & 0xF;
+                    
+                    // Get scale and zero (optimize for group_size=128)
+                    int current_group = global_col / group_size;
+                    S current_scale = (current_group == base_group_idx) ? scale_val : 
+                                      scl[global_row * G_PADDED + current_group];
+                    
+                    int inner_g = current_group % PACK_FACTOR;
+                    int shift_z = inner_g * BITS;
+                    uint32_t z = (zeros_val >> shift_z) & 0xF;
+                    
+                    dequantized_val = static_cast<T>((static_cast<float>(w) - static_cast<float>(z)) * static_cast<float>(current_scale));
+                }
+                
+                // Store in kernel4-compatible layout
+                int base_load_idx = smem_row * BK + smem_col;
+                int store_idx = base_load_idx + smem_sel_next * SB_SIZE;
+                smemB[store_idx] = dequantized_val;
+            }
+        }
+        CP_ASYNC_COMMIT_GROUP();
+
+        // Compute section exactly like kernel4 with MMA
+        for (int TILE_K = 0; TILE_K < BK; TILE_K += WMMA_K)
+        {
+            for (int i = 0; i < WARP_TILE_M; ++i)
+            {
+                int warp_smem_a_m = warp_m_id * WMMA_M * WARP_TILE_M + i * WMMA_M;
+                int warp_smem_a_k = TILE_K;
+                T *warp_smem_a_ptr = smemA + warp_smem_a_m * BK + warp_smem_a_k + smem_sel * SA_SIZE;
+                T *lane_smem_a_ptr = warp_smem_a_ptr + (lane_id % 16) * BK + (lane_id / 16) * vec_size;
+                uint32_t ptr = __cvta_generic_to_shared(lane_smem_a_ptr);
+                LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], ptr);
+            }
+            for (int i = 0; i < WARP_TILE_N; ++i)
+            {
+                int warp_smem_b_n = warp_n_id * WMMA_N * WARP_TILE_N + i * WMMA_N;
+                int warp_smem_b_k = TILE_K;
+                T *warp_smem_b_ptr = smemB + warp_smem_b_n * BK + warp_smem_b_k + smem_sel * SB_SIZE;
+                
+                // For 16x16x16, need to load 2 groups of 8 columns
+                T *lane_smem_b_ptr1 = warp_smem_b_ptr + (lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                uint32_t ptr1 = __cvta_generic_to_shared(lane_smem_b_ptr1);
+                LDMATRIX_X2(RB[i][0], RB[i][1], ptr1);
+                
+                T *lane_smem_b_ptr2 = warp_smem_b_ptr + (8 + lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                uint32_t ptr2 = __cvta_generic_to_shared(lane_smem_b_ptr2);
+                LDMATRIX_X2(RB[i][2], RB[i][3], ptr2);
+            }
+            for (int i = 0; i < WARP_TILE_M; ++i)
+            {
+                for (int j = 0; j < WARP_TILE_N; ++j)
+                {
+                    MMA161616_BF16(RC[i][j][0], RC[i][j][1], RC[i][j][2], RC[i][j][3],
+                                   RC[i][j][4], RC[i][j][5], RC[i][j][6], RC[i][j][7], 
+                                   RA[i][0], RA[i][1], RA[i][2], RA[i][3], 
+                                   RB[j][0], RB[j][1], RB[j][2], RB[j][3], 
+                                   RC[i][j][0], RC[i][j][1], RC[i][j][2], RC[i][j][3],
+                                   RC[i][j][4], RC[i][j][5], RC[i][j][6], RC[i][j][7]);
+                }
+            }
+        }
+
+        CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
+        __syncthreads();
+    }
+
+    // Main loop end - wait for remaining stages
+    if ((K_STAGE - 2) > 0)
+    {
+        CP_ASYNC_WAIT_GROUP(0);
+        __syncthreads();
+    }
+
+    // Compute remaining stages exactly like kernel4
+    for (int k_load = 0; k_load < K_STAGE - 1; ++k_load)
+    {
+        const int stage_sel = ((K / BK - (K_STAGE - 1) + k_load) % K_STAGE);
+        for (int TILE_K = 0; TILE_K < BK; TILE_K += WMMA_K)
+        {
+            for (int i = 0; i < WARP_TILE_M; ++i)
+            {
+                int warp_smem_a_m = warp_m_id * WMMA_M * WARP_TILE_M + i * WMMA_M;
+                int warp_smem_a_k = TILE_K;
+                T *warp_smem_a_ptr = smemA + warp_smem_a_m * BK + warp_smem_a_k + stage_sel * SA_SIZE;
+                T *lane_smem_a_ptr = warp_smem_a_ptr + (lane_id % 16) * BK + (lane_id / 16) * vec_size;
+                uint32_t ptr = __cvta_generic_to_shared(lane_smem_a_ptr);
+                LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], ptr);
+            }
+            for (int i = 0; i < WARP_TILE_N; ++i)
+            {
+                int warp_smem_b_n = warp_n_id * WMMA_N * WARP_TILE_N + i * WMMA_N;
+                int warp_smem_b_k = TILE_K;
+                T *warp_smem_b_ptr = smemB + warp_smem_b_n * BK + warp_smem_b_k + stage_sel * SB_SIZE;
+                
+                // For 16x16x16, need to load 2 groups of 8 columns
+                T *lane_smem_b_ptr1 = warp_smem_b_ptr + (lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                uint32_t ptr1 = __cvta_generic_to_shared(lane_smem_b_ptr1);
+                LDMATRIX_X2(RB[i][0], RB[i][1], ptr1);
+                
+                T *lane_smem_b_ptr2 = warp_smem_b_ptr + (8 + lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                uint32_t ptr2 = __cvta_generic_to_shared(lane_smem_b_ptr2);
+                LDMATRIX_X2(RB[i][2], RB[i][3], ptr2);
+            }
+            for (int i = 0; i < WARP_TILE_M; ++i)
+            {
+                for (int j = 0; j < WARP_TILE_N; ++j)
+                {
+                    MMA161616_BF16(RC[i][j][0], RC[i][j][1], RC[i][j][2], RC[i][j][3],
+                                   RC[i][j][4], RC[i][j][5], RC[i][j][6], RC[i][j][7], 
+                                   RA[i][0], RA[i][1], RA[i][2], RA[i][3], 
+                                   RB[j][0], RB[j][1], RB[j][2], RB[j][3], 
+                                   RC[i][j][0], RC[i][j][1], RC[i][j][2], RC[i][j][3],
+                                   RC[i][j][4], RC[i][j][5], RC[i][j][6], RC[i][j][7]);
+                }
+            }
+        }
+    }
+
+    // Store results exactly like kernel6 (16x16x16)
+#pragma unroll
+    for (int i = 0; i < WARP_TILE_M; ++i)
+    {
+#pragma unroll
+        for (int j = 0; j < WARP_TILE_N; ++j)
+        {
+            const int tile_m0 = global_m_base + (warp_m_id * WMMA_M * WARP_TILE_M) + i * WMMA_M;
+            const int tile_n0 = global_n_base + (warp_n_id * WMMA_N * WARP_TILE_N) + j * WMMA_N;
+
+            int group = lane_id >> 2; // 0..7  → 行基
+            int tid4 = lane_id & 3;   // 0..3  → 列基
+            int row0 = group;         // 上半行
+            int row1 = group + 8;     // 下半行
+            
+            // 对于16x16，列偏移需要覆盖16列，分为两组8列
+            int col0 = 2 * tid4;      // 第一组8列中的左列
+            int col1 = 2 * tid4 + 1;  // 第一组8列中的右列
+            int col2 = 2 * tid4 + 8;  // 第二组8列中的左列
+            int col3 = 2 * tid4 + 9;  // 第二组8列中的右列
+
+            // 3. 取出8个累加结果（FP32）
+            float v0 = __uint_as_float(RC[i][j][0]); // 对应 (row0, col0)
+            float v1 = __uint_as_float(RC[i][j][1]); // 对应 (row0, col1)
+            float v2 = __uint_as_float(RC[i][j][2]); // 对应 (row1, col0)
+            float v3 = __uint_as_float(RC[i][j][3]); // 对应 (row1, col1)
+            float v4 = __uint_as_float(RC[i][j][4]); // 对应 (row0, col2)
+            float v5 = __uint_as_float(RC[i][j][5]); // 对应 (row0, col3)
+            float v6 = __uint_as_float(RC[i][j][6]); // 对应 (row1, col2)
+            float v7 = __uint_as_float(RC[i][j][7]); // 对应 (row1, col3)
+
+            // 4. 折算成全局内存下标并越界保护
+            if ((tile_m0 + row0) < M && (tile_n0 + col0) < N)
+                C[(tile_m0 + row0) * N + (tile_n0 + col0)] = static_cast<T>(v0);
+            if ((tile_m0 + row0) < M && (tile_n0 + col1) < N)
+                C[(tile_m0 + row0) * N + (tile_n0 + col1)] = static_cast<T>(v1);
+            if ((tile_m0 + row1) < M && (tile_n0 + col0) < N)
+                C[(tile_m0 + row1) * N + (tile_n0 + col0)] = static_cast<T>(v2);
+            if ((tile_m0 + row1) < M && (tile_n0 + col1) < N)
+                C[(tile_m0 + row1) * N + (tile_n0 + col1)] = static_cast<T>(v3);
+            if ((tile_m0 + row0) < M && (tile_n0 + col2) < N)
+                C[(tile_m0 + row0) * N + (tile_n0 + col2)] = static_cast<T>(v4);
+            if ((tile_m0 + row0) < M && (tile_n0 + col3) < N)
+                C[(tile_m0 + row0) * N + (tile_n0 + col3)] = static_cast<T>(v5);
+            if ((tile_m0 + row1) < M && (tile_n0 + col2) < N)
+                C[(tile_m0 + row1) * N + (tile_n0 + col2)] = static_cast<T>(v6);
+            if ((tile_m0 + row1) < M && (tile_n0 + col3) < N)
+                C[(tile_m0 + row1) * N + (tile_n0 + col3)] = static_cast<T>(v7);
+        }
+    }
+
+}
 // GEMV Kernel (M = 1, N-Major 优化版)
 // 专门为 M = 1 优化，假设权重、scales、zeros 为 N-Major 布局
 // 使用动态共享内存，因其大小依赖运行时的 K 和 G
@@ -499,23 +698,26 @@ void matmul_quantized_gemv(const Tensor<T>& input,           // 输入 [M, K]
                                                                        bias ? bias->data_ptr() : nullptr);
 
     } else {
-        constexpr int BM = 16;
-        constexpr int BN = 64;
+        constexpr int BM = 32;  // Increased to support WARP_TILE_M=2 (each warp needs 32 rows)
+        constexpr int BN = 128;
         constexpr int BK = 16;
         constexpr int WMMA_M = 16;
         constexpr int WMMA_N = 16;
         constexpr int WMMA_K = 16;
-        constexpr int WARP_CNT = BM / WMMA_M * BN / WMMA_N;
+        constexpr int WARP_TILE_M = 1; 
+        constexpr int WARP_TILE_N = 1;  
+        constexpr int WARP_CNT = BM / WMMA_M / WARP_TILE_M* BN / WMMA_N /WARP_TILE_N;
         const dim3 threads_gemm(WARP_CNT * WARP_SIZE);               // 1D Block
         const dim3 grid_gemm((M + BM - 1) / BM, (N + BN - 1) / BN);  // 2D Grid
 
         if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-            matmul_awq_gemm_kernel<T, ScaleType, BM, BN, BK, WMMA_M, WMMA_N, WMMA_K, WARP_CNT>
-                <<<grid_gemm, threads_gemm, 0, stream>>>(  // 使用静态共享内存
-                    input.data_ptr(), qweight.data_ptr(), scales.data_ptr(), zeros.data_ptr(), output->data_ptr(), M, K,
-                    N, group_size,
-                    G_PADDED,  // !!! 传递 G_PADDED !!!
-                    bias ? bias->data_ptr() : nullptr);
+            // Use MMA instead of WMMA for performance
+            constexpr int K_STAGES = 2;     // Multi-stage pipeline for better overlap
+          
+            awq_gemm_kernel_mma<T, ScaleType, BM, BN, BK, WMMA_M, WMMA_N, WMMA_K, WARP_CNT, K_STAGES, WARP_TILE_M, WARP_TILE_N>
+                <<<grid_gemm, threads_gemm, 0, stream>>>(
+                    input.data_ptr(), qweight.data_ptr(), scales.data_ptr(), zeros.data_ptr(), output->data_ptr(), 
+                    M, N, K, group_size, G_PADDED);
         } else {
             throw std::runtime_error("Unsupported input type for AWQ gemv GEMM kernel");
         }

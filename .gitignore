@@ -138,3 +138,4 @@ logits_data/target/logits_57.bin
 logits_data/visualizations/token_pos_56_comparison.png
 frontend/QwenTest.py
 up_d.sh
+test_matmul
