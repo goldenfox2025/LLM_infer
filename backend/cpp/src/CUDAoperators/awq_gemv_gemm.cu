@@ -336,12 +336,12 @@ __global__ void awq_gemm_kernel_mma(const T* A,          // Input matrix [M, K]
 
 template <typename T, typename S, int BM, int BN, int BK, int WMMA_M, int WMMA_N, int WMMA_K, int WARP_NUM, int K_STAGE,
           int WARP_TILE_M, int WARP_TILE_N>
-__global__ void awq_gemm_kernel_mma(const T* A,          // Input matrix [M, K]
-                                    const int32_t* qwt,  // Quantized weights [N, K/8] (N-Major)
-                                    const S* scl,        // Scale factors [N, G_padded] (N-Major)
-                                    const int32_t* zos,  // Zero points [N, G/8] (N-Major)
-                                    T* C,                // Output matrix [M, N]
-                                    int M, int N, int K, int group_size, int G_PADDED) {
+__global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, K]
+                                       const int32_t* qwt,  // Quantized weights [N, K/8] (N-Major)
+                                       const S* scl,        // Scale factors [N, G_padded] (N-Major)
+                                       const int32_t* zos,  // Zero points [N, G/8] (N-Major)
+                                       T* C,                // Output matrix [M, N]
+                                       int M, int N, int K, int group_size, int G_PADDED) {
     // Dequantization constants
     constexpr int BITS = 4;
     constexpr int PACK_FACTOR = 32 / BITS;
