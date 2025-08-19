@@ -342,7 +342,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
                                        const int32_t* zos,  // Zero points [N, G/8] (N-Major)
                                        T* C,                // Output matrix [M, N]
                                        int M, int N, int K, int group_size, int G_PADDED) {
-    // Dequantization constants
     constexpr int BITS = 4;
     constexpr int PACK_FACTOR = 32 / BITS;
 
@@ -360,7 +359,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
     constexpr int SB_SIZE = BN * BK;
     const int lane_id = threadIdx.x % 32;
 
-    // Shared memory
     __shared__ T smemA[K_STAGE * BM * BK];
     __shared__ T smemB[K_STAGE * BN * BK];
     uint32_t smem_a_base_ptr = __cvta_generic_to_shared(smemA);
@@ -368,7 +366,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
 
     constexpr int vec_size = sizeof(float4) / sizeof(T);
 
-    // Registers for MMA
     uint32_t RC[WARP_TILE_M][WARP_TILE_N][8];
 
 #pragma unroll
@@ -386,9 +383,7 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
         }
     }
 
-    // Pre-loading loop with swizzle
     for (int k_load_stage = 0; k_load_stage < (K_STAGE - 1); ++k_load_stage) {
-        // Load A matrix data with swizzle
         for (int load_idx = threadIdx.x * vec_size; load_idx < BM * BK; load_idx += blockDim.x * vec_size) {
             int smem_row = load_idx / BK;
             int smem_col = load_idx % BK;
@@ -397,7 +392,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
 
             if (global_row < M && (global_col + vec_size - 1) < K) {
                 int load_gmem_a_addr = global_row * K + global_col;
-                // Apply swizzle to calculate storage position
                 int swizzled_col = swizzle_permuted_A_j(smem_row, smem_col);
                 int swizzled_idx = smem_row * BK + swizzled_col;
                 uint32_t load_smem_a_ptr = smem_a_base_ptr + (swizzled_idx + k_load_stage * SA_SIZE) * sizeof(T);
@@ -405,7 +399,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
             }
         }
 
-        // Dequantize B and store to shared memory with swizzle
         for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x) {
             int smem_row = load_idx / (BK / 8);
             int smem_col_base = (load_idx % (BK / 8)) * 8;
@@ -420,10 +413,8 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
             int32_t zeros_val =
                 (global_row < N && global_col_base < K) ? zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR] : 0;
 
-            // MODIFICATION START: Swizzle the base address of the 8-value block
             int swizzled_col_base = swizzle_permuted_B_j(smem_row, smem_col_base);
             int swizzled_idx_base = smem_row * BK + swizzled_col_base;
-            // MODIFICATION END
 
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
@@ -458,7 +449,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
         int smem_sel = (k_load_stage + 1) % K_STAGE;
         int smem_sel_next = k_load_stage % K_STAGE;
 
-        // Load A matrix data with swizzle
         for (int load_idx = threadIdx.x * vec_size; load_idx < BM * BK; load_idx += blockDim.x * vec_size) {
             int smem_row = load_idx / BK;
             int smem_col = load_idx % BK;
@@ -474,7 +464,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
             }
         }
 
-        // Dequantize B and store to shared memory with swizzle
         for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x) {
             int smem_row = load_idx / (BK / 8);
             int smem_col_base = (load_idx % (BK / 8)) * 8;
@@ -489,10 +478,8 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
             int32_t zeros_val =
                 (global_row < N && global_col_base < K) ? zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR] : 0;
 
-            // MODIFICATION START: Swizzle the base address of the 8-value block
             int swizzled_col_base = swizzle_permuted_B_j(smem_row, smem_col_base);
             int swizzled_idx_base = smem_row * BK + swizzled_col_base;
-            // MODIFICATION END
 
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
@@ -509,40 +496,33 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
                                                      static_cast<float>(current_scale));
                 }
 
-                // MODIFICATION START: Store values contiguously from the swizzled base
                 int store_idx = swizzled_idx_base + i + smem_sel_next * SB_SIZE;
                 smemB[store_idx] = dequantized_val;
-                // MODIFICATION END
             }
         }
         CP_ASYNC_COMMIT_GROUP();
 
         for (int TILE_K = 0; TILE_K < BK; TILE_K += WMMA_K) {
-            // Read A matrix data from swizzled layout
             for (int i = 0; i < WARP_TILE_M; ++i) {
                 int warp_smem_a_m = warp_m_id * WMMA_M * WARP_TILE_M + i * WMMA_M;
                 int warp_smem_a_k = TILE_K;
-                // Calculate logical position
                 int base_row = warp_smem_a_m + (lane_id % 16);
                 int base_col = warp_smem_a_k + (lane_id / 16) * vec_size;
-                // Apply swizzle to find actual storage position
                 int swizzled_col = swizzle_permuted_A_j(base_row, base_col);
                 T* lane_smem_a_ptr = smemA + base_row * BK + swizzled_col + smem_sel * SA_SIZE;
                 uint32_t ptr = __cvta_generic_to_shared(lane_smem_a_ptr);
                 LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], ptr);
             }
-            // Read B matrix data from swizzled layout
+
             for (int i = 0; i < WARP_TILE_N; ++i) {
                 int warp_smem_b_n = warp_n_id * WMMA_N * WARP_TILE_N + i * WMMA_N;
                 int warp_smem_b_k = TILE_K;
-                // First 8 columns
                 int base_row1 = warp_smem_b_n + (lane_id % 8);
                 int base_col1 = warp_smem_b_k + (lane_id / 8) * vec_size;
                 int swizzled_col1 = swizzle_permuted_B_j(base_row1, base_col1);
                 T* lane_smem_b_ptr1 = smemB + base_row1 * BK + swizzled_col1 + smem_sel * SB_SIZE;
                 uint32_t ptr1 = __cvta_generic_to_shared(lane_smem_b_ptr1);
                 LDMATRIX_X2(RB[i][0], RB[i][1], ptr1);
-                // Second 8 columns
                 int base_row2 = warp_smem_b_n + 8 + (lane_id % 8);
                 int base_col2 = warp_smem_b_k + (lane_id / 8) * vec_size;
                 int swizzled_col2 = swizzle_permuted_B_j(base_row2, base_col2);
@@ -568,7 +548,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
         __syncthreads();
     }
 
-    // Compute remaining stages
     for (int k_load = 0; k_load < K_STAGE - 1; ++k_load) {
         const int stage_sel = ((K / BK - (K_STAGE - 1) + k_load) % K_STAGE);
         for (int TILE_K = 0; TILE_K < BK; TILE_K += WMMA_K) {
@@ -609,7 +588,6 @@ __global__ void awq_gemm_kernel_mma_v1(const T* A,          // Input matrix [M, 
         }
     }
 
-// Store results
 #pragma unroll
     for (int i = 0; i < WARP_TILE_M; ++i) {
 #pragma unroll
