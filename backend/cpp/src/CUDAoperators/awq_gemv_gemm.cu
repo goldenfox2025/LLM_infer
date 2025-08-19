@@ -20,16 +20,15 @@ constexpr int BITS = 4;                 // AWQ 量化位数
 constexpr int PACK_FACTOR = 32 / BITS;  // 一个 int32 可以打包多少个 4bit 数字
 constexpr int WARP_SIZE = 32;           // CUDA Warp 大小
 
-// AWQ GEMM kernel
-template <typename T, typename S, int BM, int BN, int BK, int WMMA_M, int WMMA_N, int WMMA_K, int WAPR_NUM, int K_STAGE,
+template <typename T, typename S, int BM, int BN, int BK, int WMMA_M, int WMMA_N, int WMMA_K, int WARP_NUM, int K_STAGE,
           int WARP_TILE_M, int WARP_TILE_N>
-__global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入矩阵 [M, K]
-                                    const int32_t* __restrict__ qwt,  // 量化权重 [N, K/8] (N-Major)
-                                    const S* __restrict__ scl,        // 缩放因子 [N, G_padded] (N-Major)
-                                    const int32_t* __restrict__ zos,  // 零点 [N, G/8] (N-Major)
-                                    T* __restrict__ C,                // 输出矩阵 [M, N]
+__global__ void awq_gemm_kernel_mma(const T* A,          // Input matrix [M, K]
+                                    const int32_t* qwt,  // Quantized weights [N, K/8] (N-Major)
+                                    const S* scl,        // Scale factors [N, G_padded] (N-Major)
+                                    const int32_t* zos,  // Zero points [N, G/8] (N-Major)
+                                    T* C,                // Output matrix [M, N]
                                     int M, int N, int K, int group_size, int G_PADDED) {
-    // 反量化常量
+    // Dequantization constants
     constexpr int BITS = 4;
     constexpr int PACK_FACTOR = 32 / BITS;
 
@@ -47,7 +46,7 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
     constexpr int SB_SIZE = BN * BK;
     const int lane_id = threadIdx.x % 32;
 
-    // 共享内存
+    // Shared memory
     __shared__ T smemA[K_STAGE * BM * BK];
     __shared__ T smemB[K_STAGE * BN * BK];
     uint32_t smem_a_base_ptr = __cvta_generic_to_shared(smemA);
@@ -55,8 +54,9 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
 
     constexpr int vec_size = sizeof(float4) / sizeof(T);
 
-    // MMA 需要的寄存器
+    // Registers for MMA
     uint32_t RC[WARP_TILE_M][WARP_TILE_N][8];
+
 #pragma unroll
     for (int i = 0; i < WARP_TILE_M; ++i) {
 #pragma unroll
@@ -72,77 +72,68 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
         }
     }
 
-    // 预加载循环
+    // Pre-loading loop with swizzle
     for (int k_load_stage = 0; k_load_stage < (K_STAGE - 1); ++k_load_stage) {
-        // 加载 A 矩阵数据
+        // Load A matrix data with swizzle
         for (int load_idx = threadIdx.x * vec_size; load_idx < BM * BK; load_idx += blockDim.x * vec_size) {
-            int smem_row = load_idx / (BK);
-            int smem_col = load_idx % (BK);
+            int smem_row = load_idx / BK;
+            int smem_col = load_idx % BK;
             int global_row = global_m_base + smem_row;
             int global_col = k_load_stage * BK + smem_col;
 
             if (global_row < M && (global_col + vec_size - 1) < K) {
                 int load_gmem_a_addr = global_row * K + global_col;
-                uint32_t load_smem_a_ptr = smem_a_base_ptr + (load_idx + k_load_stage * SA_SIZE) * sizeof(T);
+                // Apply swizzle to calculate storage position
+                int swizzled_col = swizzle_permuted_A_j(smem_row, smem_col);
+                int swizzled_idx = smem_row * BK + swizzled_col;
+                uint32_t load_smem_a_ptr = smem_a_base_ptr + (swizzled_idx + k_load_stage * SA_SIZE) * sizeof(T);
                 CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
             }
         }
 
-        // 向量化和分组感知
+        // Dequantize B and store to shared memory with swizzle
         for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x) {
             int smem_row = load_idx / (BK / 8);
             int smem_col_base = (load_idx % (BK / 8)) * 8;
             int global_row = global_n_base + smem_row;
             int global_col_base = k_load_stage * BK + smem_col_base;
 
-            // 向量化 AWQ 反量化 - 处理 8 个连续的 K 值
-            int32_t qwt_val = 0;
-            if (global_row < N && global_col_base < K) {
-                qwt_val = qwt[global_row * K_PACKED + global_col_base / PACK_FACTOR];
-            }
-
-            // 预加载缩放因子和零点（group_size=128）
+            int32_t qwt_val = (global_row < N && global_col_base < K)
+                                  ? qwt[global_row * K_PACKED + global_col_base / PACK_FACTOR]
+                                  : 0;
             int base_group_idx = global_col_base / group_size;
             S scale_val = (global_row < N && global_col_base < K) ? scl[global_row * G_PADDED + base_group_idx] : S(0);
-            int32_t zeros_val = 0;
-            if (global_row < N && global_col_base < K) {
-                zeros_val = zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR];
-            }
+            int32_t zeros_val =
+                (global_row < N && global_col_base < K) ? zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR] : 0;
+
+            // MODIFICATION START: Swizzle the base address of the 8-value block
+            int swizzled_col_base = swizzle_permuted_B_j(smem_row, smem_col_base);
+            int swizzled_idx_base = smem_row * BK + swizzled_col_base;
+            // MODIFICATION END
 
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                int smem_col = smem_col_base + i;
                 int global_col = global_col_base + i;
                 T dequantized_val = T(0);
 
                 if (global_row < N && global_col < K) {
-                    // 从打包值中提取权重
-                    int inner_k = global_col % PACK_FACTOR;
-                    int shift_w = inner_k * BITS;
-                    uint32_t w = (qwt_val >> shift_w) & 0xF;
-
-                    // 获取缩放因子和零点（group_size=128）
+                    uint32_t w = (qwt_val >> ((global_col % PACK_FACTOR) * BITS)) & 0xF;
                     int current_group = global_col / group_size;
                     S current_scale =
                         (current_group == base_group_idx) ? scale_val : scl[global_row * G_PADDED + current_group];
-
-                    int inner_g = current_group % PACK_FACTOR;
-                    int shift_z = inner_g * BITS;
-                    uint32_t z = (zeros_val >> shift_z) & 0xF;
-
+                    uint32_t z = (zeros_val >> ((current_group % PACK_FACTOR) * BITS)) & 0xF;
                     dequantized_val = static_cast<T>((static_cast<float>(w) - static_cast<float>(z)) *
                                                      static_cast<float>(current_scale));
                 }
 
-                // 直接存储反量化的结果
-                int base_load_idx = smem_row * BK + smem_col;
-                int store_idx = base_load_idx + k_load_stage * SB_SIZE;
+                // MODIFICATION START: Store values contiguously from the swizzled base
+                int store_idx = swizzled_idx_base + i + k_load_stage * SB_SIZE;
                 smemB[store_idx] = dequantized_val;
+                // MODIFICATION END
             }
         }
         CP_ASYNC_COMMIT_GROUP();
     }
-    // 首先加载K_STAGE-1个阶段，并且等待最早的1个阶段加载完成
     CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
     __syncthreads();
 
@@ -153,93 +144,95 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
         int smem_sel = (k_load_stage + 1) % K_STAGE;
         int smem_sel_next = k_load_stage % K_STAGE;
 
-        // 加载 A 矩阵数据
+        // Load A matrix data with swizzle
         for (int load_idx = threadIdx.x * vec_size; load_idx < BM * BK; load_idx += blockDim.x * vec_size) {
-            int smem_row = load_idx / (BK);
-            int smem_col = load_idx % (BK);
+            int smem_row = load_idx / BK;
+            int smem_col = load_idx % BK;
             int global_row = global_m_base + smem_row;
             int global_col = k_load_base + smem_col;
 
             if (global_row < M && (global_col + vec_size - 1) < K) {
                 int load_gmem_a_addr = global_row * K + global_col;
-                uint32_t load_smem_a_ptr = smem_a_base_ptr + (load_idx + smem_sel_next * SA_SIZE) * sizeof(T);
+                int swizzled_col = swizzle_permuted_A_j(smem_row, smem_col);
+                int swizzled_idx = smem_row * BK + swizzled_col;
+                uint32_t load_smem_a_ptr = smem_a_base_ptr + (swizzled_idx + smem_sel_next * SA_SIZE) * sizeof(T);
                 CP_ASYNC_CG(load_smem_a_ptr, &A[load_gmem_a_addr], 16);
             }
         }
 
-        // 向量化和分组感知
+        // Dequantize B and store to shared memory with swizzle
         for (int load_idx = threadIdx.x; load_idx < BN * BK / 8; load_idx += blockDim.x) {
             int smem_row = load_idx / (BK / 8);
             int smem_col_base = (load_idx % (BK / 8)) * 8;
             int global_row = global_n_base + smem_row;
             int global_col_base = k_load_base + smem_col_base;
 
-            int32_t qwt_val = 0;
-            if (global_row < N && global_col_base < K) {
-                qwt_val = qwt[global_row * K_PACKED + global_col_base / PACK_FACTOR];
-            }
-
+            int32_t qwt_val = (global_row < N && global_col_base < K)
+                                  ? qwt[global_row * K_PACKED + global_col_base / PACK_FACTOR]
+                                  : 0;
             int base_group_idx = global_col_base / group_size;
             S scale_val = (global_row < N && global_col_base < K) ? scl[global_row * G_PADDED + base_group_idx] : S(0);
-            int32_t zeros_val = 0;
-            if (global_row < N && global_col_base < K) {
-                zeros_val = zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR];
-            }
+            int32_t zeros_val =
+                (global_row < N && global_col_base < K) ? zos[global_row * G_PACKED + base_group_idx / PACK_FACTOR] : 0;
+
+            // MODIFICATION START: Swizzle the base address of the 8-value block
+            int swizzled_col_base = swizzle_permuted_B_j(smem_row, smem_col_base);
+            int swizzled_idx_base = smem_row * BK + swizzled_col_base;
+            // MODIFICATION END
 
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                int smem_col = smem_col_base + i;
                 int global_col = global_col_base + i;
                 T dequantized_val = T(0);
 
                 if (global_row < N && global_col < K) {
-                    // 从打包值中提取权重
-                    int inner_k = global_col % PACK_FACTOR;
-                    int shift_w = inner_k * BITS;
-                    uint32_t w = (qwt_val >> shift_w) & 0xF;
-
-                    // 获取缩放因子和零点（group_size=128）
+                    uint32_t w = (qwt_val >> ((global_col % PACK_FACTOR) * BITS)) & 0xF;
                     int current_group = global_col / group_size;
                     S current_scale =
                         (current_group == base_group_idx) ? scale_val : scl[global_row * G_PADDED + current_group];
-
-                    int inner_g = current_group % PACK_FACTOR;
-                    int shift_z = inner_g * BITS;
-                    uint32_t z = (zeros_val >> shift_z) & 0xF;
-
+                    uint32_t z = (zeros_val >> ((current_group % PACK_FACTOR) * BITS)) & 0xF;
                     dequantized_val = static_cast<T>((static_cast<float>(w) - static_cast<float>(z)) *
                                                      static_cast<float>(current_scale));
                 }
 
-                // 直接存储反量化的结果
-                int base_load_idx = smem_row * BK + smem_col;
-                int store_idx = base_load_idx + smem_sel_next * SB_SIZE;
+                // MODIFICATION START: Store values contiguously from the swizzled base
+                int store_idx = swizzled_idx_base + i + smem_sel_next * SB_SIZE;
                 smemB[store_idx] = dequantized_val;
+                // MODIFICATION END
             }
         }
-        // 进入循环后，加载第K_STAGE-1阶段
         CP_ASYNC_COMMIT_GROUP();
 
         for (int TILE_K = 0; TILE_K < BK; TILE_K += WMMA_K) {
+            // Read A matrix data from swizzled layout
             for (int i = 0; i < WARP_TILE_M; ++i) {
                 int warp_smem_a_m = warp_m_id * WMMA_M * WARP_TILE_M + i * WMMA_M;
                 int warp_smem_a_k = TILE_K;
-                T* warp_smem_a_ptr = smemA + warp_smem_a_m * BK + warp_smem_a_k + smem_sel * SA_SIZE;
-                T* lane_smem_a_ptr = warp_smem_a_ptr + (lane_id % 16) * BK + (lane_id / 16) * vec_size;
+                // Calculate logical position
+                int base_row = warp_smem_a_m + (lane_id % 16);
+                int base_col = warp_smem_a_k + (lane_id / 16) * vec_size;
+                // Apply swizzle to find actual storage position
+                int swizzled_col = swizzle_permuted_A_j(base_row, base_col);
+                T* lane_smem_a_ptr = smemA + base_row * BK + swizzled_col + smem_sel * SA_SIZE;
                 uint32_t ptr = __cvta_generic_to_shared(lane_smem_a_ptr);
                 LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], ptr);
             }
+            // Read B matrix data from swizzled layout
             for (int i = 0; i < WARP_TILE_N; ++i) {
                 int warp_smem_b_n = warp_n_id * WMMA_N * WARP_TILE_N + i * WMMA_N;
                 int warp_smem_b_k = TILE_K;
-                T* warp_smem_b_ptr = smemB + warp_smem_b_n * BK + warp_smem_b_k + smem_sel * SB_SIZE;
-
-                // For 16x16x16, need to load 2 groups of 8 columns
-                T* lane_smem_b_ptr1 = warp_smem_b_ptr + (lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                // First 8 columns
+                int base_row1 = warp_smem_b_n + (lane_id % 8);
+                int base_col1 = warp_smem_b_k + (lane_id / 8) * vec_size;
+                int swizzled_col1 = swizzle_permuted_B_j(base_row1, base_col1);
+                T* lane_smem_b_ptr1 = smemB + base_row1 * BK + swizzled_col1 + smem_sel * SB_SIZE;
                 uint32_t ptr1 = __cvta_generic_to_shared(lane_smem_b_ptr1);
                 LDMATRIX_X2(RB[i][0], RB[i][1], ptr1);
-
-                T* lane_smem_b_ptr2 = warp_smem_b_ptr + (8 + lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                // Second 8 columns
+                int base_row2 = warp_smem_b_n + 8 + (lane_id % 8);
+                int base_col2 = warp_smem_b_k + (lane_id / 8) * vec_size;
+                int swizzled_col2 = swizzle_permuted_B_j(base_row2, base_col2);
+                T* lane_smem_b_ptr2 = smemB + base_row2 * BK + swizzled_col2 + smem_sel * SB_SIZE;
                 uint32_t ptr2 = __cvta_generic_to_shared(lane_smem_b_ptr2);
                 LDMATRIX_X2(RB[i][2], RB[i][3], ptr2);
             }
@@ -252,41 +245,42 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
                 }
             }
         }
-        // 等待最早的1个阶段加载完成。同一时刻，确保有K_STAGE-1个阶段在加载。
-        // 因此，下面的代码意味着等待最早一个 stage 加载完成
         CP_ASYNC_WAIT_GROUP(K_STAGE - 2);
         __syncthreads();
     }
 
-    // 等待剩余的阶段加载完成
     if ((K_STAGE - 2) > 0) {
         CP_ASYNC_WAIT_GROUP(0);
         __syncthreads();
     }
 
-    // 计算剩余的阶段
+    // Compute remaining stages
     for (int k_load = 0; k_load < K_STAGE - 1; ++k_load) {
         const int stage_sel = ((K / BK - (K_STAGE - 1) + k_load) % K_STAGE);
         for (int TILE_K = 0; TILE_K < BK; TILE_K += WMMA_K) {
             for (int i = 0; i < WARP_TILE_M; ++i) {
                 int warp_smem_a_m = warp_m_id * WMMA_M * WARP_TILE_M + i * WMMA_M;
                 int warp_smem_a_k = TILE_K;
-                T* warp_smem_a_ptr = smemA + warp_smem_a_m * BK + warp_smem_a_k + stage_sel * SA_SIZE;
-                T* lane_smem_a_ptr = warp_smem_a_ptr + (lane_id % 16) * BK + (lane_id / 16) * vec_size;
+                int base_row = warp_smem_a_m + (lane_id % 16);
+                int base_col = warp_smem_a_k + (lane_id / 16) * vec_size;
+                int swizzled_col = swizzle_permuted_A_j(base_row, base_col);
+                T* lane_smem_a_ptr = smemA + base_row * BK + swizzled_col + stage_sel * SA_SIZE;
                 uint32_t ptr = __cvta_generic_to_shared(lane_smem_a_ptr);
                 LDMATRIX_X4(RA[i][0], RA[i][1], RA[i][2], RA[i][3], ptr);
             }
             for (int i = 0; i < WARP_TILE_N; ++i) {
                 int warp_smem_b_n = warp_n_id * WMMA_N * WARP_TILE_N + i * WMMA_N;
                 int warp_smem_b_k = TILE_K;
-                T* warp_smem_b_ptr = smemB + warp_smem_b_n * BK + warp_smem_b_k + stage_sel * SB_SIZE;
-
-                // 加载 2 组 8 列
-                T* lane_smem_b_ptr1 = warp_smem_b_ptr + (lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                int base_row1 = warp_smem_b_n + (lane_id % 8);
+                int base_col1 = warp_smem_b_k + (lane_id / 8) * vec_size;
+                int swizzled_col1 = swizzle_permuted_B_j(base_row1, base_col1);
+                T* lane_smem_b_ptr1 = smemB + base_row1 * BK + swizzled_col1 + stage_sel * SB_SIZE;
                 uint32_t ptr1 = __cvta_generic_to_shared(lane_smem_b_ptr1);
                 LDMATRIX_X2(RB[i][0], RB[i][1], ptr1);
-
-                T* lane_smem_b_ptr2 = warp_smem_b_ptr + (8 + lane_id % 8) * BK + (lane_id / 8) * vec_size;
+                int base_row2 = warp_smem_b_n + 8 + (lane_id % 8);
+                int base_col2 = warp_smem_b_k + (lane_id / 8) * vec_size;
+                int swizzled_col2 = swizzle_permuted_B_j(base_row2, base_col2);
+                T* lane_smem_b_ptr2 = smemB + base_row2 * BK + swizzled_col2 + stage_sel * SB_SIZE;
                 uint32_t ptr2 = __cvta_generic_to_shared(lane_smem_b_ptr2);
                 LDMATRIX_X2(RB[i][2], RB[i][3], ptr2);
             }
@@ -301,7 +295,7 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
         }
     }
 
-    // 存储结果
+// Store results
 #pragma unroll
     for (int i = 0; i < WARP_TILE_M; ++i) {
 #pragma unroll
@@ -309,28 +303,24 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
             const int tile_m0 = global_m_base + (warp_m_id * WMMA_M * WARP_TILE_M) + i * WMMA_M;
             const int tile_n0 = global_n_base + (warp_n_id * WMMA_N * WARP_TILE_N) + j * WMMA_N;
 
-            int group = lane_id >> 2;  // 0..7  → 行基
-            int tid4 = lane_id & 3;    // 0..3  → 列基
-            int row0 = group;          // 上半行
-            int row1 = group + 8;      // 下半行
+            int group = lane_id >> 2;
+            int tid4 = lane_id & 3;
+            int row0 = group;
+            int row1 = group + 8;
+            int col0 = 2 * tid4;
+            int col1 = 2 * tid4 + 1;
+            int col2 = 2 * tid4 + 8;
+            int col3 = 2 * tid4 + 9;
 
-            // 对于16x16，列偏移需要覆盖16列，分为两组8列
-            int col0 = 2 * tid4;      // 第一组8列中的左列
-            int col1 = 2 * tid4 + 1;  // 第一组8列中的右列
-            int col2 = 2 * tid4 + 8;  // 第二组8列中的左列
-            int col3 = 2 * tid4 + 9;  // 第二组8列中的右列
+            float v0 = __uint_as_float(RC[i][j][0]);
+            float v1 = __uint_as_float(RC[i][j][1]);
+            float v2 = __uint_as_float(RC[i][j][2]);
+            float v3 = __uint_as_float(RC[i][j][3]);
+            float v4 = __uint_as_float(RC[i][j][4]);
+            float v5 = __uint_as_float(RC[i][j][5]);
+            float v6 = __uint_as_float(RC[i][j][6]);
+            float v7 = __uint_as_float(RC[i][j][7]);
 
-            // 3. 取出8个累加结果（FP32）
-            float v0 = __uint_as_float(RC[i][j][0]);  // 对应 (row0, col0)
-            float v1 = __uint_as_float(RC[i][j][1]);  // 对应 (row0, col1)
-            float v2 = __uint_as_float(RC[i][j][2]);  // 对应 (row1, col0)
-            float v3 = __uint_as_float(RC[i][j][3]);  // 对应 (row1, col1)
-            float v4 = __uint_as_float(RC[i][j][4]);  // 对应 (row0, col2)
-            float v5 = __uint_as_float(RC[i][j][5]);  // 对应 (row0, col3)
-            float v6 = __uint_as_float(RC[i][j][6]);  // 对应 (row1, col2)
-            float v7 = __uint_as_float(RC[i][j][7]);  // 对应 (row1, col3)
-
-            // 4. 折算成全局内存下标并越界保护
             if ((tile_m0 + row0) < M && (tile_n0 + col0) < N)
                 C[(tile_m0 + row0) * N + (tile_n0 + col0)] = static_cast<T>(v0);
             if ((tile_m0 + row0) < M && (tile_n0 + col1) < N)
@@ -350,6 +340,7 @@ __global__ void awq_gemm_kernel_mma(const T* __restrict__ A,          // 输入�
         }
     }
 }
+
 // GEMV Kernel (M = 1, N-Major 优化版)
 // 专门为 M = 1 优化，假设权重、scales、zeros 为 N-Major 布局
 // 使用动态共享内存，因其大小依赖运行时的 K 和 G

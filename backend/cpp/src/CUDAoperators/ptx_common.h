@@ -10,128 +10,116 @@
 // gmem -> smem
 #define CP_ASYNC_COMMIT_GROUP() asm volatile("cp.async.commit_group;\n" ::)
 #define CP_ASYNC_WAIT_ALL() asm volatile("cp.async.wait_all;\n" ::)
-#define CP_ASYNC_WAIT_GROUP(n) \
-  asm volatile("cp.async.wait_group %0;\n" ::"n"(n))
+#define CP_ASYNC_WAIT_GROUP(n) asm volatile("cp.async.wait_group %0;\n" ::"n"(n))
 // ca(cache all, L1 + L2): support 4, 8, 16 bytes, cg(cache global, L2): only
 // support 16 bytes.
-#define CP_ASYNC_CA(dst, src, bytes)                                     \
-  asm volatile(                                                          \
-      "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(dst), \
-      "l"(src), "n"(bytes))
-#define CP_ASYNC_CG(dst, src, bytes)                                     \
-  asm volatile(                                                          \
-      "cp.async.cg.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(dst), \
-      "l"(src), "n"(bytes))
+#define CP_ASYNC_CA(dst, src, bytes) \
+    asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(bytes))
+#define CP_ASYNC_CG(dst, src, bytes) \
+    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], %2;\n" ::"r"(dst), "l"(src), "n"(bytes))
 // smem -> gmem: requires sm_90 or higher.
-#define CP_ASYNC_BULK_COMMIT_GROUP() \
-  asm volatile("cp.async.bulk.commit_group;\n" ::)
+#define CP_ASYNC_BULK_COMMIT_GROUP() asm volatile("cp.async.bulk.commit_group;\n" ::)
 #define CP_ASYNC_BULK_WAIT_ALL() asm volatile("cp.async.bulk.wait_all;\n" ::)
-#define CP_ASYNC_BULK_WAIT_GROUP(n) \
-  asm volatile("cp.async.bulk.wait_group %0;\n" ::"n"(n))
-#define CP_ASYNC_BULK(dst, src, bytes)                                    \
-  asm volatile(                                                           \
-      "cp.async.bulk.global.shared::cta.bulk_group.L2::128B [%0], [%1], " \
-      "%2;\n" ::"r"(dst),                                                 \
-      "l"(src), "n"(bytes))
+#define CP_ASYNC_BULK_WAIT_GROUP(n) asm volatile("cp.async.bulk.wait_group %0;\n" ::"n"(n))
+#define CP_ASYNC_BULK(dst, src, bytes)                                      \
+    asm volatile(                                                           \
+        "cp.async.bulk.global.shared::cta.bulk_group.L2::128B [%0], [%1], " \
+        "%2;\n" ::"r"(dst),                                                 \
+        "l"(src), "n"(bytes))
 // ldmatrix
-#define LDMATRIX_X1(R, addr)                                            \
-  asm volatile("ldmatrix.sync.aligned.x1.m8n8.shared.b16 {%0}, [%1];\n" \
-               : "=r"(R)                                                \
-               : "r"(addr))
-#define LDMATRIX_X2(R0, R1, addr)                                           \
-  asm volatile("ldmatrix.sync.aligned.x2.m8n8.shared.b16 {%0, %1}, [%2];\n" \
-               : "=r"(R0), "=r"(R1)                                         \
-               : "r"(addr))
-#define LDMATRIX_X4(R0, R1, R2, R3, addr)                                  \
-  asm volatile(                                                            \
-      "ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n" \
-      : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                             \
-      : "r"(addr))
-#define LDMATRIX_X1_T(R, addr)                                                \
-  asm volatile("ldmatrix.sync.aligned.x1.trans.m8n8.shared.b16 {%0}, [%1];\n" \
-               : "=r"(R)                                                      \
-               : "r"(addr))
-#define LDMATRIX_X2_T(R0, R1, addr)                                      \
-  asm volatile(                                                          \
-      "ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];\n" \
-      : "=r"(R0), "=r"(R1)                                               \
-      : "r"(addr))
-#define LDMATRIX_X4_T(R0, R1, R2, R3, addr)                               \
-  asm volatile(                                                           \
-      "ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, " \
-      "[%4];\n"                                                           \
-      : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                            \
-      : "r"(addr))
+#define LDMATRIX_X1(R, addr) \
+    asm volatile("ldmatrix.sync.aligned.x1.m8n8.shared.b16 {%0}, [%1];\n" : "=r"(R) : "r"(addr))
+#define LDMATRIX_X2(R0, R1, addr) \
+    asm volatile("ldmatrix.sync.aligned.x2.m8n8.shared.b16 {%0, %1}, [%2];\n" : "=r"(R0), "=r"(R1) : "r"(addr))
+#define LDMATRIX_X4(R0, R1, R2, R3, addr)                                             \
+    asm volatile("ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n" \
+                 : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                             \
+                 : "r"(addr))
+#define LDMATRIX_X1_T(R, addr) \
+    asm volatile("ldmatrix.sync.aligned.x1.trans.m8n8.shared.b16 {%0}, [%1];\n" : "=r"(R) : "r"(addr))
+#define LDMATRIX_X2_T(R0, R1, addr) \
+    asm volatile("ldmatrix.sync.aligned.x2.trans.m8n8.shared.b16 {%0, %1}, [%2];\n" : "=r"(R0), "=r"(R1) : "r"(addr))
+#define LDMATRIX_X4_T(R0, R1, R2, R3, addr)                                 \
+    asm volatile(                                                           \
+        "ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, " \
+        "[%4];\n"                                                           \
+        : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                            \
+        : "r"(addr))
 // stmatrix: requires sm_90 or higher.
-#define STMATRIX_X1(addr, R)                                                \
-  asm volatile(                                                             \
-      "stmatrix.sync.aligned.x1.m8n8.shared.b16 [%0], {%1};\n" ::"r"(addr), \
-      "r"(R))
-#define STMATRIX_X2(addr, R0, R1)                                         \
-  asm volatile(                                                           \
-      "stmatrix.sync.aligned.x2.m8n8.shared.b16 [%0], {%1, %2};\n" ::"r"( \
-          addr),                                                          \
-      "r"(R0), "r"(R1))
-#define STMATRIX_X4(addr, R0, R1, R2, R3)                                     \
-  asm volatile(                                                               \
-      "stmatrix.sync.aligned.x4.m8n8.shared.b16 [%0], {%1, %2, %3, %4};\n" :: \
-          "r"(addr),                                                          \
-      "r"(R0), "r"(R1), "r"(R2), "r"(R3))
-#define STMATRIX_X1_T(addr, R)                                              \
-  asm volatile(                                                             \
-      "stmatrix.sync.aligned.x1.trans.m8n8.shared.b16 [%0], {%1};\n" ::"r"( \
-          addr),                                                            \
-      "r"(R))
-#define STMATRIX_X2_T(addr, R0, R1)                                         \
-  asm volatile(                                                             \
-      "stmatrix.sync.aligned.x2.trans.m8n8.shared.b16 [%0], {%1, %2};\n" :: \
-          "r"(addr),                                                        \
-      "r"(R0), "r"(R1))
-#define STMATRIX_X4_T(addr, R0, R1, R2, R3)                              \
-  asm volatile(                                                          \
-      "stmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3, " \
-      "%4};\n" ::"r"(addr),                                              \
-      "r"(R0), "r"(R1), "r"(R2), "r"(R3))
+#define STMATRIX_X1(addr, R) asm volatile("stmatrix.sync.aligned.x1.m8n8.shared.b16 [%0], {%1};\n" ::"r"(addr), "r"(R))
+#define STMATRIX_X2(addr, R0, R1) \
+    asm volatile("stmatrix.sync.aligned.x2.m8n8.shared.b16 [%0], {%1, %2};\n" ::"r"(addr), "r"(R0), "r"(R1))
+#define STMATRIX_X4(addr, R0, R1, R2, R3)                                                                            \
+    asm volatile("stmatrix.sync.aligned.x4.m8n8.shared.b16 [%0], {%1, %2, %3, %4};\n" ::"r"(addr), "r"(R0), "r"(R1), \
+                 "r"(R2), "r"(R3))
+#define STMATRIX_X1_T(addr, R) \
+    asm volatile("stmatrix.sync.aligned.x1.trans.m8n8.shared.b16 [%0], {%1};\n" ::"r"(addr), "r"(R))
+#define STMATRIX_X2_T(addr, R0, R1) \
+    asm volatile("stmatrix.sync.aligned.x2.trans.m8n8.shared.b16 [%0], {%1, %2};\n" ::"r"(addr), "r"(R0), "r"(R1))
+#define STMATRIX_X4_T(addr, R0, R1, R2, R3)                                \
+    asm volatile(                                                          \
+        "stmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3, " \
+        "%4};\n" ::"r"(addr),                                              \
+        "r"(R0), "r"(R1), "r"(R2), "r"(R3))
 // mma m16n8k16
-#define HMMA16816(RD0, RD1, RA0, RA1, RA2, RA3, RB0, RB1, RC0, RC1)           \
-  asm volatile(                                                               \
-      "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, " \
-      "%4, %5}, {%6, %7}, {%8, %9};\n"                                        \
-      : "=r"(RD0), "=r"(RD1)                                                  \
-      : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB0), "r"(RB1), "r"(RC0), \
-        "r"(RC1))
+#define HMMA16816(RD0, RD1, RA0, RA1, RA2, RA3, RB0, RB1, RC0, RC1)             \
+    asm volatile(                                                               \
+        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, " \
+        "%4, %5}, {%6, %7}, {%8, %9};\n"                                        \
+        : "=r"(RD0), "=r"(RD1)                                                  \
+        : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB0), "r"(RB1), "r"(RC0), "r"(RC1))
 
-#define MMA16816_BF16(RD0, RD1, RD2, RD3,                    \
-                      RA0, RA1, RA2, RA3, RB0, RB1,          \
-                      RC0, RC1, RC2, RC3)                    \
-  asm volatile(                                              \
-      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 " \
-      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "              \
-      "{%10,%11,%12,%13};\n"                                 \
-      : "=r"(RD0), "=r"(RD1), "=r"(RD2), "=r"(RD3)           \
-      : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3),              \
-        "r"(RB0), "r"(RB1),                                  \
-        "r"(RC0), "r"(RC1), "r"(RC2), "r"(RC3))
+#define MMA16816_BF16(RD0, RD1, RD2, RD3, RA0, RA1, RA2, RA3, RB0, RB1, RC0, RC1, RC2, RC3) \
+    asm volatile(                                                                           \
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "                              \
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                                           \
+        "{%10,%11,%12,%13};\n"                                                              \
+        : "=r"(RD0), "=r"(RD1), "=r"(RD2), "=r"(RD3)                                        \
+        : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB0), "r"(RB1), "r"(RC0), "r"(RC1), "r"(RC2), "r"(RC3))
 
 // mma m16n16k16 - 使用两个16x8x16指令来实现
-#define MMA161616_BF16(RD0, RD1, RD2, RD3, RD4, RD5, RD6, RD7,         \
-                       RA0, RA1, RA2, RA3, RB0, RB1, RB2, RB3,         \
-                       RC0, RC1, RC2, RC3, RC4, RC5, RC6, RC7)         \
-  do {                                                                 \
-    asm volatile(                                                      \
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "        \
-        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                     \
-        "{%10,%11,%12,%13};\n"                                         \
-        : "=r"(RD0), "=r"(RD1), "=r"(RD2), "=r"(RD3)                  \
-        : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3),                     \
-          "r"(RB0), "r"(RB1),                                          \
-          "r"(RC0), "r"(RC1), "r"(RC2), "r"(RC3));                    \
-    asm volatile(                                                      \
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "        \
-        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                     \
-        "{%10,%11,%12,%13};\n"                                         \
-        : "=r"(RD4), "=r"(RD5), "=r"(RD6), "=r"(RD7)                  \
-        : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3),                     \
-          "r"(RB2), "r"(RB3),                                          \
-          "r"(RC4), "r"(RC5), "r"(RC6), "r"(RC7));                    \
-  } while(0)
+#define MMA161616_BF16(RD0, RD1, RD2, RD3, RD4, RD5, RD6, RD7, RA0, RA1, RA2, RA3, RB0, RB1, RB2, RB3, RC0, RC1, RC2, \
+                       RC3, RC4, RC5, RC6, RC7)                                                                       \
+    do {                                                                                                              \
+        asm volatile(                                                                                                 \
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "                                                    \
+            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                                                                 \
+            "{%10,%11,%12,%13};\n"                                                                                    \
+            : "=r"(RD0), "=r"(RD1), "=r"(RD2), "=r"(RD3)                                                              \
+            : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB0), "r"(RB1), "r"(RC0), "r"(RC1), "r"(RC2), "r"(RC3));    \
+        asm volatile(                                                                                                 \
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "                                                    \
+            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                                                                 \
+            "{%10,%11,%12,%13};\n"                                                                                    \
+            : "=r"(RD4), "=r"(RD5), "=r"(RD6), "=r"(RD7)                                                              \
+            : "r"(RA0), "r"(RA1), "r"(RA2), "r"(RA3), "r"(RB2), "r"(RB3), "r"(RC4), "r"(RC5), "r"(RC6), "r"(RC7));    \
+    } while (0)
+
+// Swizzle helper functions
+template <const int kColStride = 16, const int kStep = 8>
+static __device__ __forceinline__ int swizzle_permuted_j(int i, int j) {
+    // for col_stride > 16, we have to permute it using col major ZigZag order.
+    // e.g, A smem logical layout [Br,d]=[Br,64] -> store layout [4][Br][16].
+    static_assert(kColStride <= 16, "kColStride must <= 16");
+    // swizzle: ((int(j / kStep) ^ int(i / 4)) % int(kColStride / kStep)) * kStep;
+    static_assert(kStep == 4 || kStep == 8, "kStep must be 8 or 4.");
+    static_assert(kColStride % kStep == 0, "kColStride must be multiple of kStep.");
+    if constexpr (kStep == 8) {
+        return (((j >> 3) ^ (i >> 2)) % (kColStride >> 3)) << 3;
+    } else {
+        static_assert(kStep == 4);
+        return (((j >> 2) ^ (i >> 2)) % (kColStride >> 2)) << 2;
+    }
+}
+
+// i: row index; j: col index
+template <const int kMmaAtomK = 16>
+static __device__ __forceinline__ int swizzle_permuted_A_j(int i, int j) {
+    return swizzle_permuted_j<kMmaAtomK, 8>(i, j);
+}
+
+// i: row index; j: col index
+template <const int kMmaAtomK = 16>
+static __device__ __forceinline__ int swizzle_permuted_B_j(int i, int j) {
+    return swizzle_permuted_j<kMmaAtomK, 8>(i, j);
+}
